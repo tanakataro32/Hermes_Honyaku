@@ -6,6 +6,16 @@ param(
 $ErrorActionPreference = "Continue"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+# 画面の出力をすべて記録する (問題の切り分け用)
+try { Start-Transcript -Path (Join-Path $root "compare_transcript.txt") -Force | Out-Null } catch {}
+
+# Windows PowerShell 標準の Web コマンドはプロキシ自動検出で数分固まることがあるので、
+# プロキシを使わない HttpClient を直接使う
+Add-Type -AssemblyName System.Net.Http
+$handler = New-Object System.Net.Http.HttpClientHandler
+$handler.UseProxy = $false
+$client = New-Object System.Net.Http.HttpClient($handler)
+$client.Timeout = [TimeSpan]::FromSeconds(180)
 $exe = Join-Path $root "llama\llama-server.exe"
 $port = 8083
 $resultFile = Join-Path $root "compare_result.txt"
@@ -40,10 +50,20 @@ $sentences = @(
 
 function Invoke-Json($url, $bodyObj) {
     $json = $bodyObj | ConvertTo-Json -Depth 8 -Compress
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-    $resp = Invoke-WebRequest -Uri $url -Method Post -ContentType "application/json; charset=utf-8" -Body $bytes -TimeoutSec 180 -UseBasicParsing
-    $text = [System.Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray())
+    $content = New-Object System.Net.Http.StringContent($json, [System.Text.Encoding]::UTF8, "application/json")
+    $resp = $client.PostAsync($url, $content).GetAwaiter().GetResult()
+    $bytes = $resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    if (-not $resp.IsSuccessStatusCode) { throw ("HTTP {0}: {1}" -f [int]$resp.StatusCode, $text) }
     return $text | ConvertFrom-Json
+}
+
+function Test-Health($url) {
+    try {
+        $cts = New-Object System.Threading.CancellationTokenSource(3000)
+        $resp = $client.GetAsync($url, $cts.Token).GetAwaiter().GetResult()
+        return $resp.IsSuccessStatusCode
+    } catch { return $false }
 }
 
 if (-not (Test-Path $exe)) { Write-Host "llama-server.exe が見つかりません: $exe"; exit 1 }
@@ -65,7 +85,7 @@ foreach ($m in $Models) {
     for ($i = 0; $i -lt 600; $i++) {
         Start-Sleep -Seconds 2
         if ($p.HasExited) { break }
-        try { $h = Invoke-WebRequest -Uri "http://127.0.0.1:$port/health" -TimeoutSec 3 -UseBasicParsing; if ($h.StatusCode -eq 200) { $ok = $true; break } } catch {}
+        if (Test-Health "http://127.0.0.1:$port/health") { $ok = $true; break }
     }
     if (-not $ok) {
         Write-Host "起動に失敗しました。$log の末尾:" -ForegroundColor Red
@@ -107,3 +127,4 @@ foreach ($m in $Models) {
 }
 Write-Host ""
 Write-Host "結果を $resultFile に保存しました。" -ForegroundColor Green
+try { Stop-Transcript | Out-Null } catch {}
