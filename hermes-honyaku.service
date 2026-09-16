@@ -1,0 +1,19 @@
+# /etc/systemd/system/hermes-honyaku.service
+# sudo cp hermes-honyaku.service /etc/systemd/system/
+# sudo systemctl daemon-reload && sudo systemctl enable --now hermes-honyaku
+[Unit]
+Description=Hermes Honyaku (reasoning proxy + translator + viewer)
+After=network-online.target llama-server.service
+Wants=network-online.target
+
+[Service]
+User=masa
+Group=masa
+WorkingDirectory=/home/masa/hermes_honyaku
+ExecStart=/usr/bin/python3 /home/masa/hermes_honyaku/hermes_honyaku.py /home/masa/hermes_honyaku/config.ini
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
