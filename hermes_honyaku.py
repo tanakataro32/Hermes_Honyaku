@@ -434,6 +434,9 @@ class Turn:
             self._submit(s)
 
     def _submit(self, text):
+        if self.task:
+            # 背景タスク (タイトル生成・タグ生成など) は翻訳キューに入れない
+            return
         with self.lock:
             self.seg_count += 1
             seg_id = self.seg_count
@@ -1042,8 +1045,9 @@ main{padding:12px 16px 40vh}
 .turn h3 .src{background:var(--acc);color:#0f1418;border-radius:3px;padding:0 6px;font-weight:700}
 .turn h3 .tk{background:var(--line);color:var(--muted);border-radius:3px;padding:0 6px}
 .turn.hidden{display:none}
+.segs .note{color:var(--muted);font-size:12.5px}
 header select{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:2px 6px;font:inherit;font-size:13px}
-.cols{display:grid;grid-template-columns:1fr 1fr;gap:0}
+.cols{display:grid;grid-template-columns:1fr 3fr;gap:0}
 @media (max-width:900px){.cols{grid-template-columns:1fr}}
 .col{padding:10px 12px;min-width:0}
 .col+.col{border-left:1px solid var(--line)}
@@ -1140,6 +1144,7 @@ function onTurnStart(ev){
    '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="tools"></div><div class="ans"></div></div></div>';
   if(newest.checked)main.insertBefore(el,main.firstElementChild.nextSibling);else main.appendChild(el);
   turns[ev.turn]={el,think:el.querySelector('.think'),ans:el.querySelector('.ans'),tools:el.querySelector('.tools'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{},ansRaw:'',ansTimer:null};
+  if(ev.task)turns[ev.turn].segs.innerHTML='<div class="note">背景タスク (タイトル生成・タグ生成など) のため翻訳は省略</div>';
   applyFilters();
   // 古いターンは間引く
   const keys=Object.keys(turns).map(Number).sort((a,b)=>a-b);
