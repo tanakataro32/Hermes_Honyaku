@@ -25,13 +25,37 @@ Hermes Agent がローカル LLM (llama-server) で考えている内容 (reason
 3. `windows\list_devices.bat` を実行し、`Vulkan0` / `Vulkan1` のどちらが RX 560 かを確認します。
    内蔵 GPU の側が選ばれるのを防ぐため、`windows\start_translator.bat` の `set DEVICE=` に RX 560 の番号 (例 `Vulkan0`) を書きます。
 4. `windows\firewall_allow.bat` を「管理者として実行」し、受信ポート 8082 を許可します。
-5. `windows\start_translator.bat` を実行します。初回は Hugging Face から翻訳モデル (Qwen3-1.7B Q4_K_M、約 1.1GB) を自動ダウンロードします。
+5. `windows\start_translator.bat` を実行します。初回は Hugging Face から翻訳モデル (既定は Qwen3-1.7B Q4_K_M、約 1.1GB) を自動ダウンロードします。
    `server is listening on http://0.0.0.0:8082` が出れば起動完了です。このウィンドウは開いたままにします。
+   モデルの切り替えは「1b. 翻訳モデルを替える」を参照。
 6. `windows\test_translator.bat` で 1 文翻訳して、日本語が返ることを確認します。
 7. ルーターの DHCP 予約で Windows 機の IP を `192.168.1.8` に固定します (変わると llmsv 側の設定と食い違うため)。
 
 VRAM の内訳の目安: モデル本体 約 1.1GB + KV キャッシュ (4096 トークン・q8_0) 約 0.25GB + 作業領域。2GB にぎりぎり収まる構成です。
 起動時にメモリ確保で落ちる場合は `start_translator.bat` の `-c 4096` を `-c 3072` に下げてください。
+
+## 1b. 翻訳モデルを替える
+
+2GB の GPU に収まる候補を `start_translator.bat` に登録してあります。引数で選べます (PowerShell やコマンドプロンプトから)。
+
+```
+start_translator.bat tinyswallow
+```
+
+| 名前 | モデル | サイズ (Q4_K_M) | 特徴 |
+|---|---|---|---|
+| `qwen3` (既定) | Qwen3-1.7B (unsloth) | 約 1.1GB | 汎用 |
+| `tinyswallow` | TinySwallow-1.5B-Instruct (Sakana AI / bartowski 版) | 約 1.0GB | 日本語特化 |
+| `gemma3` | Gemma 3 1B it (Google / unsloth 版) | 約 0.8GB | 多言語、指示に忠実 |
+| `sarashina` | Sarashina2.2-1B-instruct (SB Intuitions / mmnga 版) | 約 0.9GB | 日本語ネイティブ |
+
+ダブルクリックで起動する既定を変えるには、`start_translator.bat` の `set DEFAULT_MODEL=qwen3` を書き換えます。
+表にない Hugging Face の GGUF は `start_translator.bat unsloth/xxx-GGUF:Q4_K_M` のように「リポジトリ:量子化」で、手元のファイルは `.gguf` のパスで指定できます。
+llmsv 側の設定 (`config.ini` の `model = honyaku`) はどのモデルでも同じなので変更不要です。
+
+**どれが良いか比べる**: `compare_models.bat` を実行すると、登録済みの 4 モデルを順に起動し、同じ英文 3 つを同じ指示で翻訳して、訳文と速度を画面と `compare_result.txt` に出します
+(初回は各モデルのダウンロードが入るので 10 分ほどかかります)。`compare_models.bat tinyswallow gemma3` のように対象を絞ることもできます。
+実行前に `start_translator.bat` の窓は閉じておいてください (GPU メモリを取り合うため)。
 
 ## 2. llmsv 側 (中継サーバー) の準備
 
