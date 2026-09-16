@@ -427,11 +427,25 @@ def looks_japanese(text):
     return ja / len(letters) > 0.3
 
 
+# 小型モデルは英語入力に英語で返しがちなので、指示は英語で強く書き、日本語の応答例 (few-shot) を付ける
 SYSTEM_PROMPT = (
-    "あなたは英日翻訳の専門家です。ユーザーが送る英文は、AIエージェントが作業中に書いた思考メモです。"
-    "自然で読みやすい日本語に翻訳してください。訳文だけを出力し、前置き・説明・原文の繰り返しは書かないでください。"
-    "コード、コマンド、ファイルパス、URL、変数名、固有名詞はそのまま残してください。"
+    "You are a professional English-to-Japanese translator. "
+    "The input is an AI agent's internal reasoning (its private notes while working). "
+    "Translate it into natural Japanese written as a first-person monologue "
+    "(e.g. 「〜しよう」「〜だ」「〜かもしれない」「〜する必要がある」). "
+    "Output ONLY the Japanese translation. Never reply in English. Never add explanations, notes, or the original text. "
+    "Keep code, shell commands, file paths, URLs, and identifiers exactly as they are. "
+    "If the input is already Japanese, output it unchanged."
 )
+FEW_SHOT = [
+    {"role": "user", "content": "Let me check the config first. The file may be large, so I should be careful."},
+    {"role": "assistant", "content": "まず設定を確認しよう。ファイルが大きいかもしれないので注意が必要だ。"},
+    {"role": "user", "content": "The user wants me to check disk usage. I'll run `df -h` and then look at /var/log for errors."},
+    {"role": "assistant", "content": "ユーザーはディスク使用量の確認を求めている。`df -h` を実行してから、/var/log のエラーを見よう。"},
+    {"role": "user", "content": "Since they're independent, I can batch these calls."},
+    {"role": "assistant", "content": "これらは互いに独立しているので、まとめて呼び出せる。"},
+]
+RETRY_PREFIX = "Translate the following into Japanese. Reply with Japanese text only.\n\n"
 
 
 class Translator:
@@ -497,7 +511,7 @@ class Translator:
                 ja, how = self.translate(text)
                 self._set_status("ok")
                 ev = {"type": "ja", "turn": turn, "seg": seg_id, "text": ja, "how": how,
-                      "ok": True, "sec": round(time.time() - t0, 2)}
+                      "ok": how != "en", "sec": round(time.time() - t0, 2)}
             except Exception as e:
                 log.warning("translate failed: %s", e)
                 self._set_status("error", str(e)[:200])
@@ -509,22 +523,33 @@ class Translator:
 
     # ---- エンジン ----
     def translate(self, text):
+        """(訳文, how) を返す。how が "en" のときは日本語にできなかった (原文のまま/英語のまま)"""
         if self.engine == "none":
             return text, "none"
         if looks_japanese(text):
             return text, "skip"
         if self.engine == "deepl":
             return self._deepl(text), "deepl"
-        return self._openai(text), "openai"
+        # コードやパスだけの行は翻訳しない
+        if not re.search(r"[A-Za-z]{3,}", text):
+            return text, "skip"
+        out = self._openai(text)
+        if looks_japanese(out):
+            return out, "openai"
+        # 英語のまま返ってきたら、指示を前置きして温度 0 でもう一度
+        log.info("translator replied in English, retrying: %r", out[:60])
+        out2 = self._openai(RETRY_PREFIX + text, temperature=0.0)
+        if looks_japanese(out2):
+            return out2, "openai-retry"
+        return out2 or out, "en"
 
-    def _openai(self, text):
+    def _openai(self, text, temperature=None):
         payload = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + FEW_SHOT + [
                 {"role": "user", "content": text},
             ],
-            "temperature": self.temperature,
+            "temperature": self.temperature if temperature is None else temperature,
             "max_tokens": 96 + len(text) * 2,
             "stream": False,
             # Qwen3 系: 翻訳モデル自身の思考を止める (対応していないサーバーでは無視される)
@@ -927,6 +952,7 @@ body.noans .answer{display:none}
 .seg.done .src{display:none}
 body.showsrc .seg.done .src{display:block}
 .seg.bad{border-left-color:var(--bad)}.seg.bad .ja{color:var(--bad)}
+.seg.untranslated{border-left-color:var(--warn)}.seg.untranslated .ja{color:var(--en)}
 .empty{color:var(--muted);padding:40px;text-align:center}
 #tobottom{position:fixed;right:20px;bottom:20px;z-index:6;display:none;background:var(--acc);color:#0f1418;border:none;border-radius:20px;padding:8px 16px;font:600 13px/1 inherit;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.4)}
 #tobottom.show{display:block}
@@ -995,8 +1021,9 @@ function onSeg(ev){const t=turn(ev.turn);if(!t)return;
     t.segEls[ev.seg]=s;}
   s.querySelector('.src').textContent=ev.src;scroll()}
 function onJa(ev){const t=turn(ev.turn);if(!t)return;let s=t.segEls[ev.seg];if(!s){onSeg({turn:ev.turn,seg:ev.seg,src:''});s=t.segEls[ev.seg]}
-  s.querySelector('.ja').textContent=ev.text;s.classList.remove('pending');s.classList.add(ev.ok?'done':'bad');
-  if(ev.how==='skip')s.querySelector('.src').style.display='none';scroll()}
+  s.querySelector('.ja').textContent=ev.text;s.classList.remove('pending');
+  s.classList.add(ev.how==='en'?'untranslated':ev.ok?'done':'bad');
+  if(ev.how==='skip'||ev.how==='en')s.querySelector('.src').style.display='none';scroll()}
 function onTurnEnd(ev){const t=turn(ev.turn);if(!t)return;t.think.classList.remove('live');
   t.st.textContent=(ev.reason==='stop'||ev.reason==='tool_calls'||ev.reason==='length'?'完了':ev.reason)+' · '+ev.elapsed+'s · '+ev.think_chars+'字 · '+ev.segments+'文';
   if(!t.think.textContent.trim())t.think.textContent='(思考なし)'}
