@@ -57,18 +57,23 @@ class Config:
             "ui": {"listen_host": "0.0.0.0", "listen_port": "8765",
                    "replay_turns": "5", "show_answer": "true"},
             "translator": {"engine": "openai", "url": "http://192.168.1.8:8082/v1",
-                           "model": "honyaku", "api_key": "", "workers": "2",
+                           "model": "honyaku", "api_key": "", "workers": "3",
                            "timeout": "120", "temperature": "0.2",
                            "deepl_key": "", "deepl_url": "https://api-free.deepl.com/v2/translate"},
-            "segment": {"max_chars": "400", "min_chars": "24", "idle_flush_sec": "2.0"},
+            "segment": {"max_chars": "500", "min_chars": "120", "idle_flush_sec": "2.0"},
             "log": {"dir": "logs", "level": "INFO"},
             "sources": {"127.0.0.1": "Hermes", "172.": "Open WebUI", "default": ""},
         })
+        self.path = None
+        self.local_path = None
         if path and os.path.exists(path):
             cp.read(path, encoding="utf-8")
             self.path = path
-        else:
-            self.path = None
+            # 同じフォルダの config.local.ini があれば上書き (git 管理外。個人の設定はこちらに書く)
+            local = os.path.join(os.path.dirname(os.path.abspath(path)), "config.local.ini")
+            if os.path.exists(local):
+                cp.read(local, encoding="utf-8")
+                self.local_path = local
         self.cp = cp
 
     def get(self, sec, key):
@@ -301,7 +306,13 @@ class Segmenter:
             cut = None
             for m in BOUNDARY_RE.finditer(self.buf):
                 is_newline = "\n" in m.group(0)
-                if not is_newline:
+                is_paragraph = m.group(0).count("\n") >= 2
+                if is_newline:
+                    # 段落の切れ目は常に区切る。単独の改行は min_chars 以上たまっていれば区切る
+                    # (見出しや短い箇条書きは次の行とまとめて翻訳に回す)
+                    if not is_paragraph and m.start() < self.min_chars:
+                        continue
+                else:
                     # 区切りの手前が短すぎる / 番号や略語の直後では切らない
                     if m.start() < self.min_chars or bad_period_boundary(self.buf[:m.start()]):
                         continue
@@ -585,7 +596,7 @@ class Translator:
                 ja, how = self.translate(text)
                 self._set_status("ok")
                 ev = {"type": "ja", "turn": turn, "seg": seg_id, "text": ja, "how": how,
-                      "ok": how != "en", "sec": round(time.time() - t0, 2)}
+                      "ok": how not in ("en", "suspect"), "sec": round(time.time() - t0, 2)}
             except Exception as e:
                 log.warning("translate failed: %s", e)
                 self._set_status("error", str(e)[:200])
@@ -604,18 +615,26 @@ class Translator:
             return text, "skip"
         if self.engine == "deepl":
             return self._deepl(text), "deepl"
-        # コードやパスだけの行は翻訳しない
-        if not re.search(r"[A-Za-z]{3,}", text):
+        # コードやパスだけの行、1〜2 語の断片 (見出しなど) は翻訳しない (小型モデルが作文してしまうため)
+        words = re.findall(r"[A-Za-z]{2,}", text)
+        if len(words) < 3:
             return text, "skip"
         out = self._openai(text)
-        if looks_japanese(out):
+        if looks_japanese(out) and not self._too_long(text, out):
             return out, "openai"
-        # 英語のまま返ってきたら、指示を前置きして温度 0 でもう一度
-        log.info("translator replied in English, retrying: %r", out[:60])
+        # 英語のまま / 原文より極端に長い (例文の内容を作文している) → 指示を前置きして温度 0 でもう一度
+        log.info("translator reply rejected (%s), retrying: %r", "long" if looks_japanese(out) else "english", out[:60])
         out2 = self._openai(RETRY_PREFIX + text, temperature=0.0)
         if looks_japanese(out2):
+            if self._too_long(text, out2):
+                return out2, "suspect"
             return out2, "openai-retry"
         return out2 or out, "en"
+
+    @staticmethod
+    def _too_long(src, out):
+        """訳文が原文に比べて長すぎるか (日本語訳は英文の 0.5〜1.3 倍程度に収まるのが普通)"""
+        return len(out) > len(src) * 2.2 + 40
 
     def _openai(self, text, temperature=None):
         payload = {
@@ -1090,7 +1109,7 @@ body.noans .ans{display:none}
 .seg.done{border-left-color:var(--acc)}
 .seg.done .src{display:none}
 body.showsrc .seg.done .src{display:block}
-.seg.bad{border-left-color:var(--bad)}.seg.bad .ja{color:var(--bad)}
+.seg.bad{border-left-color:var(--bad)}.seg.bad .ja{color:var(--bad)}.seg.bad .src{display:block!important}
 .seg.untranslated{border-left-color:var(--warn)}.seg.untranslated .ja{color:var(--en)}
 .empty{color:var(--muted);padding:40px;text-align:center}
 #tobottom{position:fixed;right:20px;bottom:20px;z-index:6;display:none;background:var(--acc);color:#0f1418;border:none;border-radius:20px;padding:8px 16px;font:600 13px/1 inherit;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.4)}
@@ -1202,6 +1221,7 @@ function onSeg(ev){const t=turn(ev.turn);if(!t)return;
 function onJa(ev){const t=turn(ev.turn);if(!t)return;let s=t.segEls[ev.seg];if(!s){onSeg({turn:ev.turn,seg:ev.seg,src:''});s=t.segEls[ev.seg]}
   s.querySelector('.ja').textContent=ev.text;s.classList.remove('pending');
   s.classList.add(ev.how==='en'?'untranslated':ev.ok?'done':'bad');
+  if(ev.how==='suspect')s.title='訳文が原文より極端に長いため、翻訳モデルが作文している可能性があります (原文を併記)';
   if(ev.how==='skip'||ev.how==='en')s.querySelector('.src').style.display='none';scroll()}
 function onTurnEnd(ev){const t=turn(ev.turn);if(!t)return;t.think.classList.remove('live');
   t.st.textContent=(ev.reason==='stop'||ev.reason==='tool_calls'||ev.reason==='length'?'完了':ev.reason)+' · '+ev.elapsed+'s · '+ev.think_chars+'字 · '+ev.segments+'文';
@@ -1334,7 +1354,7 @@ def main():
     logging.basicConfig(level=getattr(logging, cfg.get("log", "level").upper(), logging.INFO),
                         format="%(asctime)s %(levelname)s %(message)s")
     if cfg.path:
-        log.info("config: %s", cfg.path)
+        log.info("config: %s%s", cfg.path, (" + " + cfg.local_path) if cfg.local_path else "")
     else:
         log.warning("config.ini が見つからないので既定値で起動します (%s)", path)
 

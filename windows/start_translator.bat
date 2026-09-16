@@ -29,6 +29,10 @@ set DEFAULT_MODEL=qwen3
 rem ---- GPU 指定。空欄なら自動選択。例: set DEVICE=Vulkan1
 set DEVICE=
 
+rem ---- 個人の設定は local_settings.bat に書く (このファイルを更新しても消えない)
+rem      例: set DEVICE=Vulkan1 / set DEFAULT_MODEL=tinyswallow
+if exist "%~dp0local_settings.bat" call "%~dp0local_settings.bat"
+
 rem ------------------------------------------------------------
 set MODEL=%~1
 if "%MODEL%"=="" set MODEL=%DEFAULT_MODEL%
@@ -62,7 +66,7 @@ echo モデル: %MODEL%  (%MODEL_ARGS%)
 echo 翻訳サーバーを起動します: http://0.0.0.0:%PORT%/v1  (Ctrl+C で終了)
 "%LLAMA_DIR%\llama-server.exe" %MODEL_ARGS% %DEVICE_ARGS% ^
   -ngl 99 ^
-  -c 4096 --parallel 2 ^
+  -c 6144 --parallel 3 ^
   -fa on -ctk q8_0 -ctv q8_0 ^
   --jinja ^
   --reasoning-budget 0 ^

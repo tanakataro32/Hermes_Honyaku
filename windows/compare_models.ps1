@@ -22,8 +22,12 @@ $resultFile = Join-Path $root "compare_result.txt"
 
 # start_translator.bat の DEVICE と同じ値を使う (空欄なら自動)
 $device = ""
-$bat = Get-Content (Join-Path $root "start_translator.bat") -Encoding UTF8
-foreach ($line in $bat) { if ($line -match '^set DEVICE=(\S+)') { $device = $Matches[1] } }
+foreach ($name in @("start_translator.bat", "local_settings.bat")) {
+    $f = Join-Path $root $name
+    if (Test-Path $f) {
+        foreach ($line in (Get-Content $f -Encoding UTF8)) { if ($line -match '^set DEVICE=(\S+)') { $device = $Matches[1] } }
+    }
+}
 
 $map = @{
     qwen3       = "unsloth/Qwen3-1.7B-GGUF:Q4_K_M"

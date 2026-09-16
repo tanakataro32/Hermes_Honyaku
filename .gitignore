@@ -4,3 +4,7 @@ __pycache__/
 config.local.ini
 windows/llama/
 windows/models/
+windows/local_settings.bat
+windows/compare_*.log
+windows/compare_result.txt
+windows/compare_transcript.txt

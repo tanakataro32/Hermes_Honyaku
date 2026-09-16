@@ -31,8 +31,8 @@ Hermes Agent がローカル LLM (llama-server) で考えている内容 (reason
 6. `windows\test_translator.bat` で 1 文翻訳して、日本語が返ることを確認します。
 7. ルーターの DHCP 予約で Windows 機の IP を `192.168.1.8` に固定します (変わると llmsv 側の設定と食い違うため)。
 
-VRAM の内訳の目安: モデル本体 約 1.1GB + KV キャッシュ (4096 トークン・q8_0) 約 0.25GB + 作業領域。2GB にぎりぎり収まる構成です。
-起動時にメモリ確保で落ちる場合は `start_translator.bat` の `-c 4096` を `-c 3072` に下げてください。
+VRAM の内訳の目安: モデル本体 約 1.0GB + KV キャッシュ (6144 トークン・3 スロット・q8_0) 約 0.35GB + 作業領域。2GB にぎりぎり収まる構成です。
+起動時にメモリ確保で落ちる場合は `start_translator.bat` の `-c 6144 --parallel 3` を `-c 4096 --parallel 2` に下げ、`config.local.ini` の `workers` も 2 にしてください。
 
 ## 1b. 翻訳モデルを替える
 
@@ -56,6 +56,19 @@ llmsv 側の設定 (`config.ini` の `model = honyaku`) はどのモデルでも
 **どれが良いか比べる**: `compare_models.bat` を実行すると、登録済みの 4 モデルを順に起動し、同じ英文 3 つを同じ指示で翻訳して、訳文と速度を画面と `compare_result.txt` に出します
 (初回は各モデルのダウンロードが入るので 10 分ほどかかります)。`compare_models.bat tinyswallow gemma3` のように対象を絞ることもできます。
 実行前に `start_translator.bat` の窓は閉じておいてください (GPU メモリを取り合うため)。
+
+## 1c. 自分の環境の値は local 設定に書く
+
+更新 (`git pull` や ZIP の再ダウンロード) で消えないように、環境ごとの値は別ファイルに書きます。
+
+- **llmsv**: `config.local.ini` (git 管理外)。`config.ini` と同じ書式で、変えたい項目だけ書く。例:
+
+  ```ini
+  [proxy]
+  listen_host = 0.0.0.0
+  ```
+
+- **Windows**: `windows\local_settings.bat` (git 管理外)。`local_settings.example.bat` をコピーして `DEVICE` と `DEFAULT_MODEL` を書く。
 
 ## 2. llmsv 側 (中継サーバー) の準備
 
@@ -153,8 +166,8 @@ Hermes が会話タイトルを付けるための要求も同じ扱いです。
 | ui | listen_port | ブラウザ表示のポート (既定 8765) |
 | translator | engine | `openai` (Windows 機の llama-server など OpenAI 互換) / `deepl` / `none` |
 | translator | url / model | 翻訳サーバーの URL とモデル名 (`honyaku` は start_translator.bat の `--alias`) |
-| translator | workers | 同時に翻訳する文の数。翻訳側の `--parallel` と同じ値にする |
-| segment | max_chars / min_chars | 文の最大長・区切らない最小長 |
+| translator | workers | 同時に翻訳する区切りの数 (既定 3)。翻訳側の `--parallel` と同じ値にする |
+| segment | max_chars / min_chars | 1 区切りの最大長 / この長さがたまるまで次の文とまとめる (短い断片を渡すと小型モデルが作文しやすいため) |
 | segment | idle_flush_sec | 思考がこの秒数止まったら、区切りが無くても溜まった分を翻訳に回す |
 | log | dir | 原文と訳文を JSONL で残すフォルダ (日付ごと 1 ファイル)。空欄で無効 |
 | sources | (IP の前方一致) | 接続元 IP からターンの発信元ラベルを決める。`127.0.0.1 = Hermes`、`172. = Open WebUI` など |
