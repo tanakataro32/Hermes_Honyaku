@@ -765,14 +765,21 @@ TASK_MARKERS = ("### Task:", "Your task is to reflect the speaker's likely facia
 
 
 def is_task_request(req):
-    """Open WebUI などがバックグラウンドで送る要求 (タイトル生成・タグ生成・フォローアップ提案) か"""
+    """Open WebUI などがバックグラウンドで送る要求 (タイトル生成・タグ生成・フォローアップ提案) か。
+    背景タスクは「最後の user メッセージ」に指示文が入っているので、それだけを見る
+    (ツール結果や会話履歴の本文は見ない。検索結果などに同じ文字列が含まれても誤判定しないため)"""
     try:
-        for m in req.get("messages") or []:
-            c = m.get("content")
-            if isinstance(c, list):
-                c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
-            if isinstance(c, str) and any(mk in c[:400] for mk in TASK_MARKERS):
-                return True
+        msgs = req.get("messages") or []
+        if not msgs:
+            return False
+        m = msgs[-1]
+        if m.get("role") != "user":
+            return False
+        c = m.get("content")
+        if isinstance(c, list):
+            c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+        if isinstance(c, str) and any(mk in c[:400] for mk in TASK_MARKERS):
+            return True
     except Exception:
         pass
     return False
@@ -1139,7 +1146,7 @@ function turn(n){return turns[n]}
 function onTurnStart(ev){
   empty.style.display='none';
   const el=document.createElement('section');el.className='turn'+(ev.task?' task':'');el.id='t'+ev.turn;el.dataset.source=ev.source||'';addSource(ev.source);
-  el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span>'+fmt(ev.ts)+'</span>'+(ev.source?'<span class="src">'+esc(ev.source)+'</span>':'')+(ev.task?'<span class="tk">背景タスク</span>':'')+'<span>'+esc(ev.model||'')+'</span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
+  el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span>'+fmt(ev.ts)+'</span>'+(ev.source?'<span class="src">'+esc(ev.source)+'</span>':'')+(ev.task?'<span class="tk" title="最後のメッセージが ### Task: で始まる要求 (タイトル生成・タグ生成など)">背景タスク</span>':'')+'<span>'+esc(ev.model||'')+'</span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
    '<div class="cols"><div class="col"><div class="cap">Thinking (原文)</div><div class="think live"></div></div>'+
    '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="tools"></div><div class="ans"></div></div></div>';
   if(newest.checked)main.insertBefore(el,main.firstElementChild.nextSibling);else main.appendChild(el);
