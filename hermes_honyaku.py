@@ -415,16 +415,26 @@ class Turn:
 # --------------------------------------------------------------------------
 # 翻訳
 # --------------------------------------------------------------------------
-JA_RE = re.compile(r"[぀-ヿ一-鿿]")
+JA_RE = re.compile("[\u3040-\u30ff\u4e00-\u9fff]")
+KANA_RE = re.compile("[\u3040-\u30ff]")
 THINK_STRIP_RE = re.compile(r"<think>.*?</think>\s*", re.S)
+CODEISH_RE = re.compile(r"`[^`]*`|https?://\S+|\S*[/\\._\-]\S*")
 
 
 def looks_japanese(text):
-    letters = [c for c in text if c.isalpha()]
+    """日本語の文とみなせるか。コード・パス・URL は判定から除く"""
+    plain = CODEISH_RE.sub(" ", text)
+    letters = [c for c in plain if c.isalpha()]
     if not letters:
         return False
     ja = sum(1 for c in letters if JA_RE.match(c))
-    return ja / len(letters) > 0.3
+    if ja == 0:
+        return False
+    ratio = ja / len(letters)
+    # かなを含み、かつ日本語がそれなりの割合を占めていれば日本語の文とみなす
+    if KANA_RE.search(plain) and ratio > 0.15:
+        return True
+    return ratio > 0.3
 
 
 # 小型モデルは英語入力に英語で返しがちなので、指示は英語で強く書き、日本語の応答例 (few-shot) を付ける
