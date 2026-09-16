@@ -643,6 +643,16 @@ def summarize_context(req):
             c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
         if not isinstance(c, str):
             c = ""
+        if role == "tool" and c.lstrip().startswith("{"):
+            try:
+                j = json.loads(c)
+                if isinstance(j, dict):
+                    for k in ("output", "result", "content", "error", "stdout"):
+                        if isinstance(j.get(k), str):
+                            c = j[k]
+                            break
+            except Exception:
+                pass
         c = re.sub(r"\s+", " ", c).strip()
         if role == "tool":
             name = m.get("name") or ""
@@ -918,6 +928,8 @@ body.noans .answer{display:none}
 body.showsrc .seg.done .src{display:block}
 .seg.bad{border-left-color:var(--bad)}.seg.bad .ja{color:var(--bad)}
 .empty{color:var(--muted);padding:40px;text-align:center}
+#tobottom{position:fixed;right:20px;bottom:20px;z-index:6;display:none;background:var(--acc);color:#0f1418;border:none;border-radius:20px;padding:8px 16px;font:600 13px/1 inherit;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.4)}
+#tobottom.show{display:block}
 </style></head><body>
 <header>
  <b>Hermes Honyaku</b>
@@ -925,22 +937,38 @@ body.showsrc .seg.done .src{display:block}
  <span title="翻訳サーバーの状態"><span id="tdot" class="dot"></span>翻訳: <span id="ttext">-</span> <span id="tq"></span></span>
  <span class="sp"></span>
  <label><input type="checkbox" id="auto" checked> 自動スクロール</label>
+ <label><input type="checkbox" id="newest"> 新しいターンを上に</label>
  <label><input type="checkbox" id="showsrc"> 訳文の下に原文も表示</label>
  <label><input type="checkbox" id="showans" checked> 回答本文も表示</label>
  <label><button id="clear" style="background:none;border:1px solid var(--line);color:var(--muted);border-radius:4px;padding:2px 8px;cursor:pointer">画面を消去</button></label>
 </header>
+<button id="tobottom" type="button">↓ 最新へ (自動スクロール再開)</button>
 <main id="main"><div class="empty" id="empty">Hermes Agent からの要求を待っています。<br>~/.hermes/config.yaml の model.base_url を中継サーバーに向けてください。</div></main>
 <script>
 (function(){
 const main=document.getElementById('main'), empty=document.getElementById('empty');
 const turns={};
-const auto=document.getElementById('auto');
-document.getElementById('showsrc').onchange=e=>document.body.classList.toggle('showsrc',e.target.checked);
-document.getElementById('showans').onchange=e=>document.body.classList.toggle('noans',!e.target.checked);
+const auto=document.getElementById('auto'), newest=document.getElementById('newest'), tobottom=document.getElementById('tobottom');
+const showsrc=document.getElementById('showsrc'), showans=document.getElementById('showans');
+// 表示設定はブラウザに記憶する
+function pref(key,el,apply){try{const v=localStorage.getItem('hh.'+key);if(v!==null)el.checked=(v==='1')}catch(e){}apply(el.checked);
+  el.addEventListener('change',()=>{try{localStorage.setItem('hh.'+key,el.checked?'1':'0')}catch(e){}apply(el.checked)})}
+pref('showsrc',showsrc,v=>document.body.classList.toggle('showsrc',v));
+pref('showans',showans,v=>document.body.classList.toggle('noans',!v));
+pref('newest',newest,v=>{const els=[...main.querySelectorAll('.turn')];els.sort((a,b)=>(Number(a.id.slice(1))-Number(b.id.slice(1)))*(v?-1:1));els.forEach(e=>main.appendChild(e));if(v)window.scrollTo(0,0);updateBtn()});
+pref('auto',auto,v=>updateBtn());
 document.getElementById('clear').onclick=()=>{for(const k in turns){turns[k].el.remove();delete turns[k]}};
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function fmt(ts){const d=new Date(ts*1000);return d.toTimeString().slice(0,8)}
-function scroll(){if(auto.checked)window.scrollTo(0,document.body.scrollHeight)}
+function atBottom(){return document.documentElement.scrollHeight-window.scrollY-window.innerHeight<80}
+function updateBtn(){tobottom.classList.toggle('show',!newest.checked&&!auto.checked)}
+let programmatic=false;
+function scroll(){if(newest.checked||!auto.checked)return;programmatic=true;window.scrollTo(0,document.documentElement.scrollHeight);requestAnimationFrame(()=>{programmatic=false})}
+// 読んでいる途中で上にスクロールしたら自動スクロールを止める。最下部まで戻したら再開
+window.addEventListener('scroll',()=>{if(programmatic||newest.checked)return;
+  if(auto.checked&&!atBottom()){auto.checked=false;updateBtn()}
+  else if(!auto.checked&&atBottom()){auto.checked=true;updateBtn()}},{passive:true});
+tobottom.onclick=()=>{auto.checked=true;updateBtn();scroll()};
 function turn(n){return turns[n]}
 function onTurnStart(ev){
   empty.style.display='none';
@@ -948,7 +976,7 @@ function onTurnStart(ev){
   el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span>'+fmt(ev.ts)+'</span><span>'+esc(ev.model||'')+'</span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
    '<div class="cols"><div class="col"><div class="cap">Thinking (原文)</div><div class="think live"></div><div class="answer"></div></div>'+
    '<div class="col"><div class="cap">日本語</div><div class="segs"></div></div></div>';
-  main.appendChild(el);
+  if(newest.checked)main.insertBefore(el,main.firstElementChild.nextSibling);else main.appendChild(el);
   turns[ev.turn]={el,think:el.querySelector('.think'),answer:el.querySelector('.answer'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{}};
   // 古いターンは間引く
   const keys=Object.keys(turns).map(Number).sort((a,b)=>a-b);
