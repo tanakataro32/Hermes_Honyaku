@@ -1149,6 +1149,14 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = True
     request_queue_size = 64
 
+    def handle_error(self, request, client_address):
+        # 接続の使い回しを相手が切っただけの場合は、トレースバックを出さない
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, socket.timeout, TimeoutError)):
+            log.debug("connection closed by %s: %s", client_address[0], exc)
+            return
+        log.exception("request error from %s", client_address[0])
+
 
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(APP_DIR, "config.ini")
