@@ -90,6 +90,36 @@ model:
 - モデルが日本語で考えている文は翻訳せずそのまま右列に出します。翻訳モデルが英語のまま返してきた文は黄色のまま原文を表示します。
 - 上にスクロールすると自動スクロールが止まり、右下の「最新へ」で再開します。「新しいターンを上に」を付けると最新のターンが常に一番上に来ます。
 
+## 4b. Open WebUI も同じ画面で見る
+
+Open WebUI (Docker) の接続先も中継サーバーに向ければ、同じ画面に Open WebUI のターンも流れます。
+ターンの見出しに発信元 (Hermes / Open WebUI) のラベルが付き、ヘッダーの「すべての発信元」で絞り込めます。
+
+1. **中継サーバーを Docker からも届く口で待ち受ける**。`config.ini` の `[proxy]` を `listen_host = 0.0.0.0` に変えて再起動します。
+
+   ```bash
+   nano ~/hermes_honyaku/config.ini      # listen_host = 0.0.0.0
+   sudo systemctl restart hermes-honyaku
+   ```
+
+2. **ufw で Docker からの 8081 を許可**します (LAN 全体には開けず、Docker のブリッジだけ)。
+
+   ```bash
+   sudo ufw allow in on docker0 to any port 8081 proto tcp
+   ```
+
+3. **Open WebUI の接続先を変更**します。ブラウザで Open WebUI → 管理者パネル → 設定 → 接続 → OpenAI API の URL を
+   `http://host.docker.internal:8080/v1` から `http://host.docker.internal:8081/v1` に変えて保存します。API キーはそのままです。
+   右側の「確認」ボタンで接続テストが通り、モデル一覧に `qwen3.8-27b` などが出れば完了です。
+
+4. Open WebUI で何か聞くと、画面に「Open WebUI」ラベル付きのターンが流れます。
+
+Open WebUI はチャットのたびにタイトル生成・タグ生成・フォローアップ提案などの小さな要求もモデルに送ります。
+これらは「背景タスク」として検出し、既定では隠しています (ヘッダーの「背景タスクを隠す」で切り替え)。
+Hermes が会話タイトルを付けるための要求も同じ扱いです。
+
+元に戻すときは Open WebUI の URL を 8080 に戻すだけです。
+
 ## 5. 設定 (config.ini)
 
 | セクション | 項目 | 意味 |
@@ -103,6 +133,7 @@ model:
 | segment | max_chars / min_chars | 文の最大長・区切らない最小長 |
 | segment | idle_flush_sec | 思考がこの秒数止まったら、区切りが無くても溜まった分を翻訳に回す |
 | log | dir | 原文と訳文を JSONL で残すフォルダ (日付ごと 1 ファイル)。空欄で無効 |
+| sources | (IP の前方一致) | 接続元 IP からターンの発信元ラベルを決める。`127.0.0.1 = Hermes`、`172. = Open WebUI` など |
 
 DeepL を使う場合は `engine = deepl` にして `deepl_key` を設定します (Free プランは月 50 万文字まで。思考ログは量が多いので上限に注意)。
 

@@ -62,6 +62,7 @@ class Config:
                            "deepl_key": "", "deepl_url": "https://api-free.deepl.com/v2/translate"},
             "segment": {"max_chars": "400", "min_chars": "24", "idle_flush_sec": "2.0"},
             "log": {"dir": "logs", "level": "INFO"},
+            "sources": {"127.0.0.1": "Hermes", "172.": "Open WebUI", "default": ""},
         })
         if path and os.path.exists(path):
             cp.read(path, encoding="utf-8")
@@ -341,7 +342,7 @@ class Turn:
     active = {}
     active_lock = threading.Lock()
 
-    def __init__(self, model, context, cfg, translator):
+    def __init__(self, model, context, cfg, translator, source="", task=False):
         with Turn.counter_lock:
             Turn.counter += 1
             self.n = Turn.counter
@@ -356,9 +357,14 @@ class Turn:
         self.started = time.time()
         self.finished = False
         self.tool_calls = {}
+        self.source = source
+        self.task = task
+        self.answer_buf = []
+        self.answer_len = 0
         with Turn.active_lock:
             Turn.active[self.n] = self
-        ev = {"type": "turn_start", "turn": self.n, "model": model, "context": context}
+        ev = {"type": "turn_start", "turn": self.n, "model": model, "context": context,
+              "source": source, "task": task}
         BUS.publish(ev)
         self.translator.jlog.write(ev)
 
@@ -379,7 +385,13 @@ class Turn:
             if kind == "think":
                 self.feed_think(part)
             else:
-                BUS.publish({"type": "answer", "turn": self.n, "text": part})
+                self._answer(part)
+
+    def _answer(self, text):
+        if self.answer_len < 4000:
+            self.answer_buf.append(text)
+            self.answer_len += len(text)
+        BUS.publish({"type": "answer", "turn": self.n, "text": text})
 
     def add_tool_call(self, tc):
         idx = tc.get("index", len(self.tool_calls))
@@ -432,7 +444,17 @@ class Turn:
             if kind == "think":
                 self.feed_think(part)
             else:
-                BUS.publish({"type": "answer", "turn": self.n, "text": part})
+                self._answer(part)
+        # 思考なしで {"title": ...} のような JSON だけを返した場合も背景タスク扱い (Hermes のタイトル生成など)
+        if not self.task and self.think_chars == 0 and not self.tool_calls:
+            a = "".join(self.answer_buf).strip()
+            if a.startswith("{") and len(a) < 600:
+                try:
+                    j = json.loads(a)
+                    if isinstance(j, dict) and j and set(j) <= {"title", "tags", "emoji", "queries", "follow_ups", "summary"}:
+                        self.task = True
+                except Exception:
+                    pass
         with self.lock:
             self.finished = True
             segs = self.segmenter.flush()
@@ -446,7 +468,7 @@ class Turn:
             self.translator.jlog.write(tev)
         ev = {"type": "turn_end", "turn": self.n, "reason": reason,
               "think_chars": self.think_chars, "segments": self.seg_count,
-              "elapsed": round(time.time() - self.started, 1)}
+              "elapsed": round(time.time() - self.started, 1), "task": self.task}
         BUS.publish(ev)
         self.translator.jlog.write(ev)
 
@@ -736,6 +758,23 @@ def summarize_context(req):
         return ""
 
 
+TASK_MARKERS = ("### Task:", "Your task is to reflect the speaker's likely facial expression")
+
+
+def is_task_request(req):
+    """Open WebUI などがバックグラウンドで送る要求 (タイトル生成・タグ生成・フォローアップ提案) か"""
+    try:
+        for m in req.get("messages") or []:
+            c = m.get("content")
+            if isinstance(c, list):
+                c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+            if isinstance(c, str) and any(mk in c[:400] for mk in TASK_MARKERS):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     cfg = None
@@ -822,6 +861,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._begin(status, [("Content-Type", "application/json")], False, len(body))
         self._write(body)
 
+    def _source(self):
+        """ターンの発信元ラベル。ヘッダー → 接続元 IP の前方一致 (config.ini [sources]) → IP"""
+        for k in self.headers.keys():
+            if k.lower().startswith("x-openwebui-"):
+                return "Open WebUI"
+        ip = self.client_address[0]
+        default = ""
+        for prefix, label in sorted(self.cfg.cp.items("sources"), key=lambda kv: -len(kv[0])):
+            if prefix == "default":
+                default = label.strip()
+                continue
+            if ip.startswith(prefix.strip()):
+                return label.strip()
+        return default or ip
+
     # ---- 振り分け ----
     def _proxy(self):
         body = self._read_body()
@@ -898,7 +952,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     BUS.publish({"type": "error", "text": f"上流 {resp.status}: {data[:300].decode('utf-8', 'replace')}"})
                 return
 
-            turn = Turn(req.get("model") or "", summarize_context(req), self.cfg, self.translator)
+            turn = Turn(req.get("model") or "", summarize_context(req), self.cfg, self.translator,
+                        source=self._source(), task=is_task_request(req))
             acc = ResponseAccumulator()
             if client_stream:
                 self._begin(200, resp.getheaders(), True)
@@ -984,6 +1039,10 @@ main{padding:12px 16px 40vh}
 .turn h3 .n{color:var(--acc);font-family:ui-monospace,Consolas,monospace}
 .turn h3 .ctx{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--en)}
 .turn h3 .st{font-family:ui-monospace,Consolas,monospace}
+.turn h3 .src{background:var(--acc);color:#0f1418;border-radius:3px;padding:0 6px;font-weight:700}
+.turn h3 .tk{background:var(--line);color:var(--muted);border-radius:3px;padding:0 6px}
+.turn.hidden{display:none}
+header select{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:2px 6px;font:inherit;font-size:13px}
 .cols{display:grid;grid-template-columns:1fr 1fr;gap:0}
 @media (max-width:900px){.cols{grid-template-columns:1fr}}
 .col{padding:10px 12px;min-width:0}
@@ -1035,6 +1094,8 @@ body.showsrc .seg.done .src{display:block}
  <label><input type="checkbox" id="newest"> 新しいターンを上に</label>
  <label><input type="checkbox" id="showsrc"> 訳文の下に原文も表示</label>
  <label><input type="checkbox" id="showans" checked> 回答も表示</label>
+ <label><input type="checkbox" id="hidetask" checked> 背景タスクを隠す</label>
+ <select id="srcsel"><option value="">すべての発信元</option></select>
  <label><button id="clear" style="background:none;border:1px solid var(--line);color:var(--muted);border-radius:4px;padding:2px 8px;cursor:pointer">画面を消去</button></label>
 </header>
 <button id="tobottom" type="button">↓ 最新へ (自動スクロール再開)</button>
@@ -1052,6 +1113,12 @@ pref('showsrc',showsrc,v=>document.body.classList.toggle('showsrc',v));
 pref('showans',showans,v=>document.body.classList.toggle('noans',!v));
 pref('newest',newest,v=>{const els=[...main.querySelectorAll('.turn')];els.sort((a,b)=>(Number(a.id.slice(1))-Number(b.id.slice(1)))*(v?-1:1));els.forEach(e=>main.appendChild(e));if(v)window.scrollTo(0,0);updateBtn()});
 pref('auto',auto,v=>updateBtn());
+const hidetask=document.getElementById('hidetask'), srcsel=document.getElementById('srcsel');
+pref('hidetask',hidetask,v=>applyFilters());
+srcsel.onchange=()=>applyFilters();
+function applyFilters(){for(const k in turns){const el=turns[k].el;
+  el.classList.toggle('hidden',(hidetask.checked&&el.classList.contains('task'))||(srcsel.value&&el.dataset.source!==srcsel.value))}}
+function addSource(name){if(!name||[...srcsel.options].some(o=>o.value===name))return;const o=document.createElement('option');o.value=name;o.textContent=name;srcsel.appendChild(o)}
 document.getElementById('clear').onclick=()=>{for(const k in turns){turns[k].el.remove();delete turns[k]}};
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function fmt(ts){const d=new Date(ts*1000);return d.toTimeString().slice(0,8)}
@@ -1067,12 +1134,13 @@ tobottom.onclick=()=>{auto.checked=true;updateBtn();scroll()};
 function turn(n){return turns[n]}
 function onTurnStart(ev){
   empty.style.display='none';
-  const el=document.createElement('section');el.className='turn';el.id='t'+ev.turn;
-  el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span>'+fmt(ev.ts)+'</span><span>'+esc(ev.model||'')+'</span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
+  const el=document.createElement('section');el.className='turn'+(ev.task?' task':'');el.id='t'+ev.turn;el.dataset.source=ev.source||'';addSource(ev.source);
+  el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span>'+fmt(ev.ts)+'</span>'+(ev.source?'<span class="src">'+esc(ev.source)+'</span>':'')+(ev.task?'<span class="tk">背景タスク</span>':'')+'<span>'+esc(ev.model||'')+'</span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
    '<div class="cols"><div class="col"><div class="cap">Thinking (原文)</div><div class="think live"></div></div>'+
    '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="tools"></div><div class="ans"></div></div></div>';
   if(newest.checked)main.insertBefore(el,main.firstElementChild.nextSibling);else main.appendChild(el);
   turns[ev.turn]={el,think:el.querySelector('.think'),ans:el.querySelector('.ans'),tools:el.querySelector('.tools'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{},ansRaw:'',ansTimer:null};
+  applyFilters();
   // 古いターンは間引く
   const keys=Object.keys(turns).map(Number).sort((a,b)=>a-b);
   while(keys.length>40){const k=keys.shift();turns[k].el.remove();delete turns[k]}
@@ -1125,7 +1193,8 @@ function onJa(ev){const t=turn(ev.turn);if(!t)return;let s=t.segEls[ev.seg];if(!
   if(ev.how==='skip'||ev.how==='en')s.querySelector('.src').style.display='none';scroll()}
 function onTurnEnd(ev){const t=turn(ev.turn);if(!t)return;t.think.classList.remove('live');
   t.st.textContent=(ev.reason==='stop'||ev.reason==='tool_calls'||ev.reason==='length'?'完了':ev.reason)+' · '+ev.elapsed+'s · '+ev.think_chars+'字 · '+ev.segments+'文';
-  if(!t.think.textContent.trim())t.think.textContent='(思考なし)';if(t.ansTimer){clearTimeout(t.ansTimer);renderAns(t)}}
+  if(!t.think.textContent.trim())t.think.textContent='(思考なし)';if(t.ansTimer){clearTimeout(t.ansTimer);renderAns(t)}
+  if(ev.task&&!t.el.classList.contains('task')){t.el.classList.add('task');const h=t.el.querySelector('h3 .src')||t.el.querySelector('h3 .n');h.insertAdjacentHTML('afterend','<span class="tk">背景タスク</span>');applyFilters()}}
 function onStatus(ev){const d=document.getElementById('tdot');d.className='dot '+(ev.translator==='ok'?(ev.queue>0?'busy':'ok'):ev.translator==='error'?'error':'');
   document.getElementById('ttext').textContent=ev.engine+(ev.translator==='error'?' エラー: '+ev.error:'');
   document.getElementById('tq').textContent=ev.queue>0?'(待ち '+ev.queue+')':''}
