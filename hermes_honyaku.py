@@ -121,7 +121,7 @@ class EventBus:
         t = ev.get("type")
         n = ev.get("turn")
         if t == "turn_start":
-            self.turns[n] = {"start": ev, "think": [], "answer": [], "segs": {}, "end": None}
+            self.turns[n] = {"start": ev, "think": [], "answer": [], "segs": {}, "tools": None, "end": None}
             while len(self.turns) > self.keep_turns:
                 self.turns.popitem(last=False)
             return
@@ -136,6 +136,8 @@ class EventBus:
             info["segs"][ev["seg"]] = {"seg": ev, "ja": None}
         elif t == "ja":
             info["segs"].setdefault(ev["seg"], {"seg": None, "ja": None})["ja"] = ev
+        elif t == "tools":
+            info["tools"] = ev
         elif t == "turn_end":
             info["end"] = ev
 
@@ -181,6 +183,8 @@ class EventBus:
                     out.append(dict(pair["seg"], id=cur))
                 if pair["ja"]:
                     out.append(dict(pair["ja"], id=cur))
+            if info["tools"]:
+                out.append(dict(info["tools"], id=cur))
             if info["end"]:
                 out.append(dict(info["end"], id=cur))
         return out
@@ -202,7 +206,7 @@ class JsonlLogger:
     def write(self, ev):
         if not self.dir:
             return
-        if ev.get("type") not in ("turn_start", "seg", "ja", "turn_end"):
+        if ev.get("type") not in ("turn_start", "seg", "ja", "tools", "turn_end"):
             return
         name = datetime.date.today().strftime("%Y%m%d") + ".jsonl"
         line = json.dumps(ev, ensure_ascii=False)
@@ -351,6 +355,7 @@ class Turn:
         self.think_chars = 0
         self.started = time.time()
         self.finished = False
+        self.tool_calls = {}
         with Turn.active_lock:
             Turn.active[self.n] = self
         ev = {"type": "turn_start", "turn": self.n, "model": model, "context": context}
@@ -375,6 +380,36 @@ class Turn:
                 self.feed_think(part)
             else:
                 BUS.publish({"type": "answer", "turn": self.n, "text": part})
+
+    def add_tool_call(self, tc):
+        idx = tc.get("index", len(self.tool_calls))
+        cur = self.tool_calls.setdefault(idx, {"name": "", "args": ""})
+        fn = tc.get("function") or {}
+        if fn.get("name"):
+            cur["name"] += fn["name"]
+        if fn.get("arguments"):
+            cur["args"] += fn["arguments"]
+
+    def _tools_summary(self):
+        out = []
+        for k in sorted(self.tool_calls):
+            tc = self.tool_calls[k]
+            args = tc["args"].strip()
+            summary = args
+            try:
+                j = json.loads(args)
+                if isinstance(j, dict):
+                    for key in ("command", "cmd", "path", "file_path", "query", "url", "pattern", "content", "code"):
+                        if isinstance(j.get(key), str) and j[key].strip():
+                            summary = j[key]
+                            break
+                    else:
+                        summary = ", ".join(f"{a}={b}" for a, b in j.items() if isinstance(b, (str, int, float)))[:300] or args
+            except Exception:
+                pass
+            summary = re.sub(r"\s+", " ", summary).strip()
+            out.append({"name": tc["name"], "args": summary[:300]})
+        return out
 
     def idle_flush(self, idle_sec):
         with self.lock:
@@ -405,6 +440,10 @@ class Turn:
             self._submit(s)
         with Turn.active_lock:
             Turn.active.pop(self.n, None)
+        if self.tool_calls:
+            tev = {"type": "tools", "turn": self.n, "tools": self._tools_summary()}
+            BUS.publish(tev)
+            self.translator.jlog.write(tev)
         ev = {"type": "turn_end", "turn": self.n, "reason": reason,
               "think_chars": self.think_chars, "segments": self.seg_count,
               "elapsed": round(time.time() - self.started, 1)}
@@ -891,6 +930,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     c = d.get("content")
                     if c:
                         turn.feed_content(c)
+                    for tc in d.get("tool_calls") or []:
+                        if isinstance(tc, dict):
+                            turn.add_tool_call(tc)
                     if ch.get("finish_reason"):
                         finish = ch["finish_reason"]
             turn.finish(finish)
@@ -951,9 +993,26 @@ main{padding:12px 16px 40vh}
 .think{white-space:pre-wrap;word-break:break-word;color:var(--en);font-size:13.5px;line-height:1.6}
 .think.live::after{content:"▍";color:var(--acc);animation:bl 1s steps(2) infinite}
 @keyframes bl{50%{opacity:0}}
-.answer{white-space:pre-wrap;word-break:break-word;color:var(--ans);font-size:13px;margin-top:10px;padding-top:8px;border-top:1px dashed var(--line)}
-.answer:empty{display:none}
-body.noans .answer{display:none}
+.ans{margin-top:10px;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ja);font-size:14.5px;line-height:1.75;word-break:break-word}
+.ans:empty{display:none}
+body.noans .ans{display:none}
+.ans .cap{margin-bottom:4px}
+.ans p{margin:0 0 8px}.ans p:last-child{margin-bottom:0}
+.ans h3,.ans h4,.ans h5,.ans h6{margin:10px 0 6px;font-size:15px;color:var(--acc)}
+.ans ul,.ans ol{margin:0 0 8px;padding-left:22px}.ans li{margin:2px 0}
+.ans code{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:0 4px}
+.ans pre{background:#0a0f12;border:1px solid var(--line);border-radius:4px;padding:8px 10px;overflow-x:auto;margin:6px 0 8px}
+.ans pre code{border:none;background:none;padding:0;font-size:12.5px;line-height:1.5}
+.ans table{border-collapse:collapse;margin:6px 0 8px;font-size:13.5px;max-width:100%}
+.ans th,.ans td{border:1px solid var(--line);padding:4px 9px;text-align:left;vertical-align:top}
+.ans th{background:var(--panel);color:var(--muted);font-weight:600}
+.ans blockquote{margin:6px 0;padding:2px 10px;border-left:3px solid var(--line);color:var(--en)}
+.ans hr{border:none;border-top:1px solid var(--line);margin:8px 0}
+.ans a{color:var(--acc)}
+.tools{margin-top:8px;font-size:12.5px;color:var(--muted)}
+.tools div{padding:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tools b{color:var(--warn);font-weight:600;margin-right:6px}
+.tools code{font-family:ui-monospace,Consolas,monospace;color:var(--en)}
 .seg{margin:0 0 8px;padding:6px 10px;border-left:3px solid var(--line);border-radius:0 4px 4px 0}
 .seg .src{color:var(--muted);font-size:12px;line-height:1.5}
 .seg .ja{color:var(--ja);font-size:15px}
@@ -975,7 +1034,7 @@ body.showsrc .seg.done .src{display:block}
  <label><input type="checkbox" id="auto" checked> 自動スクロール</label>
  <label><input type="checkbox" id="newest"> 新しいターンを上に</label>
  <label><input type="checkbox" id="showsrc"> 訳文の下に原文も表示</label>
- <label><input type="checkbox" id="showans" checked> 回答本文も表示</label>
+ <label><input type="checkbox" id="showans" checked> 回答も表示</label>
  <label><button id="clear" style="background:none;border:1px solid var(--line);color:var(--muted);border-radius:4px;padding:2px 8px;cursor:pointer">画面を消去</button></label>
 </header>
 <button id="tobottom" type="button">↓ 最新へ (自動スクロール再開)</button>
@@ -1010,17 +1069,47 @@ function onTurnStart(ev){
   empty.style.display='none';
   const el=document.createElement('section');el.className='turn';el.id='t'+ev.turn;
   el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span>'+fmt(ev.ts)+'</span><span>'+esc(ev.model||'')+'</span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
-   '<div class="cols"><div class="col"><div class="cap">Thinking (原文)</div><div class="think live"></div><div class="answer"></div></div>'+
-   '<div class="col"><div class="cap">日本語</div><div class="segs"></div></div></div>';
+   '<div class="cols"><div class="col"><div class="cap">Thinking (原文)</div><div class="think live"></div></div>'+
+   '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="tools"></div><div class="ans"></div></div></div>';
   if(newest.checked)main.insertBefore(el,main.firstElementChild.nextSibling);else main.appendChild(el);
-  turns[ev.turn]={el,think:el.querySelector('.think'),answer:el.querySelector('.answer'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{}};
+  turns[ev.turn]={el,think:el.querySelector('.think'),ans:el.querySelector('.ans'),tools:el.querySelector('.tools'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{},ansRaw:'',ansTimer:null};
   // 古いターンは間引く
   const keys=Object.keys(turns).map(Number).sort((a,b)=>a-b);
   while(keys.length>40){const k=keys.shift();turns[k].el.remove();delete turns[k]}
   scroll();
 }
 function onThink(ev){const t=turn(ev.turn);if(!t)return;t.think.appendChild(document.createTextNode(ev.text));scroll()}
-function onAnswer(ev){const t=turn(ev.turn);if(!t)return;t.answer.appendChild(document.createTextNode(ev.text));scroll()}
+function renderAns(t){t.ansTimer=null;t.ans.innerHTML=t.ansRaw.trim()?'<div class="cap">回答</div>'+md(t.ansRaw):'';scroll()}
+function onAnswer(ev){const t=turn(ev.turn);if(!t)return;t.ansRaw+=ev.text;if(!t.ansTimer)t.ansTimer=setTimeout(()=>renderAns(t),150)}
+function onTools(ev){const t=turn(ev.turn);if(!t)return;t.tools.innerHTML=(ev.tools||[]).map(x=>'<div title="'+esc(x.args)+'"><b>🔧 '+esc(x.name)+'</b><code>'+esc(x.args)+'</code></div>').join('');scroll()}
+// 最小限の Markdown 描画 (見出し・箇条書き・表・コード・引用・太字・斜体・リンク)
+function md(src){
+  const inline=s=>{s=esc(s).replace(/"/g,'&quot;');
+    s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
+    s=s.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
+    s=s.replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g,'$1<i>$2</i>');
+    s=s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+    return s};
+  const isTable=l=>/^\s*\|.*\|\s*$/.test(l), isList=l=>/^\s*([-*+]|\d+[.)])\s+/.test(l);
+  const lines=src.replace(/\r/g,'').split('\n');let out=[],i=0,m;
+  while(i<lines.length){const l=lines[i];
+    if(/^\s*```/.test(l)){let buf=[];i++;while(i<lines.length&&!/^\s*```/.test(lines[i]))buf.push(lines[i++]);i++;out.push('<pre><code>'+esc(buf.join('\n'))+'</code></pre>');continue}
+    if(isTable(l)&&i+1<lines.length&&/^\s*\|?\s*:?-{2,}/.test(lines[i+1])){
+      const row=s=>s.trim().replace(/^\||\|$/g,'').split('|').map(c=>inline(c.trim()));
+      const head=row(l);i+=2;let rows=[];while(i<lines.length&&isTable(lines[i]))rows.push(row(lines[i++]));
+      out.push('<table><thead><tr>'+head.map(c=>'<th>'+c+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+r.map(c=>'<td>'+c+'</td>').join('')+'</tr>').join('')+'</tbody></table>');continue}
+    if((m=/^\s*(#{1,6})\s+(.*)$/.exec(l))){const h=Math.min(m[1].length+2,6);out.push('<h'+h+'>'+inline(m[2])+'</h'+h+'>');i++;continue}
+    if(isList(l)){const ord=/^\s*\d/.test(l);let items=[];
+      while(i<lines.length&&isList(lines[i])){items.push(lines[i].replace(/^\s*([-*+]|\d+[.)])\s+/,''));i++;
+        while(i<lines.length&&/^\s{2,}\S/.test(lines[i])&&!isList(lines[i])){items[items.length-1]+=' '+lines[i].trim();i++}}
+      out.push((ord?'<ol>':'<ul>')+items.map(x=>'<li>'+inline(x)+'</li>').join('')+(ord?'</ol>':'</ul>'));continue}
+    if(/^\s*>/.test(l)){let buf=[];while(i<lines.length&&/^\s*>/.test(lines[i]))buf.push(lines[i++].replace(/^\s*>\s?/,''));out.push('<blockquote>'+inline(buf.join('\n')).replace(/\n/g,'<br>')+'</blockquote>');continue}
+    if(/^\s*([-*_]\s*){3,}$/.test(l)){out.push('<hr>');i++;continue}
+    if(!l.trim()){i++;continue}
+    let buf=[];while(i<lines.length&&lines[i].trim()&&!/^\s*```/.test(lines[i])&&!/^\s*#{1,6}\s/.test(lines[i])&&!isList(lines[i])&&!/^\s*>/.test(lines[i])&&!isTable(lines[i]))buf.push(lines[i++]);
+    if(!buf.length){buf.push(l);i++}
+    out.push('<p>'+inline(buf.join('\n')).replace(/\n/g,'<br>')+'</p>')}
+  return out.join('')}
 function onSeg(ev){const t=turn(ev.turn);if(!t)return;
   let s=t.segEls[ev.seg];
   if(!s){s=document.createElement('div');s.className='seg pending';s.dataset.seg=ev.seg;
@@ -1036,12 +1125,12 @@ function onJa(ev){const t=turn(ev.turn);if(!t)return;let s=t.segEls[ev.seg];if(!
   if(ev.how==='skip'||ev.how==='en')s.querySelector('.src').style.display='none';scroll()}
 function onTurnEnd(ev){const t=turn(ev.turn);if(!t)return;t.think.classList.remove('live');
   t.st.textContent=(ev.reason==='stop'||ev.reason==='tool_calls'||ev.reason==='length'?'完了':ev.reason)+' · '+ev.elapsed+'s · '+ev.think_chars+'字 · '+ev.segments+'文';
-  if(!t.think.textContent.trim())t.think.textContent='(思考なし)'}
+  if(!t.think.textContent.trim())t.think.textContent='(思考なし)';if(t.ansTimer){clearTimeout(t.ansTimer);renderAns(t)}}
 function onStatus(ev){const d=document.getElementById('tdot');d.className='dot '+(ev.translator==='ok'?(ev.queue>0?'busy':'ok'):ev.translator==='error'?'error':'');
   document.getElementById('ttext').textContent=ev.engine+(ev.translator==='error'?' エラー: '+ev.error:'');
   document.getElementById('tq').textContent=ev.queue>0?'(待ち '+ev.queue+')':''}
 function onError(ev){const d=document.createElement('div');d.className='seg bad';d.innerHTML='<div class="ja"></div>';d.querySelector('.ja').textContent=ev.text;main.appendChild(d)}
-const H={turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,turn_end:onTurnEnd,status:onStatus,error:onError};
+const H={turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError};
 function connect(){
   const es=new EventSource('/events');
   es.onopen=()=>{document.getElementById('sdot').className='dot ok';document.getElementById('stext').textContent='接続中'};
