@@ -164,7 +164,26 @@ class EventBus:
         with self.lock:
             if self.events and self.events[0]["id"] > last_id + 1:
                 return None
-            return [e for e in self.events if e["id"] > last_id]
+            evs = [e for e in self.events if e["id"] > last_id]
+            # リングバッファから turn_start / seg が落ちても、その後の ja だけ残ることがある。
+            # ターン要約から欠けたイベントを補って先頭に追加する (画面の原文が失われないように)
+            have = {e["id"] for e in evs}
+            for e in evs:
+                n = e.get("turn")
+                info = self.turns.get(n) if n is not None else None
+                if info is None:
+                    continue
+                if info.get("start") and info["start"]["id"] not in have:
+                    evs.insert(0, dict(info["start"]))
+                    have.add(info["start"]["id"])
+                if e.get("type") == "ja":
+                    pair = info["segs"].get(e["seg"])
+                    seg_ev = pair and pair["seg"]
+                    if seg_ev is not None and seg_ev["id"] not in have:
+                        evs.insert(0, dict(seg_ev))
+                        have.add(seg_ev["id"])
+            evs.sort(key=lambda e: e["id"])
+            return evs
 
     def latest_id(self):
         with self.lock:
@@ -1207,6 +1226,8 @@ body.noans .ans{display:none}
 body.showsrc .seg.done .src{display:block}
 .seg.bad{border-left-color:var(--bad)}.seg.bad .ja{color:var(--bad)}.seg.bad .src{display:block!important}
 .seg.untranslated{border-left-color:var(--warn)}.seg.untranslated .ja{color:var(--en)}
+.seg.untranslated .src{display:none}
+body.showsrc .seg.untranslated .src{display:block}
 .empty{color:var(--muted);padding:40px;text-align:center}
 #tobottom{position:fixed;right:20px;bottom:20px;z-index:6;display:none;background:var(--acc);color:#0f1418;border:none;border-radius:20px;padding:8px 16px;font:600 13px/1 inherit;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.4)}
 #tobottom.show{display:block}
@@ -1248,11 +1269,30 @@ function addSource(name){if(!name||[...srcsel.options].some(o=>o.value===name))r
 document.getElementById('clear').onclick=()=>{for(const k in turns){turns[k].el.remove();delete turns[k]}};
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function fmt(ts){const d=new Date(ts*1000);return d.toTimeString().slice(0,8)}
-function atBottom(){return document.documentElement.scrollHeight-window.scrollY-window.innerHeight<80}
 function updateBtn(){tobottom.classList.toggle('show',!newest.checked&&!auto.checked)}
 let programmatic=false;
-function scroll(){if(newest.checked||!auto.checked)return;programmatic=true;window.scrollTo(0,document.documentElement.scrollHeight);requestAnimationFrame(()=>{programmatic=false})}
-// 読んでいる途中で上にスクロールしたら自動スクロールを止める。最下部まで戻したら再開
+// 自動スクロールの目標: 右列の「全ターンで最新の翻訳セグメント」の下端 (まだ無い場合は最新ターンの下端)。
+// 左列の原文が伸びても追従せず、訳文の最新付近をたどる (翻訳が遅れて黄色のままでも、既に出た訳文に寄る)
+function targetY(){
+  let bestEl=null, bestTurn=-1, bestSeg=-1;
+  for(const k in turns){
+    const t=turns[k], tn=Number(k);
+    for(const sk in t.segEls){
+      const sn=Number(sk);
+      if(tn>bestTurn||(tn===bestTurn&&sn>bestSeg)){bestTurn=tn;bestSeg=sn;bestEl=t.segEls[sk]}
+    }
+  }
+  if(!bestEl){
+    const keys=Object.keys(turns).map(Number).sort((a,b)=>a-b);
+    if(!keys.length)return document.documentElement.scrollHeight;
+    const el=turns[keys[keys.length-1]].el;
+    return Math.max(0,el.getBoundingClientRect().bottom+window.scrollY-60);
+  }
+  return Math.max(0,bestEl.getBoundingClientRect().bottom+window.scrollY-60);
+}
+function scroll(){if(newest.checked||!auto.checked)return;programmatic=true;window.scrollTo(0,targetY());requestAnimationFrame(()=>{programmatic=false})}
+// 読んでいる途中で上にスクロールしたら自動スクロールを止める。目標位置まで戻したら再開
+function atBottom(){return document.documentElement.scrollHeight-window.scrollY-window.innerHeight<80||window.scrollY+window.innerHeight>=targetY()-80}
 window.addEventListener('scroll',()=>{if(programmatic||newest.checked)return;
   if(auto.checked&&!atBottom()){auto.checked=false;updateBtn()}
   else if(!auto.checked&&atBottom()){auto.checked=true;updateBtn()}},{passive:true});
@@ -1320,10 +1360,13 @@ function onSeg(ev){const t=turn(ev.turn);if(!t)return;
     t.segEls[ev.seg]=s;}
   s.querySelector('.src').textContent=ev.src;scroll()}
 function onJa(ev){const t=turn(ev.turn);if(!t)return;let s=t.segEls[ev.seg];if(!s){onSeg({turn:ev.turn,seg:ev.seg,src:''});s=t.segEls[ev.seg]}
-  s.querySelector('.ja').textContent=ev.text;s.classList.remove('pending');
+  // 翻訳モデルが英語で返した (how='en') ときは、モデルの言い換えではなく原文を表示する
+  s.querySelector('.ja').textContent=ev.how==='en'?(s.querySelector('.src').textContent||ev.text):ev.text;
+  s.classList.remove('pending');
   s.classList.add(ev.how==='en'?'untranslated':ev.ok?'done':'bad');
   if(ev.how==='suspect')s.title='訳文が原文より極端に長いため、翻訳モデルが作文している可能性があります (原文を併記)';
-  if(ev.how==='skip'||ev.how==='en')s.querySelector('.src').style.display='none';scroll()}
+  else if(ev.how==='en')s.title='翻訳失敗 (翻訳モデルが英語で返したため原文を表示)';
+  scroll()}
 function onTurnEnd(ev){const t=turn(ev.turn);if(!t)return;t.think.classList.remove('live');
   t.st.textContent=(ev.reason==='stop'||ev.reason==='tool_calls'||ev.reason==='length'?'完了':ev.reason)+' · '+ev.elapsed+'s · '+ev.think_chars+'字 · '+ev.segments+'文';
   if(!t.think.textContent.trim())t.think.textContent='(思考なし)';if(t.ansTimer){clearTimeout(t.ansTimer);renderAns(t)}
