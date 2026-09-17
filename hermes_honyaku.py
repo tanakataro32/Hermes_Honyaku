@@ -1278,21 +1278,22 @@ function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 function fmt(ts){const d=new Date(ts*1000);return d.toTimeString().slice(0,8)}
 function updateBtn(){tobottom.classList.toggle('show',!newest.checked&&!auto.checked)}
 let programmatic=false;
-// 自動スクロールの目標: 「最新の実データ」= 左列(英文)の先端と右列(訳文・ツール・回答)の先端のうち、下のほう。
-// 英文が流れている間は英文の先端 (リアルタイムで最新が画面に見える)。英文が止まったら訳文の先端に追随
+// 自動スクロールの目標: 画面の下端に「最新の実データ」が来るところ。
+// 最新 = 左列(英文・リアルタイムにDOMへ追記)と右列(訳文・ツール・回答)の先端のうち、下のほう。
+// 英文が翻訳より先行している間は英文の先端に追随し、下には既出の訳文までスクロールできる余地がある
 function targetY(){
   let best=0;
-  const keys=Object.keys(turns).map(Number).sort((a,b)=>b-a);
-  for(const k of keys){
+  for(const k in turns){
     const t=turns[k];
-    if(t.el.getBoundingClientRect().bottom+window.scrollY<=best)break; // このターンより古いターンはさらに上
     if(t.think&&t.think.textContent){const b=t.think.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
     const ls=t.segs.lastElementChild;
     if(ls){const b=ls.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
     if(t.tools&&t.tools.children.length){const b=t.tools.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
     if(t.ans&&t.ans.textContent.trim()){const b=t.ans.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
   }
-  return Math.max(0,(best||document.documentElement.scrollHeight)-60);
+  if(!best)return document.documentElement.scrollHeight;
+  // 画面の下端に最新を合わせてスクロール (余白は最小限)
+  return Math.max(0,Math.min(best,document.documentElement.scrollHeight)-window.innerHeight+24);
 }
 function scroll(){if(newest.checked||!auto.checked)return;programmatic=true;window.scrollTo(0,targetY());requestAnimationFrame(()=>{programmatic=false})}
 // 自動スクロール ON のとき: 最新訳文から離れて上にスクロールしたら止める
