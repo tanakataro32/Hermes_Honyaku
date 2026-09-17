@@ -1298,11 +1298,12 @@ function targetY(){
   return Math.max(0,bestEl.getBoundingClientRect().bottom+window.scrollY-60);
 }
 function scroll(){if(newest.checked||!auto.checked)return;programmatic=true;window.scrollTo(0,targetY());requestAnimationFrame(()=>{programmatic=false})}
-// 読んでいる途中で上にスクロールしたら自動スクロールを止める。目標位置まで戻したら再開
-function atBottom(){return document.documentElement.scrollHeight-window.scrollY-window.innerHeight<80||window.scrollY+window.innerHeight>=targetY()-80}
+// 自動スクロール ON のとき: 最新訳文から離れて上にスクロールしたら止める
+function awayFromTarget(){return document.documentElement.scrollHeight-window.scrollY-window.innerHeight<80||window.scrollY+window.innerHeight>=targetY()-80}
 window.addEventListener('scroll',()=>{if(programmatic||newest.checked)return;
-  if(auto.checked&&!atBottom()){auto.checked=false;updateBtn()}
-  else if(!auto.checked&&atBottom()){auto.checked=true;updateBtn()}},{passive:true});
+  if(auto.checked&&!awayFromTarget()){auto.checked=false;updateBtn()}
+  // 再開は「ページ最下部までスクロールした場合」のみ (最新訳文が画面内であるだけでは再チェックされず、チェックを外せる)
+  else if(!auto.checked&&document.documentElement.scrollHeight-window.scrollY-window.innerHeight<80){auto.checked=true;updateBtn()}},{passive:true});
 tobottom.onclick=()=>{auto.checked=true;updateBtn();scroll()};
 function turn(n){return turns[n]}
 function onTurnStart(ev){
