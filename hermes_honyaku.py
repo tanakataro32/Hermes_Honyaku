@@ -1348,7 +1348,9 @@ document.getElementById('clear').onclick=()=>{for(const k in turns){turns[k].el.
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function fmt(ts){const d=new Date(ts*1000);return d.toTimeString().slice(0,8)}
 function updateBtn(){tobottom.classList.toggle('show',!newest.checked&&!auto.checked)}
-let programmatic=false;
+let programmatic=false, progTimer=null, rafId=null;
+// 自動スクロールによる移動の直後だけ、ユーザーのスクロールと区別するためのフラグ
+function markProgrammatic(){programmatic=true;clearTimeout(progTimer);progTimer=setTimeout(()=>programmatic=false,120)}
 // 自動スクロールの目標: 画面の下端に「右列の最新データ」が来るところ。
 // 右列 = 訳文(segs)・ツール・回答。左列(英文のThinking)は追随対象にしない。
 // 翻訳待ちが3行以上たまっている間は「最後に翻訳済みの行」まで追随する (まだ訳が出ていない行を画面の端に張り付かせない)
@@ -1380,7 +1382,22 @@ function targetY(){
   // 画面の下端に最新を合わせてスクロール (余白は最小限)
   return Math.max(0,Math.min(best,document.documentElement.scrollHeight)-window.innerHeight+24);
 }
-function scroll(){if(newest.checked||!auto.checked)return;programmatic=true;window.scrollTo(0,targetY());requestAnimationFrame(()=>{programmatic=false})}
+function scroll(){if(newest.checked||!auto.checked)return;
+  // 瞬間ジャンプではなく、毎フレーム目標の残距離を指数減衰で縮めて滑らかに追従する
+  if(rafId!==null)return;
+  let last=performance.now();
+  const step=now=>{
+    rafId=null;
+    if(newest.checked||!auto.checked)return;
+    const dy=targetY()-window.scrollY;
+    if(Math.abs(dy)<1.5)return; // 目標に到達したら停止
+    const dt=Math.min(0.1,(now-last)/1000);last=now;
+    window.scrollTo(0,window.scrollY+dy*(1-Math.exp(-10*dt)));
+    markProgrammatic();
+    rafId=requestAnimationFrame(step);
+  };
+  rafId=requestAnimationFrame(step);
+}
 // 自動スクロール ON のとき: 最新訳文から離れて上にスクロールしたら止める
 function awayFromTarget(){return document.documentElement.scrollHeight-window.scrollY-window.innerHeight<80||window.scrollY+window.innerHeight>=targetY()-80}
 window.addEventListener('scroll',()=>{if(programmatic||newest.checked)return;
