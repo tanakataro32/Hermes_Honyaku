@@ -1278,14 +1278,12 @@ function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 function fmt(ts){const d=new Date(ts*1000);return d.toTimeString().slice(0,8)}
 function updateBtn(){tobottom.classList.toggle('show',!newest.checked&&!auto.checked)}
 let programmatic=false;
-// 自動スクロールの目標: 画面の下端に「最新の実データ」が来るところ。
-// 最新 = 左列(英文・リアルタイムにDOMへ追記)と右列(訳文・ツール・回答)の先端のうち、下のほう。
-// 英文が翻訳より先行している間は英文の先端に追随し、下には既出の訳文までスクロールできる余地がある
+// 自動スクロールの目標: 画面の下端に「右列の最新データ」が来るところ。
+// 右列 = 訳文(segs)・ツール・回答。左列(英文のThinking)は追随対象にしない。
 function targetY(){
   let best=0;
   for(const k in turns){
     const t=turns[k];
-    if(t.think&&t.think.textContent){const b=t.think.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
     const ls=t.segs.lastElementChild;
     if(ls){const b=ls.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
     if(t.tools&&t.tools.children.length){const b=t.tools.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
