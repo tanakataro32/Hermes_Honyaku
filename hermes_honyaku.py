@@ -55,7 +55,7 @@ class Config:
             "proxy": {"listen_host": "127.0.0.1", "listen_port": "8081",
                       "upstream": "http://127.0.0.1:8080", "timeout": "600"},
             "ui": {"listen_host": "0.0.0.0", "listen_port": "8765",
-                   "replay_turns": "5", "show_answer": "true"},
+                   "replay_turns": "5", "show_answer": "true", "ctx_limit": "200000"},
             "translator": {"engine": "openai", "url": "http://192.168.1.8:8082/v1",
                            "model": "honyaku", "api_key": "", "workers": "3",
                            "timeout": "120", "temperature": "0.2",
@@ -127,13 +127,15 @@ class EventBus:
         t = ev.get("type")
         n = ev.get("turn")
         if t == "turn_start":
-            self.turns[n] = {"start": ev, "think": [], "answer": [], "segs": {}, "tools": None, "end": None}
+            self.turns[n] = {"start": ev, "think": [], "answer": [], "segs": {}, "tools": None, "end": None, "ctx": None}
             while len(self.turns) > self.keep_turns:
                 self.turns.popitem(last=False)
             return
         info = self.turns.get(n)
         if info is None:
             return
+        if t == "turn_ctx":
+            info["ctx"] = ev
         if t == "think":
             info["think"].append(ev["text"])
         elif t == "answer":
@@ -177,6 +179,8 @@ class EventBus:
         for info in turns:
             tn = info["start"]["turn"]
             out.append(dict(info["start"], id=cur))
+            if info.get("ctx"):
+                out.append(dict(info["ctx"], id=cur))
             think = "".join(info["think"])
             if think:
                 out.append({"type": "think", "turn": tn, "text": think, "id": cur, "ts": info["start"]["ts"]})
@@ -677,6 +681,89 @@ class Translator:
 
 
 # --------------------------------------------------------------------------
+# 推定トークン数 (中継側でリクエスト本文を数える。/tokenize で正確な値を取得し、
+# 失敗や未対応の場合は 1 トークン ≒ 4 文字の粗い推定に落ちる)
+# --------------------------------------------------------------------------
+class TokenMeter:
+    def __init__(self, upstream, timeout=5.0):
+        scheme, host, port = upstream
+        self.scheme = scheme
+        self.netloc = f"{host}:{port}"
+        self.timeout = timeout
+        self.api_key = ""
+        self.lock = threading.Lock()
+        self.cache = {}  # (model, key) -> (tokens, exact)
+        self.exact_ok = False
+        self.exact_fail = 0
+        self.exact_last = 0.0
+        self._probe()
+
+    def _probe(self):
+        try:
+            self.api_key = self._read_api_key()
+            self._tokenize("model", "ping")
+        except Exception:
+            pass
+
+    def _read_api_key(self):
+        try:
+            import yaml
+            with open(os.path.expanduser("~/.hermes/config.yaml"), encoding="utf-8") as f:
+                m = (yaml.safe_load(f) or {}).get("model") or {}
+            return str(m.get("api_key") or "")
+        except Exception:
+            return ""
+
+    def _tokenize(self, model, text):
+        if self.api_key and (time.time() - self.exact_last > 60):
+            # API キーは llama-server 側で変わることもあるので、失敗したら 1 分おきに再取得
+            self.exact_last = time.time()
+            self.api_key = self._read_api_key() or self.api_key
+        body = json.dumps({"content": text, "model": model}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = "Bearer " + self.api_key
+        conn = http.client.HTTPSConnection(self.netloc, timeout=self.timeout) \
+            if self.scheme == "https" else http.client.HTTPConnection(self.netloc, timeout=self.timeout)
+        try:
+            conn.request("POST", "/tokenize", body=body, headers=headers)
+            resp = conn.getresponse()
+            data = json.loads(resp.read().decode("utf-8"))
+            if resp.status != 200:
+                raise ValueError(f"tokenize {resp.status}")
+            return len(data.get("tokens") or []), True
+        finally:
+            conn.close()
+
+    def count_messages(self, model, messages):
+        """(推定トークン数, 正確か)。messages が同一 (ハッシュ一致) ならキャッシュを返す"""
+        try:
+            key = json.dumps(messages, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return 0, False
+        ck = (model, key)
+        with self.lock:
+            if ck in self.cache:
+                return self.cache[ck]
+        exact = False
+        if self.exact_ok or self.exact_fail < 3:
+            try:
+                n, exact = self._tokenize(model, key)
+                self.exact_ok = True
+            except Exception:
+                self.exact_fail += 1
+                self.exact_ok = False
+                n = max(1, len(key) // 4)
+        else:
+            n = max(1, len(key) // 4)
+        with self.lock:
+            if len(self.cache) > 512:
+                self.cache.clear()
+            self.cache[ck] = (n, exact)
+        return n, exact
+
+
+# --------------------------------------------------------------------------
 # 非ストリーミング応答の組み立て (Hermes が stream=false で来た場合用)
 # --------------------------------------------------------------------------
 class ResponseAccumulator:
@@ -809,6 +896,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     cfg = None
     translator = None
     upstream = None  # (scheme, host, port)
+    token_meter = None
 
     def log_message(self, fmt, *args):
         log.debug("proxy %s - " + fmt, self.client_address[0], *args)
@@ -983,6 +1071,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
             turn = Turn(req.get("model") or "", summarize_context(req), self.cfg, self.translator,
                         source=self._source(), task=is_task_request(req))
+            if self.token_meter is not None:
+                # 画面用のコンテキストメータ。tokenize が遅くても応答を止めない (5秒タイムアウト、失敗は推定値)
+                n_tok, exact = self.token_meter.count_messages(req.get("model") or "", req.get("messages") or [])
+                BUS.publish({"type": "turn_ctx", "turn": turn.n, "tokens": n_tok, "exact": exact,
+                             "max_tokens": int(req.get("max_tokens") or 0),
+                             "ctx_limit": self.cfg.getint("ui", "ctx_limit")})
             acc = ResponseAccumulator()
             if client_stream:
                 self._begin(200, resp.getheaders(), True)
@@ -1070,6 +1164,8 @@ main{padding:12px 16px 40vh}
 .turn h3 .st{font-family:ui-monospace,Consolas,monospace}
 .turn h3 .src{background:var(--acc);color:#0f1418;border-radius:3px;padding:0 6px;font-weight:700}
 .turn h3 .tk{background:var(--line);color:var(--muted);border-radius:3px;padding:0 6px}
+.turn h3 .ctxm{font-family:ui-monospace,Consolas,monospace;color:var(--muted)}
+.turn h3 .ctxm.hot{color:var(--warn)}
 .turn.hidden{display:none}
 .segs .note{color:var(--muted);font-size:12.5px}
 header select{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:2px 6px;font:inherit;font-size:13px}
@@ -1165,7 +1261,7 @@ function turn(n){return turns[n]}
 function onTurnStart(ev){
   empty.style.display='none';
   const el=document.createElement('section');el.className='turn'+(ev.task?' task':'');el.id='t'+ev.turn;el.dataset.source=ev.source||'';addSource(ev.source);
-  el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span>'+fmt(ev.ts)+'</span>'+(ev.source?'<span class="src">'+esc(ev.source)+'</span>':'')+(ev.task?'<span class="tk" title="最後のメッセージが ### Task: で始まる要求 (タイトル生成・タグ生成など)">背景タスク</span>':'')+'<span>'+esc(ev.model||'')+'</span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
+  el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span>'+fmt(ev.ts)+'</span>'+(ev.source?'<span class="src">'+esc(ev.source)+'</span>':'')+(ev.task?'<span class="tk" title="最後のメッセージが ### Task: で始まる要求 (タイトル生成・タグ生成など)">背景タスク</span>':'')+'<span>'+esc(ev.model||'')+'</span><span class="ctxm"></span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
    '<div class="cols"><div class="col"><div class="cap">Thinking (原文)</div><div class="think live"></div></div>'+
    '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="tools"></div><div class="ans"></div></div></div>';
   if(newest.checked)main.insertBefore(el,main.firstElementChild.nextSibling);else main.appendChild(el);
@@ -1178,6 +1274,11 @@ function onTurnStart(ev){
   scroll();
 }
 function onThink(ev){const t=turn(ev.turn);if(!t)return;t.think.appendChild(document.createTextNode(ev.text));scroll()}
+function onTurnCtx(ev){const t=turn(ev.turn);if(!t)return;const el=t.el.querySelector('.ctxm');if(!el)return;
+  const lim=ev.ctx_limit||0;const k=v=>v>=1000?(v/1000).toFixed(1).replace(/\.0$/,'')+'k':v;
+  el.textContent='ctx '+k(ev.tokens)+(lim?'/'+k(lim):'')+(ev.exact?'':'~')+' · max_out '+k(ev.max_tokens||0);
+  el.title=ev.exact?'リクエスト本文のトークン数 (llama-server の /tokenize)':'リクエスト本文の推定トークン数 (/tokenize 利用不可のため文字数から概算)'+(ev.max_tokens?' · 出力上限はリクエストの max_tokens':'');
+  if(lim&&ev.tokens/lim>=0.8)el.classList.add('hot');else el.classList.remove('hot');scroll()}
 function renderAns(t){t.ansTimer=null;t.ans.innerHTML=t.ansRaw.trim()?'<div class="cap">回答</div>'+md(t.ansRaw):'';scroll()}
 function onAnswer(ev){const t=turn(ev.turn);if(!t)return;t.ansRaw+=ev.text;if(!t.ansTimer)t.ansTimer=setTimeout(()=>renderAns(t),150)}
 function onTools(ev){const t=turn(ev.turn);if(!t)return;t.tools.innerHTML=(ev.tools||[]).map(x=>'<div title="'+esc(x.args)+'"><b>🔧 '+esc(x.name)+'</b><code>'+esc(x.args)+'</code></div>').join('');scroll()}
@@ -1231,7 +1332,7 @@ function onStatus(ev){const d=document.getElementById('tdot');d.className='dot '
   document.getElementById('ttext').textContent=ev.engine+(ev.translator==='error'?' エラー: '+ev.error:'');
   document.getElementById('tq').textContent=ev.queue>0?'(待ち '+ev.queue+')':''}
 function onError(ev){const d=document.createElement('div');d.className='seg bad';d.innerHTML='<div class="ja"></div>';d.querySelector('.ja').textContent=ev.text;main.appendChild(d)}
-const H={turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError};
+const H={turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError,turn_ctx:onTurnCtx};
 function connect(){
   const es=new EventSource('/events');
   es.onopen=()=>{document.getElementById('sdot').className='dot ok';document.getElementById('stext').textContent='接続中'};
@@ -1370,6 +1471,10 @@ def main():
     ProxyHandler.cfg = cfg
     ProxyHandler.translator = translator
     ProxyHandler.upstream = (up.scheme or "http", up.hostname, up.port or (443 if up.scheme == "https" else 80))
+    try:
+        ProxyHandler.token_meter = TokenMeter(ProxyHandler.upstream)
+    except Exception:
+        log.exception("token meter init failed (context meter will use estimates)")
     UIHandler.cfg = cfg
     UIHandler.translator = translator
 
