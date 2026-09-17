@@ -1199,78 +1199,115 @@ INDEX_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Hermes Honyaku</title>
 <style>
-:root{--bg:#0f1418;--panel:#151c22;--line:#25313a;--ink:#dfe7ec;--muted:#7f929e;--en:#a9bac6;--ja:#f2f6f8;--acc:#4fc3b8;--warn:#e5a33b;--bad:#f08a82;--ans:#8fb0c8}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 "Noto Sans JP","Hiragino Sans","Yu Gothic UI",system-ui,sans-serif}
-header{position:sticky;top:0;z-index:5;display:flex;gap:16px;align-items:center;padding:8px 16px;background:var(--panel);border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
-header b{font-size:15px;color:var(--acc)}
-.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--muted);margin-right:5px;vertical-align:middle}
+/* Win98 クラシック風 (ダークモード) */
+:root{
+--bg:#0f1418;
+--panel:#1a2126;
+--face:#232c33;
+--line:#10151a;
+--ink:#dfe7ec;
+--muted:#7f929e;
+--en:#a9bac6;
+--ja:#f2f6f8;
+--acc:#4fc3b8;
+--warn:#e5a33b;
+--bad:#f08a82;
+/* Win98 風ビベール: 上左=ハイライト / 下右=シャドウ */
+--hv:#4a5762;
+--sv:#070a0d;
+--bar1:#0b4f4a;
+--bar2:#11897e;
+--bar-ink:#eafffb;
+}
+*{box-sizing:border-box;border-radius:0}
+html{scrollbar-color:#2b353d #151b20}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.7 "Noto Sans JP","Hiragino Sans","Yu Gothic UI","MS PGothic",sans-serif;
+background-image:linear-gradient(45deg,#12181d 25%,transparent 25%),linear-gradient(-45deg,#12181d 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#12181d 75%),linear-gradient(-45deg,transparent 75%,#12181d 75%);
+background-size:4px 4px;background-position:0 0,0 2px,2px -2px,-2px 0}
+header{position:sticky;top:0;z-index:5;display:flex;gap:10px;align-items:center;padding:5px 8px;font-size:12px;flex-wrap:wrap;
+background:linear-gradient(90deg,var(--bar1),var(--bar2));color:var(--bar-ink);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow:inset 0 0 0 1px #0a0f13}
+header b{font-size:13px;color:#fff;letter-spacing:.04em}
+.dot{display:inline-block;width:8px;height:8px;background:var(--muted);margin-right:5px;vertical-align:middle;border:1px solid var(--sv)}
 .dot.ok{background:var(--acc)}.dot.error{background:var(--bad)}.dot.busy{background:var(--warn)}
-header label{color:var(--muted);cursor:pointer;user-select:none}
+header label{color:var(--bar-ink);cursor:pointer;user-select:none}
 header .sp{flex:1}
-main{padding:12px 16px 24px}
-.turn{border:1px solid var(--line);border-radius:8px;margin:0 0 14px;background:var(--panel);overflow:hidden}
-.turn h3{margin:0;padding:6px 12px;font-size:12.5px;font-weight:600;color:var(--muted);border-bottom:1px solid var(--line);display:flex;gap:12px;flex-wrap:wrap}
-.turn h3 .n{color:var(--acc);font-family:ui-monospace,Consolas,monospace}
+main{padding:10px 12px 24px}
+.turn{border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow:inset 1px 1px 0 rgba(255,255,255,.05),3px 3px 0 rgba(0,0,0,.35);margin:0 0 14px;background:var(--face)}
+.turn h3{margin:0;padding:3px 8px;font-size:12px;font-weight:600;color:#e8f4f1;display:flex;gap:10px;flex-wrap:wrap;
+background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.turn h3 .n{color:#9fe8df;font-family:"Courier New",ui-monospace,monospace}
 .turn h3 .ctx{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--en)}
-.turn h3 .st{font-family:ui-monospace,Consolas,monospace}
-.turn h3 .src{background:var(--acc);color:#0f1418;border-radius:3px;padding:0 6px;font-weight:700}
-.turn h3 .tk{background:var(--line);color:var(--muted);border-radius:3px;padding:0 6px}
-.turn h3 .ctxm{font-family:ui-monospace,Consolas,monospace;color:var(--muted)}
+.turn h3 .st{font-family:"Courier New",ui-monospace,monospace}
+.turn h3 .src{background:var(--acc);color:#0b1013;padding:0 6px;font-weight:700;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.turn h3 .tk{background:var(--face);color:var(--muted);padding:0 6px;border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
+.turn h3 .ctxm{font-family:"Courier New",ui-monospace,monospace;color:var(--muted)}
 .turn h3 .ctxm.hot{color:var(--warn)}
-header .ctxg{display:inline-flex;align-items:center;gap:7px;font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--muted);padding:2px 8px;border:1px solid var(--line);border-radius:10px;background:var(--bg)}
-header .ctxg .bar{width:90px;height:6px;border-radius:3px;background:var(--line);overflow:hidden}
-header .ctxg .fill{display:block;height:100%;width:0%;border-radius:3px;background:var(--acc);transition:width .25s,background .25s}
+header .ctxg{display:inline-flex;align-items:center;gap:7px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:1px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+header .ctxg .bar{width:90px;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+header .ctxg .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
 header .ctxg.warn .fill{background:var(--warn)}
 header .ctxg.warn{color:var(--warn)}
 header .ctxg.hot .fill{background:var(--bad)}
 header .ctxg.hot .txt,header .ctxg.hot{color:var(--bad)}
 .turn.hidden{display:none}
 .segs .note{color:var(--muted);font-size:12.5px}
-header select{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:2px 6px;font:inherit;font-size:13px}
+header select{background:#131a1f;color:var(--ink);padding:1px 4px;font:12px "Courier New",ui-monospace,monospace;
+border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .cols{display:grid;grid-template-columns:1fr 3fr;gap:0}
 @media (max-width:900px){.cols{grid-template-columns:1fr}}
-.col{padding:10px 12px;min-width:0}
-.col+.col{border-left:1px solid var(--line)}
-@media (max-width:900px){.col+.col{border-left:none;border-top:1px solid var(--line)}}
-.col .cap{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
-.think{white-space:pre-wrap;word-break:break-word;color:var(--en);font-size:13.5px;line-height:1.6}
+.col{padding:8px 10px;min-width:0}
+.col+.col{border-left:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+@media (max-width:900px){.col+.col{border-left:none;border-top:2px solid var(--line)}}
+.col .cap{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;
+background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);padding:1px 6px;display:inline-block}
+.think{white-space:pre-wrap;word-break:break-word;color:var(--en);font-size:13.5px;line-height:1.6;
+background:#12181d;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);padding:6px 8px}
 .think.live::after{content:"▍";color:var(--acc);animation:bl 1s steps(2) infinite}
 @keyframes bl{50%{opacity:0}}
-.ans{margin-top:10px;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ja);font-size:14.5px;line-height:1.75;word-break:break-word}
+.ans{margin-top:10px;padding:8px 10px;background:#12181d;color:var(--ja);font-size:14.5px;line-height:1.75;word-break:break-word;
+border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .ans:empty{display:none}
 body.noans .ans{display:none}
 .ans .cap{margin-bottom:4px}
 .ans p{margin:0 0 8px}.ans p:last-child{margin-bottom:0}
 .ans h3,.ans h4,.ans h5,.ans h6{margin:10px 0 6px;font-size:15px;color:var(--acc)}
 .ans ul,.ans ol{margin:0 0 8px;padding-left:22px}.ans li{margin:2px 0}
-.ans code{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:0 4px}
-.ans pre{background:#0a0f12;border:1px solid var(--line);border-radius:4px;padding:8px 10px;overflow-x:auto;margin:6px 0 8px}
+.ans code{font-family:"Courier New",ui-monospace,monospace;font-size:12.5px;background:var(--panel);border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);padding:0 4px}
+.ans pre{background:#0c1114;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);padding:8px 10px;overflow-x:auto;margin:6px 0 8px}
 .ans pre code{border:none;background:none;padding:0;font-size:12.5px;line-height:1.5}
 .ans table{border-collapse:collapse;margin:6px 0 8px;font-size:13.5px;max-width:100%}
 .ans th,.ans td{border:1px solid var(--line);padding:4px 9px;text-align:left;vertical-align:top}
 .ans th{background:var(--panel);color:var(--muted);font-weight:600}
 .ans blockquote{margin:6px 0;padding:2px 10px;border-left:3px solid var(--line);color:var(--en)}
-.ans hr{border:none;border-top:1px solid var(--line);margin:8px 0}
+.ans hr{border:none;border-top:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);margin:8px 0}
 .ans a{color:var(--acc)}
 .tools{margin-top:8px;font-size:12.5px;color:var(--muted)}
 .tools div{padding:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tools b{color:var(--warn);font-weight:600;margin-right:6px}
-.tools code{font-family:ui-monospace,Consolas,monospace;color:var(--en)}
-.seg{margin:0 0 8px;padding:6px 10px;border-left:3px solid var(--line);border-radius:0 4px 4px 0}
+.tools code{font-family:"Courier New",ui-monospace,monospace;color:var(--en)}
+.seg{margin:0 0 8px;padding:6px 10px;background:var(--panel);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
 .seg .src{color:var(--muted);font-size:12px;line-height:1.5}
 .seg .ja{color:var(--ja);font-size:15px}
-.seg.pending{border-left-color:var(--warn)}
-.seg.done{border-left-color:var(--acc)}
+.seg.pending{box-shadow:inset 0 0 0 1px var(--warn);border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
+.seg.done{box-shadow:inset 0 0 0 1px var(--acc)}
 .seg.done .src{display:none}
 body.showsrc .seg.done .src{display:block}
-.seg.bad{border-left-color:var(--bad)}.seg.bad .ja{color:var(--bad)}.seg.bad .src{display:block!important}
-.seg.untranslated{border-left-color:var(--warn)}.seg.untranslated .ja{color:var(--en)}
+.seg.bad{box-shadow:inset 0 0 0 1px var(--bad)}.seg.bad .ja{color:var(--bad)}.seg.bad .src{display:block!important}
+.seg.untranslated{box-shadow:inset 0 0 0 1px var(--warn)}.seg.untranslated .ja{color:var(--en)}
 .seg.untranslated .src{display:none}
 body.showsrc .seg.untranslated .src{display:block}
-.empty{color:var(--muted);padding:40px;text-align:center}
-#tobottom{position:fixed;right:20px;bottom:20px;z-index:6;display:none;background:var(--acc);color:#0f1418;border:none;border-radius:20px;padding:8px 16px;font:600 13px/1 inherit;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.4)}
+.empty{color:var(--muted);padding:40px;text-align:center;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);background:var(--face)}
+button{font:12px/1.6 "Noto Sans JP","Hiragino Sans","Yu Gothic UI",sans-serif;color:var(--ink);background:var(--face);
+border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);cursor:pointer;
+box-shadow:inset 1px 1px 0 rgba(255,255,255,.06)}
+button:active{border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+#tobottom{position:fixed;right:16px;bottom:16px;z-index:6;display:none;padding:6px 14px;
+background:linear-gradient(90deg,var(--bar1),var(--bar2));color:#fff;font-weight:700}
+#tobottom:active{filter:brightness(.85)}
 #tobottom.show{display:block}
+::-webkit-scrollbar{width:14px;height:14px}
+::-webkit-scrollbar-track{background:repeating-conic-gradient(#2b353d 0% 25%,#1c242b 0% 50%) 0 0/4px 4px}
+::-webkit-scrollbar-thumb{background:var(--face);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
 </style></head><body>
 <header>
  <b>Hermes Honyaku</b>
@@ -1284,7 +1321,7 @@ body.showsrc .seg.untranslated .src{display:block}
  <label><input type="checkbox" id="showans" checked> 回答も表示</label>
  <label><input type="checkbox" id="hidetask" checked> 背景タスクを隠す</label>
  <select id="srcsel"><option value="">すべての発信元</option></select>
- <label><button id="clear" style="background:none;border:1px solid var(--line);color:var(--muted);border-radius:4px;padding:2px 8px;cursor:pointer">画面を消去</button></label>
+ <label><button id="clear">画面を消去</button></label>
 </header>
 <button id="tobottom" type="button">↓ 最新へ (自動スクロール再開)</button>
 <main id="main"><div class="empty" id="empty">Hermes Agent からの要求を待っています。<br>~/.hermes/config.yaml の model.base_url を中継サーバーに向けてください。</div></main>
