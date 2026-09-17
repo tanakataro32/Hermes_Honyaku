@@ -401,6 +401,8 @@ class Turn:
               "source": source, "task": task}
         BUS.publish(ev)
         self.translator.jlog.write(ev)
+        # 前のターンの翻訳待ちを中断して新しいターンの翻訳を優先
+        self.translator.new_turn(self.n)
 
     def feed_think(self, text):
         if not text:
@@ -586,6 +588,30 @@ class Translator:
         BUS.publish(ev)
         self.jlog.write(ev)
         self.q.put((turn, seg_id, text))
+        self._publish_status()
+
+    def new_turn(self, n):
+        """新しいターンの開始: 終了済みターンの翻訳待ちを中断し、新しいターンの翻訳を優先する。
+        中断された行は原文を訳文欄に置く (how='skip')。実行中の数件 (workers 分) は完了するが、
+        以降のキューには古いターンのものが残らないため新しいターンの翻訳が先に行く。"""
+        with Turn.active_lock:
+            active = set(Turn.active)
+        purged = []
+        while True:
+            try:
+                item = self.q.get_nowait()
+            except queue.Empty:
+                break
+            if item[0] not in active:
+                purged.append(item)
+            else:
+                self.q.put(item)
+        for t, seg_id, text in purged:
+            ev = {"type": "ja", "turn": t, "seg": seg_id, "text": text, "how": "skip", "ok": True, "sec": 0}
+            BUS.publish(ev)
+            self.jlog.write(ev)
+        if purged:
+            log.info("interrupted %d pending translations of finished turn(s)", len(purged))
         self._publish_status()
 
     def _set_status(self, st, err=""):
@@ -1288,6 +1314,20 @@ function updateBtn(){tobottom.classList.toggle('show',!newest.checked&&!auto.che
 let programmatic=false;
 // 自動スクロールの目標: 画面の下端に「右列の最新データ」が来るところ。
 // 右列 = 訳文(segs)・ツール・回答。左列(英文のThinking)は追随対象にしない。
+// 翻訳待ちが3行以上たまっている間は「最後に翻訳済みの行」まで追随する (まだ訳が出ていない行を画面の端に張り付かせない)
+function lastDoneSeg(){
+  let bestEl=null;
+  const keys=Object.keys(turns).map(Number).sort((a,b)=>a-b);
+  for(const n of keys){
+    for(const c of turns[n].segs.children){
+      if(c.classList.contains('pending'))continue;
+      bestEl=c; // 番号順に辿るので、最後に残ったのが最新の実データ
+    }
+  }
+  return bestEl}
+function countPending(){
+  let n=0;for(const k in turns)for(const c of turns[k].segs.children)if(c.classList.contains('pending'))n++;
+  return n}
 function targetY(){
   let best=0;
   for(const k in turns){
@@ -1298,6 +1338,8 @@ function targetY(){
     if(t.ans&&t.ans.textContent.trim()){const b=t.ans.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
   }
   if(!best)return document.documentElement.scrollHeight;
+  // 翻訳が追いついていない (待ち3行以上) 間は、最後に翻訳済みの行までしかスクロールしない
+  if(countPending()>=3){const d=lastDoneSeg();if(d){const b=d.getBoundingClientRect().bottom+window.scrollY;if(b<best)best=b}}
   // 画面の下端に最新を合わせてスクロール (余白は最小限)
   return Math.max(0,Math.min(best,document.documentElement.scrollHeight)-window.innerHeight+24);
 }
