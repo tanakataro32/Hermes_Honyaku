@@ -1182,7 +1182,7 @@ header b{font-size:15px;color:var(--acc)}
 .dot.ok{background:var(--acc)}.dot.error{background:var(--bad)}.dot.busy{background:var(--warn)}
 header label{color:var(--muted);cursor:pointer;user-select:none}
 header .sp{flex:1}
-main{padding:12px 16px 40vh}
+main{padding:12px 16px 24px}
 .turn{border:1px solid var(--line);border-radius:8px;margin:0 0 14px;background:var(--panel);overflow:hidden}
 .turn h3{margin:0;padding:6px 12px;font-size:12.5px;font-weight:600;color:var(--muted);border-bottom:1px solid var(--line);display:flex;gap:12px;flex-wrap:wrap}
 .turn h3 .n{color:var(--acc);font-family:ui-monospace,Consolas,monospace}
@@ -1278,24 +1278,21 @@ function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 function fmt(ts){const d=new Date(ts*1000);return d.toTimeString().slice(0,8)}
 function updateBtn(){tobottom.classList.toggle('show',!newest.checked&&!auto.checked)}
 let programmatic=false;
-// 自動スクロールの目標: 右列の「全ターンで最新の翻訳セグメント」の下端 (まだ無い場合は最新ターンの下端)。
-// 左列の原文が伸びても追従せず、訳文の最新付近をたどる (翻訳が遅れて黄色のままでも、既に出た訳文に寄る)
+// 自動スクロールの目標: 「最新の実データ」= 左列(英文)の先端と右列(訳文・ツール・回答)の先端のうち、下のほう。
+// 英文が流れている間は英文の先端 (リアルタイムで最新が画面に見える)。英文が止まったら訳文の先端に追随
 function targetY(){
-  let bestEl=null, bestTurn=-1, bestSeg=-1;
-  for(const k in turns){
-    const t=turns[k], tn=Number(k);
-    for(const sk in t.segEls){
-      const sn=Number(sk);
-      if(tn>bestTurn||(tn===bestTurn&&sn>bestSeg)){bestTurn=tn;bestSeg=sn;bestEl=t.segEls[sk]}
-    }
+  let best=0;
+  const keys=Object.keys(turns).map(Number).sort((a,b)=>b-a);
+  for(const k of keys){
+    const t=turns[k];
+    if(t.el.getBoundingClientRect().bottom+window.scrollY<=best)break; // このターンより古いターンはさらに上
+    if(t.think&&t.think.textContent){const b=t.think.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
+    const ls=t.segs.lastElementChild;
+    if(ls){const b=ls.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
+    if(t.tools&&t.tools.children.length){const b=t.tools.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
+    if(t.ans&&t.ans.textContent.trim()){const b=t.ans.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
   }
-  if(!bestEl){
-    const keys=Object.keys(turns).map(Number).sort((a,b)=>a-b);
-    if(!keys.length)return document.documentElement.scrollHeight;
-    const el=turns[keys[keys.length-1]].el;
-    return Math.max(0,el.getBoundingClientRect().bottom+window.scrollY-60);
-  }
-  return Math.max(0,bestEl.getBoundingClientRect().bottom+window.scrollY-60);
+  return Math.max(0,(best||document.documentElement.scrollHeight)-60);
 }
 function scroll(){if(newest.checked||!auto.checked)return;programmatic=true;window.scrollTo(0,targetY());requestAnimationFrame(()=>{programmatic=false})}
 // 自動スクロール ON のとき: 最新訳文から離れて上にスクロールしたら止める
