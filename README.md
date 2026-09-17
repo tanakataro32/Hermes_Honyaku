@@ -178,6 +178,18 @@ Hermes が会話タイトルを付けるための要求も同じ扱いです。
 
 DeepL を使う場合は `engine = deepl` にして `deepl_key` を設定します (Free プランは月 50 万文字まで。思考ログは量が多いので上限に注意)。
 
+## 5b. 更新 (git pull 後)
+
+`hermes_honyaku.py` や `config.ini` を git から更新した場合は、**再起動しないと新コードは動きません** (systemd がメモリ上の旧コードを動かし続けています)。ホストで:
+
+```bash
+cd ~/hermes_honyaku
+git pull
+sudo systemctl restart hermes-honyaku
+```
+
+`config.local.ini` と `windows\local_settings.bat` は git 管理外なので pull で消えません。
+
 ## 6. 困ったとき
 
 | 症状 | 見るところ |
