@@ -1091,11 +1091,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
             turn = Turn(req.get("model") or "", summarize_context(req), self.cfg, self.translator,
                         source=self._source(), task=is_task_request(req))
             if self.token_meter is not None:
-                # 画面用のコンテキストメータ。tokenize が遅くても応答を止めない (5秒タイムアウト、失敗は推定値)
-                n_tok, exact = self.token_meter.count_messages(req.get("model") or "", req.get("messages") or [])
-                BUS.publish({"type": "turn_ctx", "turn": turn.n, "tokens": n_tok, "exact": exact,
-                             "max_tokens": int(req.get("max_tokens") or 0),
-                             "ctx_limit": self.cfg.getint("ui", "ctx_limit")})
+                # 画面用のコンテキストメータ。/tokenize が (並列 1 の) 生成と干渉して遅くなる可能性があるため、
+                # 本線のスレッドで待たず別スレッドで数える (遅くても turn_ctx が後から届くだけで、応答は止まらない)
+                meter, model, messages = self.token_meter, req.get("model") or "", req.get("messages") or []
+                def _meter():
+                    try:
+                        n_tok, exact = meter.count_messages(model, messages)
+                    except Exception:
+                        n_tok, exact = 0, False
+                    BUS.publish({"type": "turn_ctx", "turn": turn.n, "tokens": n_tok, "exact": exact,
+                                 "max_tokens": int(req.get("max_tokens") or 0),
+                                 "ctx_limit": self.cfg.getint("ui", "ctx_limit")})
+                threading.Thread(target=_meter, name="ctx-meter", daemon=True).start()
             acc = ResponseAccumulator()
             if client_stream:
                 self._begin(200, resp.getheaders(), True)
