@@ -164,7 +164,26 @@ class EventBus:
         with self.lock:
             if self.events and self.events[0]["id"] > last_id + 1:
                 return None
-            return [e for e in self.events if e["id"] > last_id]
+            evs = [e for e in self.events if e["id"] > last_id]
+            # リングバッファから turn_start / seg が落ちても、その後の ja だけ残ることがある。
+            # ターン要約から欠けたイベントを補って先頭に追加する (画面の原文が失われないように)
+            have = {e["id"] for e in evs}
+            for e in evs:
+                n = e.get("turn")
+                info = self.turns.get(n) if n is not None else None
+                if info is None:
+                    continue
+                if info.get("start") and info["start"]["id"] not in have:
+                    evs.insert(0, dict(info["start"]))
+                    have.add(info["start"]["id"])
+                if e.get("type") == "ja":
+                    pair = info["segs"].get(e["seg"])
+                    seg_ev = pair and pair["seg"]
+                    if seg_ev is not None and seg_ev["id"] not in have:
+                        evs.insert(0, dict(seg_ev))
+                        have.add(seg_ev["id"])
+            evs.sort(key=lambda e: e["id"])
+            return evs
 
     def latest_id(self):
         with self.lock:
@@ -1072,11 +1091,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
             turn = Turn(req.get("model") or "", summarize_context(req), self.cfg, self.translator,
                         source=self._source(), task=is_task_request(req))
             if self.token_meter is not None:
-                # 画面用のコンテキストメータ。tokenize が遅くても応答を止めない (5秒タイムアウト、失敗は推定値)
-                n_tok, exact = self.token_meter.count_messages(req.get("model") or "", req.get("messages") or [])
-                BUS.publish({"type": "turn_ctx", "turn": turn.n, "tokens": n_tok, "exact": exact,
-                             "max_tokens": int(req.get("max_tokens") or 0),
-                             "ctx_limit": self.cfg.getint("ui", "ctx_limit")})
+                # 画面用のコンテキストメータ。/tokenize が (並列 1 の) 生成と干渉して遅くなる可能性があるため、
+                # 本線のスレッドで待たず別スレッドで数える (遅くても turn_ctx が後から届くだけで、応答は止まらない)
+                meter, model, messages = self.token_meter, req.get("model") or "", req.get("messages") or []
+                def _meter():
+                    try:
+                        n_tok, exact = meter.count_messages(model, messages)
+                    except Exception:
+                        n_tok, exact = 0, False
+                    BUS.publish({"type": "turn_ctx", "turn": turn.n, "tokens": n_tok, "exact": exact,
+                                 "max_tokens": int(req.get("max_tokens") or 0),
+                                 "ctx_limit": self.cfg.getint("ui", "ctx_limit")})
+                threading.Thread(target=_meter, name="ctx-meter", daemon=True).start()
             acc = ResponseAccumulator()
             if client_stream:
                 self._begin(200, resp.getheaders(), True)
@@ -1156,7 +1182,7 @@ header b{font-size:15px;color:var(--acc)}
 .dot.ok{background:var(--acc)}.dot.error{background:var(--bad)}.dot.busy{background:var(--warn)}
 header label{color:var(--muted);cursor:pointer;user-select:none}
 header .sp{flex:1}
-main{padding:12px 16px 40vh}
+main{padding:12px 16px 24px}
 .turn{border:1px solid var(--line);border-radius:8px;margin:0 0 14px;background:var(--panel);overflow:hidden}
 .turn h3{margin:0;padding:6px 12px;font-size:12.5px;font-weight:600;color:var(--muted);border-bottom:1px solid var(--line);display:flex;gap:12px;flex-wrap:wrap}
 .turn h3 .n{color:var(--acc);font-family:ui-monospace,Consolas,monospace}
@@ -1207,6 +1233,8 @@ body.noans .ans{display:none}
 body.showsrc .seg.done .src{display:block}
 .seg.bad{border-left-color:var(--bad)}.seg.bad .ja{color:var(--bad)}.seg.bad .src{display:block!important}
 .seg.untranslated{border-left-color:var(--warn)}.seg.untranslated .ja{color:var(--en)}
+.seg.untranslated .src{display:none}
+body.showsrc .seg.untranslated .src{display:block}
 .empty{color:var(--muted);padding:40px;text-align:center}
 #tobottom{position:fixed;right:20px;bottom:20px;z-index:6;display:none;background:var(--acc);color:#0f1418;border:none;border-radius:20px;padding:8px 16px;font:600 13px/1 inherit;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.4)}
 #tobottom.show{display:block}
@@ -1248,14 +1276,30 @@ function addSource(name){if(!name||[...srcsel.options].some(o=>o.value===name))r
 document.getElementById('clear').onclick=()=>{for(const k in turns){turns[k].el.remove();delete turns[k]}};
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function fmt(ts){const d=new Date(ts*1000);return d.toTimeString().slice(0,8)}
-function atBottom(){return document.documentElement.scrollHeight-window.scrollY-window.innerHeight<80}
 function updateBtn(){tobottom.classList.toggle('show',!newest.checked&&!auto.checked)}
 let programmatic=false;
-function scroll(){if(newest.checked||!auto.checked)return;programmatic=true;window.scrollTo(0,document.documentElement.scrollHeight);requestAnimationFrame(()=>{programmatic=false})}
-// 読んでいる途中で上にスクロールしたら自動スクロールを止める。最下部まで戻したら再開
+// 自動スクロールの目標: 画面の下端に「右列の最新データ」が来るところ。
+// 右列 = 訳文(segs)・ツール・回答。左列(英文のThinking)は追随対象にしない。
+function targetY(){
+  let best=0;
+  for(const k in turns){
+    const t=turns[k];
+    const ls=t.segs.lastElementChild;
+    if(ls){const b=ls.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
+    if(t.tools&&t.tools.children.length){const b=t.tools.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
+    if(t.ans&&t.ans.textContent.trim()){const b=t.ans.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
+  }
+  if(!best)return document.documentElement.scrollHeight;
+  // 画面の下端に最新を合わせてスクロール (余白は最小限)
+  return Math.max(0,Math.min(best,document.documentElement.scrollHeight)-window.innerHeight+24);
+}
+function scroll(){if(newest.checked||!auto.checked)return;programmatic=true;window.scrollTo(0,targetY());requestAnimationFrame(()=>{programmatic=false})}
+// 自動スクロール ON のとき: 最新訳文から離れて上にスクロールしたら止める
+function awayFromTarget(){return document.documentElement.scrollHeight-window.scrollY-window.innerHeight<80||window.scrollY+window.innerHeight>=targetY()-80}
 window.addEventListener('scroll',()=>{if(programmatic||newest.checked)return;
-  if(auto.checked&&!atBottom()){auto.checked=false;updateBtn()}
-  else if(!auto.checked&&atBottom()){auto.checked=true;updateBtn()}},{passive:true});
+  if(auto.checked&&!awayFromTarget()){auto.checked=false;updateBtn()}
+  // 再開は「ページ最下部までスクロールした場合」のみ (最新訳文が画面内であるだけでは再チェックされず、チェックを外せる)
+  else if(!auto.checked&&document.documentElement.scrollHeight-window.scrollY-window.innerHeight<80){auto.checked=true;updateBtn()}},{passive:true});
 tobottom.onclick=()=>{auto.checked=true;updateBtn();scroll()};
 function turn(n){return turns[n]}
 function onTurnStart(ev){
@@ -1320,10 +1364,13 @@ function onSeg(ev){const t=turn(ev.turn);if(!t)return;
     t.segEls[ev.seg]=s;}
   s.querySelector('.src').textContent=ev.src;scroll()}
 function onJa(ev){const t=turn(ev.turn);if(!t)return;let s=t.segEls[ev.seg];if(!s){onSeg({turn:ev.turn,seg:ev.seg,src:''});s=t.segEls[ev.seg]}
-  s.querySelector('.ja').textContent=ev.text;s.classList.remove('pending');
+  // 翻訳モデルが英語で返した (how='en') ときは、モデルの言い換えではなく原文を表示する
+  s.querySelector('.ja').textContent=ev.how==='en'?(s.querySelector('.src').textContent||ev.text):ev.text;
+  s.classList.remove('pending');
   s.classList.add(ev.how==='en'?'untranslated':ev.ok?'done':'bad');
   if(ev.how==='suspect')s.title='訳文が原文より極端に長いため、翻訳モデルが作文している可能性があります (原文を併記)';
-  if(ev.how==='skip'||ev.how==='en')s.querySelector('.src').style.display='none';scroll()}
+  else if(ev.how==='en')s.title='翻訳失敗 (翻訳モデルが英語で返したため原文を表示)';
+  scroll()}
 function onTurnEnd(ev){const t=turn(ev.turn);if(!t)return;t.think.classList.remove('live');
   t.st.textContent=(ev.reason==='stop'||ev.reason==='tool_calls'||ev.reason==='length'?'完了':ev.reason)+' · '+ev.elapsed+'s · '+ev.think_chars+'字 · '+ev.segments+'文';
   if(!t.think.textContent.trim())t.think.textContent='(思考なし)';if(t.ansTimer){clearTimeout(t.ansTimer);renderAns(t)}
