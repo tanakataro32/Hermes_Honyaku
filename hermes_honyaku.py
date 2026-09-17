@@ -1192,6 +1192,13 @@ main{padding:12px 16px 24px}
 .turn h3 .tk{background:var(--line);color:var(--muted);border-radius:3px;padding:0 6px}
 .turn h3 .ctxm{font-family:ui-monospace,Consolas,monospace;color:var(--muted)}
 .turn h3 .ctxm.hot{color:var(--warn)}
+header .ctxg{display:inline-flex;align-items:center;gap:7px;font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--muted);padding:2px 8px;border:1px solid var(--line);border-radius:10px;background:var(--bg)}
+header .ctxg .bar{width:90px;height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+header .ctxg .fill{display:block;height:100%;width:0%;border-radius:3px;background:var(--acc);transition:width .25s,background .25s}
+header .ctxg.warn .fill{background:var(--warn)}
+header .ctxg.warn{color:var(--warn)}
+header .ctxg.hot .fill{background:var(--bad)}
+header .ctxg.hot .txt,header .ctxg.hot{color:var(--bad)}
 .turn.hidden{display:none}
 .segs .note{color:var(--muted);font-size:12.5px}
 header select{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:2px 6px;font:inherit;font-size:13px}
@@ -1243,6 +1250,7 @@ body.showsrc .seg.untranslated .src{display:block}
  <b>Hermes Honyaku</b>
  <span><span id="sdot" class="dot"></span><span id="stext">接続中…</span></span>
  <span title="翻訳サーバーの状態"><span id="tdot" class="dot"></span>翻訳: <span id="ttext">-</span> <span id="tq"></span></span>
+ <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
  <span class="sp"></span>
  <label><input type="checkbox" id="auto" checked> 自動スクロール</label>
  <label><input type="checkbox" id="newest"> 新しいターンを上に</label>
@@ -1273,7 +1281,7 @@ srcsel.onchange=()=>applyFilters();
 function applyFilters(){for(const k in turns){const el=turns[k].el;
   el.classList.toggle('hidden',(hidetask.checked&&el.classList.contains('task'))||(srcsel.value&&el.dataset.source!==srcsel.value))}}
 function addSource(name){if(!name||[...srcsel.options].some(o=>o.value===name))return;const o=document.createElement('option');o.value=name;o.textContent=name;srcsel.appendChild(o)}
-document.getElementById('clear').onclick=()=>{for(const k in turns){turns[k].el.remove();delete turns[k]}};
+document.getElementById('clear').onclick=()=>{for(const k in turns){turns[k].el.remove();delete turns[k]}const g=document.getElementById('ctxg');g.querySelector('.txt').textContent='ctx -';g.querySelector('.fill').style.width='0%';g.className='ctxg';g.title='最新ターンのコンテキスト使用量'};
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function fmt(ts){const d=new Date(ts*1000);return d.toTimeString().slice(0,8)}
 function updateBtn(){tobottom.classList.toggle('show',!newest.checked&&!auto.checked)}
@@ -1322,7 +1330,14 @@ function onTurnCtx(ev){const t=turn(ev.turn);if(!t)return;const el=t.el.querySel
   const lim=ev.ctx_limit||0;const k=v=>v>=1000?(v/1000).toFixed(1).replace(/\.0$/,'')+'k':v;
   el.textContent='ctx '+k(ev.tokens)+(lim?'/'+k(lim):'')+(ev.exact?'':'~')+' · max_out '+k(ev.max_tokens||0);
   el.title=ev.exact?'リクエスト本文のトークン数 (llama-server の /tokenize)':'リクエスト本文の推定トークン数 (/tokenize 利用不可のため文字数から概算)'+(ev.max_tokens?' · 出力上限はリクエストの max_tokens':'');
-  if(lim&&ev.tokens/lim>=0.8)el.classList.add('hot');else el.classList.remove('hot');scroll()}
+  if(lim&&ev.tokens/lim>=0.8)el.classList.add('hot');else el.classList.remove('hot');
+  // ヘッダーの固定メーターにも反映 (最新ターンの使用量)
+  const g=document.getElementById('ctxg');
+  g.querySelector('.txt').textContent='ctx '+k(ev.tokens)+(lim?'/'+k(lim):'')+(ev.exact?'':'~');
+  g.querySelector('.fill').style.width=(lim?Math.min(100,ev.tokens/lim*100):0)+'%';
+  g.className='ctxg'+(lim&&ev.tokens/lim>=0.8?' hot':lim&&ev.tokens/lim>=0.5?' warn':'');
+  g.title='最新ターンのコンテキスト使用量'+(ev.exact?' (llama-server の /tokenize)':' (推定値)')+(ev.max_tokens?' · max_out '+k(ev.max_tokens):'');
+  scroll()}
 function renderAns(t){t.ansTimer=null;t.ans.innerHTML=t.ansRaw.trim()?'<div class="cap">回答</div>'+md(t.ansRaw):'';scroll()}
 function onAnswer(ev){const t=turn(ev.turn);if(!t)return;t.ansRaw+=ev.text;if(!t.ansTimer)t.ansTimer=setTimeout(()=>renderAns(t),150)}
 function onTools(ev){const t=turn(ev.turn);if(!t)return;t.tools.innerHTML=(ev.tools||[]).map(x=>'<div title="'+esc(x.args)+'"><b>🔧 '+esc(x.name)+'</b><code>'+esc(x.args)+'</code></div>').join('');scroll()}
