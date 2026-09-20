@@ -1003,9 +1003,11 @@ class SysMonitor:
 
     @staticmethod
     def _read_disk_label(device):
-        """NVMe デバイスのモデル名 (例: 'WD Blue SN5100 500GB')。読めなければ None"""
+        """NVMe デバイスのモデル名 (例: 'WD Blue SN5100 500GB')。読めなければ None。
+        device は '/dev/nvme0n1' のようなパスなので、/sys/class/block 配下は
+        裸のブロック名 (nvme0n1) を使う"""
         try:
-            with open(f"/sys/class/block/{device}/device/model") as f:
+            with open(f"/sys/class/block/{device.split('/')[-1]}/device/model") as f:
                 return f.read().strip()
         except Exception:
             return None
