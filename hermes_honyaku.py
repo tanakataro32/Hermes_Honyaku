@@ -962,6 +962,10 @@ class SysMonitor:
     CPU 使用率は 2 サンプル間の /proc/stat delta で算出 (1 回の読み取りだけでは
     絶対値が出せないため、初期値は 0.0)。/proc がない・読めない環境 (非 Linux 等) では
     各項目を None にして送る (UI は "-" 表示)。
+
+    ディスクは /proc/mounts の NVMe マウントごとに statvfs を取り、モデル名
+    (/sys/class/block/*/device/model) を短縮した名前 (例: 'WD SN5100') をラベルにして
+    disks リストで送る。非 NVMe 環境では空リスト (UI は従来どおり disk_* フィールドで 1 行)。
     """
 
     def __init__(self, interval=5.0):
@@ -997,6 +1001,92 @@ class SysMonitor:
         except Exception:
             return None
 
+    @staticmethod
+    def _read_disk_label(device):
+        """NVMe デバイスのモデル名 (例: 'WD Blue SN5100 500GB')。読めなければ None。
+        device は '/dev/nvme0n1' のようなパスなので、/sys/class/block 配下は
+        裸のブロック名 (nvme0n1) を使う"""
+        try:
+            with open(f"/sys/class/block/{device.split('/')[-1]}/device/model") as f:
+                return f.read().strip()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _read_disks():
+        """/proc/mounts の NVMe マウントごとに statvfs で使用量を読む。
+        戻り値: [{device, label, label_short, total, used}, ...]
+        (非 NVMe 環境では空リスト → UI は従来どおり disk_total/disk_used で 1 行表示)"""
+        disks = []
+        try:
+            with open("/proc/mounts") as f:
+                mounts = [ln.split() for ln in f]
+        except Exception:
+            return disks
+        for fields in mounts:
+            if len(fields) < 2:
+                continue
+            dev, mp = fields[0], fields[1]
+            if not re.match(r"^/dev/nvme\d+n\d+p\d+$", dev):
+                continue
+            base = re.match(r"^(/dev/nvme\d+n\d+)", dev).group(1)
+            try:
+                st = os.statvfs(mp)
+            except OSError:
+                continue
+            unit = st.f_frsize
+            total = st.f_blocks * unit / 1073741824.0
+            used = (st.f_blocks - st.f_bavail) * unit / 1073741824.0
+            disks.append({
+                "device": base,
+                "label": SysMonitor._read_disk_label(base),
+                "label_short": None,  # 後でまとめて採番 (重複回避)
+                "total": round(total, 1),
+                "used": round(used, 1),
+            })
+        # デバイスごとは最大パーティションの行だけ残す (/ と /boot/efi の併記を防ぐ)
+        best = {}
+        for d in disks:
+            cur = best.get(d["device"])
+            if cur is None or d["total"] > cur["total"]:
+                best[d["device"]] = d
+        disks = list(best.values())
+        seen = {}
+        for d in disks:
+            name = SysMonitor._short_disk_name(d["label"], d["device"])
+            n = seen.get(name, 0)
+            seen[name] = n + 1
+            d["label_short"] = name if n == 0 else f"{name} ({n + 1})"
+        return disks
+
+    @staticmethod
+    def _short_disk_name(model, device):
+        """モデル名を短い表示名に (例: 'WD Blue SN5100 500GB'→'WD SN5100', 'INTEL SSDPEKKW256G8'→'Intel 256G')。
+        パース不能時はデバイス名を返す。"""
+        if not model:
+            return device.split("/")[-1]
+        tokens = re.sub(r"\s+", " ", model).strip().split()
+        brand = tokens[0]
+        if brand.upper() in ("INTEL", "SAMSUNG", "MICRON", "KINGSTON", "CRUCIAL", "SILICON"):
+            brand = brand.title()
+        rest = tokens[1:]
+        # 末尾の容量表記 ('500GB' '1TB' 等) を除去
+        while rest and re.fullmatch(r"\d+(TB|GB|G|T)", rest[-1], re.I):
+            rest.pop()
+        if rest:
+            last = rest[-1]
+            # パート番号末尾に容量が埋め込まれている場合 (例: SSDPEKKW256G8 → 256G)
+            m = re.search(r"(\d{2,4})[GT](?=\d*$)", last)
+            if m:
+                return f"{brand} {m.group(1)}{last[m.end() - 1]}"
+            if re.search(r"\d", last):
+                return f"{brand} {last}"
+            if last.lower() in ("plus", "pro", "mx", "sx"):  # 容量以外の接尾辞 → その前を使う
+                if len(rest) >= 2 and re.search(r"\d", rest[-2]):
+                    return f"{brand} {rest[-2]}"
+                return f"{brand} {rest[-1] if len(rest) == 1 else ' '.join(rest[:-1])}"[:20]
+        return f"{brand} {model[len(brand):].strip()}"[:20]
+
     def _snapshot(self):
         data = {}
         cur = self._read_cpu_times()
@@ -1022,6 +1112,7 @@ class SysMonitor:
         except Exception:
             data["disk_total"] = None
             data["disk_used"] = None
+        data["disks"] = self._read_disks()
         return data
 
     def _loop(self):
@@ -1512,8 +1603,8 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .sysm{display:flex;flex-direction:column;gap:3px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .sysm .ghead b{color:#fff}
 .sysm .brow{display:flex;align-items:center;gap:6px}
-.sysm .brow .bl{width:44px;color:var(--muted);flex:none;white-space:nowrap}
-.sysm .brow .bval{width:92px;text-align:right;flex:none;color:#cfe8e4}
+.sysm .brow .bl{width:74px;color:var(--muted);flex:none;white-space:nowrap}
+.sysm .brow .bval{width:84px;text-align:right;flex:none;color:#cfe8e4}
 .sysm .bar{flex:1;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .sysm .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
 .sysm .brow.warn .fill{background:var(--warn)}
@@ -1812,19 +1903,32 @@ function renderGpu(gpus){const c=document.getElementById('gpuc');if(!c)return;c.
    c.appendChild(d)}}
 function onGpu(ev){renderGpu(ev.gpus)}
 function bfmt(v){return v===null?'-':v.toFixed(1)}
-function sysrow(label,value,pct,warnPct){const w=pct===null?'0':Math.max(0,Math.min(100,pct));
+function sysrow(label,value,pct,warnPct,title){const w=pct===null?'0':Math.max(0,Math.min(100,pct));
  const cls=pct!==null&&pct>=warnPct?' warn':'';
- return '<div class="brow'+cls+'"><span class="bl">'+label+'</span><span class="bval">'+value+'</span><span class="bar"><span class="fill" style="width:'+w+'%"></span></span></div>'}
+ return '<div class="brow'+cls+'"'+(title?' title="'+esc(title)+'"':'')+'><span class="bl">'+label+'</span><span class="bval">'+value+'</span><span class="bar"><span class="fill" style="width:'+w+'%"></span></span></div>'}
 function renderSys(s){const c=document.getElementById('sysmc');if(!c||!s)return;c.innerHTML='';
  const d=document.createElement('div');d.className='sysm';
- d.title='サーバの CPU 使用率・RAM・ディスク使用量 (/proc・statvfs、2秒更新)';
+ d.title='サーバの CPU 使用率・RAM・各 SSD 使用量 (/proc・statvfs、2秒更新)';
  const cpu=(s.cpu===null||s.cpu===undefined)?null:s.cpu;
  const cpuV=cpu===null?'-':cpu.toFixed(1)+'%';
  const memV=(s.mem_used===null||s.mem_used===undefined)?'-':bfmt(s.mem_used)+'/'+bfmt(s.mem_total)+'G';
  const memPct=(s.mem_total)?s.mem_used/s.mem_total*100:null;
- const diskV=(s.disk_used===null||s.disk_used===undefined)?'-':bfmt(s.disk_used)+'/'+bfmt(s.disk_total)+'G';
- const diskPct=(s.disk_total)?s.disk_used/s.disk_total*100:null;
- d.innerHTML='<div class="ghead"><b>サーバ</b></div>'+sysrow('CPU',cpuV,cpu,90)+sysrow('RAM',memV,memPct,95)+sysrow('ディスク',diskV,diskPct,90);
+ let rows='';
+ if(Array.isArray(s.disks)&&s.disks.length){
+  for(const dk of s.disks){
+   const t=dk.total===null||dk.total===undefined?null:dk.total;
+   const u=dk.used===null||dk.used===undefined?null:dk.used;
+   const v=(u===null||t===null)?'-':bfmt(u)+'/'+bfmt(t)+'G';
+   const pct=(t)?u/t*100:null;
+   const tip=(dk.label?dk.label+' ('+dk.device+')':dk.device);
+   rows+=sysrow(dk.label_short||dk.device,v,pct,90,tip);
+  }
+ }else{
+  const diskV=(s.disk_used===null||s.disk_used===undefined)?'-':bfmt(s.disk_used)+'/'+bfmt(s.disk_total)+'G';
+  const diskPct=(s.disk_total)?s.disk_used/s.disk_total*100:null;
+  rows+=sysrow('ディスク',diskV,diskPct,90);
+ }
+ d.innerHTML='<div class="ghead"><b>サーバ</b></div>'+sysrow('CPU',cpuV,cpu,90)+sysrow('RAM',memV,memPct,95)+rows;
  c.appendChild(d)}
 function onSysmon(ev){renderSys(ev)}
 function onError(ev){const d=document.createElement('div');d.className='seg bad';d.innerHTML='<div class="ja"></div>';d.querySelector('.ja').textContent=ev.text;main.appendChild(d)}
