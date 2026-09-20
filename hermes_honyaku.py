@@ -1378,17 +1378,29 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .turn h3 .tk{background:var(--face);color:var(--muted);padding:0 6px;border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
 .turn h3 .ctxm{font-family:"Courier New",ui-monospace,monospace;color:var(--muted)}
 .turn h3 .ctxm.hot{color:var(--warn)}
-header .ctxg{display:inline-flex;align-items:center;gap:7px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:1px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-header .ctxg .bar{width:90px;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-header .ctxg .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
-header .ctxg.warn .fill{background:var(--warn)}
-header .ctxg.warn{color:var(--warn)}
-header .ctxg.hot .fill{background:var(--bad)}
-header .ctxg.hot .txt,header .ctxg.hot{color:var(--bad)}
-header .gpug{display:inline-flex;align-items:center;gap:5px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:1px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-header .gpug .mem{color:var(--muted)}
-header .gpug.warn{color:var(--warn)}
-header .gpug.hot{color:var(--bad)}
+.ctxg{display:inline-flex;align-items:center;gap:7px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:1px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.ctxg .bar{width:90px;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.ctxg .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
+.ctxg.warn .fill{background:var(--warn)}
+.ctxg.warn{color:var(--warn)}
+.ctxg.hot .fill{background:var(--bad)}
+.ctxg.hot .txt,.ctxg.hot{color:var(--bad)}
+.gpug{display:inline-flex;align-items:center;gap:5px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:1px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.gpug .mem{color:var(--muted)}
+.gpug.warn{color:var(--warn)}
+.gpug.hot{color:var(--bad)}
+/* システム情報パネル (左列。スクロールしても固定) */
+#shell{display:grid;grid-template-columns:260px 1fr}
+#syspanel{position:sticky;top:46px;align-self:start;max-height:calc(100vh - 56px);overflow-y:auto;min-width:0;padding:10px 12px 24px}
+.sysbox{margin:0 0 10px;padding:6px 8px;font-size:12px;background:var(--face);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow:inset 1px 1px 0 rgba(255,255,255,.05)}
+.sysbox .cap{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;
+background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);padding:1px 6px;display:inline-block}
+.sysbox .row{display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden}
+.sysbox .row+.row{margin-top:5px}
+#syspanel .ctxg{width:100%}
+#syspanel .ctxg .bar{flex:1;width:auto}
+#gpuc{display:flex;flex-direction:column;gap:4px}
+#syspanel .gpug{display:flex;width:100%}
 .turn.hidden{display:none}
 .segs .note{color:var(--muted);font-size:12.5px}
 header select{background:#131a1f;color:var(--ink);padding:1px 4px;font:12px "Courier New",ui-monospace,monospace;
@@ -1452,10 +1464,6 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));color:#fff;font-weight
 </style></head><body>
 <header>
  <b>Hermes Honyaku</b>
- <span><span id="sdot" class="dot"></span><span id="stext">接続中…</span></span>
- <span title="翻訳サーバーの状態"><span id="tdot" class="dot"></span>翻訳: <span id="ttext">-</span> <span id="tq"></span></span>
- <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
- <span id="gpuc"></span>
  <span class="sp"></span>
  <label><input type="checkbox" id="auto" checked> 自動スクロール</label>
  <label><input type="checkbox" id="newest"> 新しいターンを上に</label>
@@ -1466,7 +1474,21 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));color:#fff;font-weight
  <label><button id="clear">画面を消去</button></label>
 </header>
 <button id="tobottom" type="button">↓ 最新へ (自動スクロール再開)</button>
+<div id="shell">
+<aside id="syspanel">
+ <div class="sysbox"><span class="cap">接続</span>
+  <div class="row"><span id="sdot" class="dot"></span><span id="stext">接続中…</span></div>
+  <div class="row" title="翻訳サーバーの状態"><span id="tdot" class="dot"></span>翻訳: <span id="ttext">-</span> <span id="tq"></span></div>
+ </div>
+ <div class="sysbox"><span class="cap">コンテキスト</span>
+  <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
+ </div>
+ <div class="sysbox"><span class="cap">GPU</span>
+  <div id="gpuc"></div>
+ </div>
+</aside>
 <main id="main"><div class="empty" id="empty">Hermes Agent からの要求を待っています。<br>~/.hermes/config.yaml の model.base_url を中継サーバーに向けてください。</div></main>
+</div>
 <script>
 (function(){
 const main=document.getElementById('main'), empty=document.getElementById('empty');
