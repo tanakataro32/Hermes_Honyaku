@@ -1696,7 +1696,7 @@ function renderGpu(gpus){const c=document.getElementById('gpuc');if(!c)return;c.
    const mrow='<div class="brow'+mcls+'"><span class="bl">VRAM</span><span class="bval">'+mem+'G</span><span class="bar"><span class="fill" style="width:'+(g.mem_total?Math.max(0,Math.min(100,g.mem_used/g.mem_total*100)):0)+'%"></span></span></div>';
    // 電力バーの最大値はサーバ側が管理 (既定250W、観測値で上書き)
    const prow='<div class="brow"><span class="bl">電力</span><span class="bval">'+g.power.toFixed(0)+'/'+(g.max_power||250).toFixed(0)+'W</span><span class="bar"><span class="fill" style="width:'+(g.max_power?Math.max(0,Math.min(100,g.power/g.max_power*100)):0)+'%"></span></span></div>';
-   d.innerHTML='<div class="ghead"><b>'+esc(g.label)+'</b></div>'+trow+mrow+prow;
+   d.innerHTML='<div class="ghead"><b>'+esc(g.label)+'</b></div>'+trow+prow+mrow;
    c.appendChild(d)}}
 function onGpu(ev){renderGpu(ev.gpus)}
 function onError(ev){const d=document.createElement('div');d.className='seg bad';d.innerHTML='<div class="ja"></div>';d.querySelector('.ja').textContent=ev.text;main.appendChild(d)}
