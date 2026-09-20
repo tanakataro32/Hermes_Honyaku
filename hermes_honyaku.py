@@ -1600,17 +1600,24 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .gpug .brow.warn .bval{color:var(--warn)}
 .gpug .brow.hot .fill{background:var(--bad)}
 .gpug .brow.hot .bval{color:var(--bad)}
-.sysm{display:flex;flex-direction:column;gap:3px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-.sysm .ghead b{color:#fff}
-.sysm .brow{display:flex;align-items:center;gap:6px}
-.sysm .brow .bl{width:74px;color:var(--muted);flex:none;white-space:nowrap}
-.sysm .brow .bval{width:84px;text-align:right;flex:none;color:#cfe8e4}
-.sysm .bar{flex:1;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-.sysm .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
-.sysm .brow.warn .fill{background:var(--warn)}
-.sysm .brow.warn .bval{color:var(--warn)}
+.sysm{display:flex;flex-direction:column;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.sysm .trow{display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none}
+.sysm .trow .tw{width:10px;flex:none;color:var(--muted)}
+.sysm .trow b{color:#fff}
+.sysm .tsub .trow{margin-left:14px}
+.sysm .tsub .tsub .trow{margin-left:28px}
+.sysm .leaf{display:flex;flex-direction:column;gap:2px;margin:2px 0 2px 14px}
+.sysm .tsub .tsub .leaf{margin-left:28px}
+.sysm .leaf .top{display:flex;align-items:baseline;gap:6px}
+.sysm .leaf .bl{color:var(--muted);white-space:nowrap;flex:none}
+.sysm .leaf .bval{margin-left:auto;color:#cfe8e4;white-space:nowrap}
+.sysm .bar{height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.sysm .bar .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
+.sysm .leaf.warn .bar .fill{background:var(--warn)}
+.sysm .leaf.warn .bval{color:var(--warn)}
 /* システム情報パネル (左列。スクロールしても固定) */
 #shell{display:grid;grid-template-columns:260px 1fr}
+#shell>main{min-width:0;overflow-wrap:anywhere}
 #syspanel{position:sticky;top:46px;align-self:start;max-height:calc(100vh - 56px);overflow-y:auto;min-width:0;padding:10px 12px 24px}
 .sysbox{margin:0 0 10px;padding:6px 8px;font-size:12px;background:var(--face);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow:inset 1px 1px 0 rgba(255,255,255,.05)}
 .sysbox .cap{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;
@@ -1903,33 +1910,65 @@ function renderGpu(gpus){const c=document.getElementById('gpuc');if(!c)return;c.
    c.appendChild(d)}}
 function onGpu(ev){renderGpu(ev.gpus)}
 function bfmt(v){return v===null?'-':v.toFixed(1)}
-function sysrow(label,value,pct,warnPct,title){const w=pct===null?'0':Math.max(0,Math.min(100,pct));
- const cls=pct!==null&&pct>=warnPct?' warn':'';
- return '<div class="brow'+cls+'"'+(title?' title="'+esc(title)+'"':'')+'><span class="bl">'+label+'</span><span class="bval">'+value+'</span><span class="bar"><span class="fill" style="width:'+w+'%"></span></span></div>'}
+// ツリー表示の折りたたみ状態 (2秒毎の再描画を跨いで保持)
+const sysTree={srv:true,dsk:true};
+let lastSysmon=null;
+function sysleaf(label,value,pct,warnPct,tip){
+ const el=document.createElement('div');
+ el.className='leaf'+(pct!==null&&pct>=warnPct?' warn':'');
+ if(tip)el.title=tip;
+ const top=document.createElement('div');top.className='top';
+ const bl=document.createElement('span');bl.className='bl';bl.textContent=label;
+ const bv=document.createElement('span');bv.className='bval';bv.textContent=value;
+ top.appendChild(bl);top.appendChild(bv);
+ const bar=document.createElement('div');bar.className='bar';
+ const fill=document.createElement('span');fill.className='fill';
+ fill.style.width=(pct===null?0:Math.max(0,Math.min(100,pct)))+'%';
+ bar.appendChild(fill);
+ el.appendChild(top);el.appendChild(bar);
+ return el}
+function sysnode(name,key){
+ const el=document.createElement('div');el.className='trow';
+ const tw=document.createElement('span');tw.className='tw';tw.textContent=sysTree[key]?'▼':'▶';
+ const nm=document.createElement('b');nm.textContent=name;
+ el.appendChild(tw);el.appendChild(nm);
+ el.addEventListener('click',()=>{sysTree[key]=!sysTree[key];if(lastSysmon)renderSys(lastSysmon)});
+ return el}
 function renderSys(s){const c=document.getElementById('sysmc');if(!c||!s)return;c.innerHTML='';
- const d=document.createElement('div');d.className='sysm';
- d.title='サーバの CPU 使用率・RAM・各 SSD 使用量 (/proc・statvfs、2秒更新)';
+ lastSysmon=s;
+ const card=document.createElement('div');card.className='sysm';
+ card.title='サーバの CPU 使用率・RAM・各 SSD 使用量 (/proc・statvfs、2秒更新)';
  const cpu=(s.cpu===null||s.cpu===undefined)?null:s.cpu;
  const cpuV=cpu===null?'-':cpu.toFixed(1)+'%';
  const memV=(s.mem_used===null||s.mem_used===undefined)?'-':bfmt(s.mem_used)+'/'+bfmt(s.mem_total)+'G';
  const memPct=(s.mem_total)?s.mem_used/s.mem_total*100:null;
- let rows='';
- if(Array.isArray(s.disks)&&s.disks.length){
-  for(const dk of s.disks){
-   const t=dk.total===null||dk.total===undefined?null:dk.total;
-   const u=dk.used===null||dk.used===undefined?null:dk.used;
-   const v=(u===null||t===null)?'-':bfmt(u)+'/'+bfmt(t)+'G';
-   const pct=(t)?u/t*100:null;
-   const tip=(dk.label?dk.label+' ('+dk.device+')':dk.device);
-   rows+=sysrow(dk.label_short||dk.device,v,pct,90,tip);
+ card.appendChild(sysnode('サーバ','srv'));
+ if(!sysTree.srv){c.appendChild(card);return}
+ card.appendChild(sysleaf('CPU',cpuV,cpu,90));
+ card.appendChild(sysleaf('RAM',memV,memPct,95));
+ const dskWrap=document.createElement('div');dskWrap.className='tsub';
+ dskWrap.appendChild(sysnode('ディスク','dsk'));
+ if(sysTree.dsk){
+  const body=document.createElement('div');body.className='tsub';
+  if(Array.isArray(s.disks)&&s.disks.length){
+   for(const dk of s.disks){
+    const t=(dk.total===null||dk.total===undefined)?null:dk.total;
+    const u=(dk.used===null||dk.used===undefined)?null:dk.used;
+    const v=(u===null||t===null)?'-':bfmt(u)+'/'+bfmt(t)+'G';
+    const pct=(t&&u!==null)?u/t*100:null;
+    const tip=(dk.label?dk.label+' ('+dk.device+')':dk.device);
+    body.appendChild(sysleaf(dk.label_short||dk.device,v,pct,90,tip));
+   }
+  }else{
+   const du=(s.disk_used===null||s.disk_used===undefined)?null:s.disk_used;
+   const v=(du===null)?'-':bfmt(du)+'/'+bfmt(s.disk_total)+'G';
+   const pct=(s.disk_total&&du!==null)?s.disk_used/s.disk_total*100:null;
+   body.appendChild(sysleaf('ディスク',v,pct,90));
   }
- }else{
-  const diskV=(s.disk_used===null||s.disk_used===undefined)?'-':bfmt(s.disk_used)+'/'+bfmt(s.disk_total)+'G';
-  const diskPct=(s.disk_total)?s.disk_used/s.disk_total*100:null;
-  rows+=sysrow('ディスク',diskV,diskPct,90);
+  dskWrap.appendChild(body);
  }
- d.innerHTML='<div class="ghead"><b>サーバ</b></div>'+sysrow('CPU',cpuV,cpu,90)+sysrow('RAM',memV,memPct,95)+rows;
- c.appendChild(d)}
+ card.appendChild(dskWrap);
+ c.appendChild(card)}
 function onSysmon(ev){renderSys(ev)}
 function onError(ev){const d=document.createElement('div');d.className='seg bad';d.innerHTML='<div class="ja"></div>';d.querySelector('.ja').textContent=ev.text;main.appendChild(d)}
 const H={turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError,turn_ctx:onTurnCtx,gpu:onGpu,sysmon:onSysmon};
