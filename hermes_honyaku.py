@@ -1009,9 +1009,9 @@ class SysMonitor:
             data["cpu"] = None
         mem = self._read_meminfo()
         if mem:
-            total, avail = mem
-            data["mem_total"] = total / 1024.0  # GB
-            data["mem_used"] = (total - avail) / 1024.0
+            total, avail = mem  # kB
+            data["mem_total"] = total / 1048576.0  # GB
+            data["mem_used"] = (total - avail) / 1048576.0
         else:
             data["mem_total"] = None
             data["mem_used"] = None
