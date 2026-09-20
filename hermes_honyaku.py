@@ -1800,7 +1800,7 @@ function onStatus(ev){const d=document.getElementById('tdot');d.className='dot '
 function renderGpu(gpus){const c=document.getElementById('gpuc');if(!c)return;c.innerHTML='';
   for(const g of (gpus||[])){const d=document.createElement('div');
    d.className='gpug';
-   d.title='GPU '+g.name+' の温度・消費電力・VRAM (nvidia-smi、5秒更新)';
+   d.title='GPU '+g.name+' の温度・消費電力・VRAM (nvidia-smi、2秒更新)';
    const tcls=g.temp>=85?' hot':g.temp>=75?' warn':'';
    const mcls=(g.mem_total&&g.mem_used/g.mem_total>=0.95)?' warn':'';
    const mem=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0);
@@ -1817,7 +1817,7 @@ function sysrow(label,value,pct,warnPct){const w=pct===null?'0':Math.max(0,Math.
  return '<div class="brow'+cls+'"><span class="bl">'+label+'</span><span class="bval">'+value+'</span><span class="bar"><span class="fill" style="width:'+w+'%"></span></span></div>'}
 function renderSys(s){const c=document.getElementById('sysmc');if(!c||!s)return;c.innerHTML='';
  const d=document.createElement('div');d.className='sysm';
- d.title='サーバの CPU 使用率・RAM・ディスク使用量 (/proc・statvfs、5秒更新)';
+ d.title='サーバの CPU 使用率・RAM・ディスク使用量 (/proc・statvfs、2秒更新)';
  const cpu=(s.cpu===null||s.cpu===undefined)?null:s.cpu;
  const cpuV=cpu===null?'-':cpu.toFixed(1)+'%';
  const memV=(s.mem_used===null||s.mem_used===undefined)?'-':bfmt(s.mem_used)+'/'+bfmt(s.mem_total)+'G';
