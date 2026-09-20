@@ -68,6 +68,7 @@ class Config:
                            "deepl_key": "", "deepl_url": "https://api-free.deepl.com/v2/translate"},
             "segment": {"max_chars": "500", "min_chars": "120", "idle_flush_sec": "2.0"},
             "gpu": {"interval": "5", "power_max": "250"},
+             "sysmon": {"interval": "5"},
             "log": {"dir": "logs", "level": "INFO"},
             "sources": {"127.0.0.1": "Hermes", "172.": "Open WebUI", "default": ""},
         })
@@ -120,7 +121,7 @@ class EventBus:
         with self.lock:
             self.next_id += 1
             ev["id"] = self.next_id
-            if ev.get("type") not in ("status", "gpu"):
+            if ev.get("type") not in ("status", "gpu", "sysmon"):
                 self.events.append(ev)
             self._summarize(ev)
             subs = list(self.subs)
@@ -952,6 +953,103 @@ class GpuMonitor:
 
 
 # --------------------------------------------------------------------------
+# システムモニター (左パネルの CPU・RAM・ディスク用)
+# --------------------------------------------------------------------------
+class SysMonitor:
+    """/proc/stat・/proc/meminfo・statvfs から CPU 使用率・RAM 使用量・ディスク使用量を読み、
+    5 秒間隔で sysmon イベントを BUS に流す (GPU モニターと同じ周期が既定)。
+
+    CPU 使用率は 2 サンプル間の /proc/stat delta で算出 (1 回の読み取りだけでは
+    絶対値が出せないため、初期値は 0.0)。/proc がない・読めない環境 (非 Linux 等) では
+    各項目を None にして送る (UI は "-" 表示)。
+    """
+
+    def __init__(self, interval=5.0):
+        self.interval = interval
+        self.lock = threading.Lock()
+        self.data = {}
+        self.updated = 0.0
+        self.ok = False
+        self._cpu_prev = self._read_cpu_times()
+        self.thread = threading.Thread(target=self._loop, name="sys-monitor", daemon=True)
+        self.thread.start()
+
+    @staticmethod
+    def _read_cpu_times():
+        try:
+            with open("/proc/stat") as f:
+                parts = f.readline().split()
+        except Exception:
+            return None
+        nums = [int(x) for x in parts[1:]]
+        idle = nums[3] + (nums[4] if len(nums) > 4 else 0)  # idle + iowait
+        return sum(nums), idle
+
+    @staticmethod
+    def _read_meminfo():
+        try:
+            with open("/proc/meminfo") as f:
+                info = {}
+                for line in f:
+                    k, _, v = line.partition(":")
+                    info[k] = int(v.split()[0])  # kB
+            return info["MemTotal"], info["MemAvailable"]
+        except Exception:
+            return None
+
+    def _snapshot(self):
+        data = {}
+        cur = self._read_cpu_times()
+        if cur is not None and self._cpu_prev is not None:
+            dt = cur[0] - self._cpu_prev[0]
+            di = cur[1] - self._cpu_prev[1]
+            data["cpu"] = max(0.0, min(100.0, (dt - di) / dt * 100.0)) if dt > 0 else 0.0
+            self._cpu_prev = cur
+        else:
+            data["cpu"] = None
+        mem = self._read_meminfo()
+        if mem:
+            total, avail = mem  # kB
+            data["mem_total"] = total / 1048576.0  # GB
+            data["mem_used"] = (total - avail) / 1048576.0
+        else:
+            data["mem_total"] = None
+            data["mem_used"] = None
+        try:
+            st = os.statvfs("/")
+            data["disk_total"] = st.f_frsize * st.f_blocks / 1073741824.0  # GB
+            data["disk_used"] = st.f_frsize * (st.f_blocks - st.f_bavail) / 1073741824.0
+        except Exception:
+            data["disk_total"] = None
+            data["disk_used"] = None
+        return data
+
+    def _loop(self):
+        fails = 0
+        while True:
+            data = self._snapshot()
+            self.ok = any(v is not None for v in data.values())
+            if not self.ok and fails == 1:
+                log.info("sys monitor: /proc 取得に失敗 (次から再試続行)")
+            fails = 0 if self.ok else fails + 1
+            with self.lock:
+                self.data = data
+                self.updated = time.time()
+            self._publish()
+            time.sleep(self.interval)
+
+    def _publish(self):
+        with self.lock:
+            data = self.data
+        BUS.publish({"type": "sysmon", **data})
+
+    def current(self):
+        """直近のスナップショット。SSE の初期 status にも載せる用"""
+        with self.lock:
+            return self.data
+
+
+# --------------------------------------------------------------------------
 # 非ストリーミング応答の組み立て (Hermes が stream=false で来た場合用)
 # --------------------------------------------------------------------------
 class ResponseAccumulator:
@@ -1411,6 +1509,15 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .gpug .brow.warn .bval{color:var(--warn)}
 .gpug .brow.hot .fill{background:var(--bad)}
 .gpug .brow.hot .bval{color:var(--bad)}
+.sysm{display:flex;flex-direction:column;gap:3px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.sysm .ghead b{color:#fff}
+.sysm .brow{display:flex;align-items:center;gap:6px}
+.sysm .brow .bl{width:44px;color:var(--muted);flex:none;white-space:nowrap}
+.sysm .brow .bval{width:92px;text-align:right;flex:none;color:#cfe8e4}
+.sysm .bar{flex:1;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.sysm .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
+.sysm .brow.warn .fill{background:var(--warn)}
+.sysm .brow.warn .bval{color:var(--warn)}
 /* システム情報パネル (左列。スクロールしても固定) */
 #shell{display:grid;grid-template-columns:260px 1fr}
 #syspanel{position:sticky;top:46px;align-self:start;max-height:calc(100vh - 56px);overflow-y:auto;min-width:0;padding:10px 12px 24px}
@@ -1423,6 +1530,7 @@ background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--
 #syspanel .ctxg .bar{flex:1;width:auto}
 #gpuc{display:flex;flex-direction:column;gap:4px}
 #syspanel .gpug{width:100%}
+#syspanel .sysm{width:100%}
 .turn.hidden{display:none}
 .segs .note{color:var(--muted);font-size:12.5px}
 header select{background:#131a1f;color:var(--ink);padding:1px 4px;font:12px "Courier New",ui-monospace,monospace;
@@ -1507,6 +1615,9 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));color:#fff;font-weight
  </div>
  <div class="sysbox"><span class="cap">GPU</span>
   <div id="gpuc"></div>
+ </div>
+ <div class="sysbox"><span class="cap">システム</span>
+  <div id="sysmc"></div>
  </div>
 </aside>
 <main id="main"><div class="empty" id="empty">Hermes Agent からの要求を待っています。<br>~/.hermes/config.yaml の model.base_url を中継サーバーに向けてください。</div></main>
@@ -1684,7 +1795,8 @@ function onTurnEnd(ev){const t=turn(ev.turn);if(!t)return;t.think.classList.remo
 function onStatus(ev){const d=document.getElementById('tdot');d.className='dot '+(ev.translator==='ok'?(ev.queue>0?'busy':'ok'):ev.translator==='error'?'error':'');
   document.getElementById('ttext').textContent=ev.engine+(ev.translator==='error'?' エラー: '+ev.error:'');
   document.getElementById('tq').textContent=ev.queue>0?'(待ち '+ev.queue+')':'';
-  if(ev.gpus!==undefined)renderGpu(ev.gpus)}
+  if(ev.gpus!==undefined)renderGpu(ev.gpus);
+  if(ev.sysmon!==undefined)renderSys(ev.sysmon)}
 function renderGpu(gpus){const c=document.getElementById('gpuc');if(!c)return;c.innerHTML='';
   for(const g of (gpus||[])){const d=document.createElement('div');
    d.className='gpug';
@@ -1699,8 +1811,24 @@ function renderGpu(gpus){const c=document.getElementById('gpuc');if(!c)return;c.
    d.innerHTML='<div class="ghead"><b>'+esc(g.label)+'</b></div>'+trow+prow+mrow;
    c.appendChild(d)}}
 function onGpu(ev){renderGpu(ev.gpus)}
+function bfmt(v){return v===null?'-':v.toFixed(1)}
+function sysrow(label,value,pct,warnPct){const w=pct===null?'0':Math.max(0,Math.min(100,pct));
+ const cls=pct!==null&&pct>=warnPct?' warn':'';
+ return '<div class="brow'+cls+'"><span class="bl">'+label+'</span><span class="bval">'+value+'</span><span class="bar"><span class="fill" style="width:'+w+'%"></span></span></div>'}
+function renderSys(s){const c=document.getElementById('sysmc');if(!c||!s)return;c.innerHTML='';
+ const d=document.createElement('div');d.className='sysm';
+ d.title='サーバの CPU 使用率・RAM・ディスク使用量 (/proc・statvfs、5秒更新)';
+ const cpu=(s.cpu===null||s.cpu===undefined)?null:s.cpu;
+ const cpuV=cpu===null?'-':cpu.toFixed(1)+'%';
+ const memV=(s.mem_used===null||s.mem_used===undefined)?'-':bfmt(s.mem_used)+'/'+bfmt(s.mem_total)+'G';
+ const memPct=(s.mem_total)?s.mem_used/s.mem_total*100:null;
+ const diskV=(s.disk_used===null||s.disk_used===undefined)?'-':bfmt(s.disk_used)+'/'+bfmt(s.disk_total)+'G';
+ const diskPct=(s.disk_total)?s.disk_used/s.disk_total*100:null;
+ d.innerHTML='<div class="ghead"><b>サーバ</b></div>'+sysrow('CPU',cpuV,cpu,90)+sysrow('RAM',memV,memPct,95)+sysrow('ディスク',diskV,diskPct,90);
+ c.appendChild(d)}
+function onSysmon(ev){renderSys(ev)}
 function onError(ev){const d=document.createElement('div');d.className='seg bad';d.innerHTML='<div class="ja"></div>';d.querySelector('.ja').textContent=ev.text;main.appendChild(d)}
-const H={turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError,turn_ctx:onTurnCtx,gpu:onGpu};
+const H={turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError,turn_ctx:onTurnCtx,gpu:onGpu,sysmon:onSysmon};
 function connect(){
   const es=new EventSource('/events');
   es.onopen=()=>{document.getElementById('sdot').className='dot ok';document.getElementById('stext').textContent='接続中'};
@@ -1718,6 +1846,7 @@ class UIHandler(BaseHTTPRequestHandler):
     cfg = None
     translator = None
     gpu_monitor = None
+    sysmon_monitor = None
 
     def log_message(self, fmt, *args):
         log.debug("ui %s - " + fmt, self.client_address[0], *args)
@@ -1740,7 +1869,8 @@ class UIHandler(BaseHTTPRequestHandler):
             body = {"translator": self.translator.status, "engine": self.translator.engine,
                     "queue": self.translator.q.qsize(), "error": self.translator.last_error,
                     "turns": Turn.counter, "active": sorted(Turn.active.keys()),
-                    "gpus": self.gpu_monitor.current() if self.gpu_monitor is not None else []}
+                    "gpus": self.gpu_monitor.current() if self.gpu_monitor is not None else [],
+                    "sysmon": self.sysmon_monitor.current() if self.sysmon_monitor is not None else {}}
             return self._send(200, "application/json; charset=utf-8", json.dumps(body, ensure_ascii=False).encode())
         if path == "/api/history":
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -1865,6 +1995,7 @@ def main():
     UIHandler.translator = translator
     UIHandler.gpu_monitor = GpuMonitor(interval=cfg.getfloat("gpu", "interval"),
                                        power_max=cfg.getfloat("gpu", "power_max"))
+    UIHandler.sysmon_monitor = SysMonitor(interval=cfg.getfloat("sysmon", "interval"))
 
     proxy = Server((cfg.get("proxy", "listen_host"), cfg.getint("proxy", "listen_port")), ProxyHandler)
     ui = Server((cfg.get("ui", "listen_host"), cfg.getint("ui", "listen_port")), UIHandler)
