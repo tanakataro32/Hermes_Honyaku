@@ -1588,26 +1588,16 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .ctxg.warn{color:var(--warn)}
 .ctxg.hot .fill{background:var(--bad)}
 .ctxg.hot .txt,.ctxg.hot{color:var(--bad)}
-.gpug{display:flex;flex-direction:column;gap:3px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-.gpug .ghead{display:flex;align-items:center;gap:6px;white-space:nowrap}
-.gpug .ghead b{color:#fff}
-.gpug .brow{display:flex;align-items:center;gap:6px}
-.gpug .brow .bl{width:30px;color:var(--muted);flex:none}
-.gpug .brow .bval{width:78px;text-align:right;flex:none;color:#cfe8e4}
-.gpug .bar{flex:1;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-.gpug .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
-.gpug .brow.warn .fill{background:var(--warn)}
-.gpug .brow.warn .bval{color:var(--warn)}
-.gpug .brow.hot .fill{background:var(--bad)}
-.gpug .brow.hot .bval{color:var(--bad)}
 .sysm{display:flex;flex-direction:column;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .sysm .trow{display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none}
 .sysm .trow .tw{width:10px;flex:none;color:var(--muted)}
 .sysm .trow b{color:#fff}
 .sysm .tsub .trow{margin-left:14px}
 .sysm .tsub .tsub .trow{margin-left:28px}
+.sysm .tsub .tsub .tsub .trow{margin-left:42px}
 .sysm .leaf{display:flex;flex-direction:column;gap:2px;margin:2px 0 2px 14px}
 .sysm .tsub .tsub .leaf{margin-left:28px}
+.sysm .tsub .tsub .tsub .leaf{margin-left:42px}
 .sysm .leaf .top{display:flex;align-items:baseline;gap:6px}
 .sysm .leaf .bl{color:var(--muted);white-space:nowrap;flex:none}
 .sysm .leaf .bval{margin-left:auto;color:#cfe8e4;white-space:nowrap}
@@ -1615,6 +1605,8 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .sysm .bar .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
 .sysm .leaf.warn .bar .fill{background:var(--warn)}
 .sysm .leaf.warn .bval{color:var(--warn)}
+.sysm .leaf.hot .bar .fill{background:var(--bad)}
+.sysm .leaf.hot .bval{color:var(--bad)}
 /* システム情報パネル (左列。スクロールしても固定) */
 #shell{display:grid;grid-template-columns:260px 1fr}
 #shell>main{min-width:0;overflow-wrap:anywhere}
@@ -1626,8 +1618,6 @@ background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--
 .sysbox .row+.row{margin-top:5px}
 #syspanel .ctxg{width:100%}
 #syspanel .ctxg .bar{flex:1;width:auto}
-#gpuc{display:flex;flex-direction:column;gap:4px}
-#syspanel .gpug{width:100%}
 #syspanel .sysm{width:100%}
 .turn.hidden{display:none}
 .segs .note{color:var(--muted);font-size:12.5px}
@@ -1710,9 +1700,6 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));color:#fff;font-weight
  </div>
  <div class="sysbox"><span class="cap">コンテキスト</span>
   <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
- </div>
- <div class="sysbox"><span class="cap">GPU</span>
-  <div id="gpuc"></div>
  </div>
  <div class="sysbox"><span class="cap">システム</span>
   <div id="sysmc"></div>
@@ -1895,27 +1882,20 @@ function onStatus(ev){const d=document.getElementById('tdot');d.className='dot '
   document.getElementById('tq').textContent=ev.queue>0?'(待ち '+ev.queue+')':'';
   if(ev.gpus!==undefined)renderGpu(ev.gpus);
   if(ev.sysmon!==undefined)renderSys(ev.sysmon)}
-function renderGpu(gpus){const c=document.getElementById('gpuc');if(!c)return;c.innerHTML='';
-  for(const g of (gpus||[])){const d=document.createElement('div');
-   d.className='gpug';
-   d.title='GPU '+g.name+' の温度・消費電力・VRAM (nvidia-smi、2秒更新)';
-   const tcls=g.temp>=85?' hot':g.temp>=75?' warn':'';
-   const mcls=(g.mem_total&&g.mem_used/g.mem_total>=0.95)?' warn':'';
-   const mem=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0);
-   const trow='<div class="brow'+tcls+'"><span class="bl">温度</span><span class="bval">'+g.temp+'℃</span><span class="bar"><span class="fill" style="width:'+Math.max(0,Math.min(100,g.temp/90*100))+'%"></span></span></div>';
-   const mrow='<div class="brow'+mcls+'"><span class="bl">VRAM</span><span class="bval">'+mem+'G</span><span class="bar"><span class="fill" style="width:'+(g.mem_total?Math.max(0,Math.min(100,g.mem_used/g.mem_total*100)):0)+'%"></span></span></div>';
-   // 電力バーの最大値はサーバ側が管理 (既定250W、観測値で上書き)
-   const prow='<div class="brow"><span class="bl">電力</span><span class="bval">'+g.power.toFixed(0)+'/'+(g.max_power||250).toFixed(0)+'W</span><span class="bar"><span class="fill" style="width:'+(g.max_power?Math.max(0,Math.min(100,g.power/g.max_power*100)):0)+'%"></span></span></div>';
-   d.innerHTML='<div class="ghead"><b>'+esc(g.label)+'</b></div>'+trow+prow+mrow;
-   c.appendChild(d)}}
 function onGpu(ev){renderGpu(ev.gpus)}
 function bfmt(v){return v===null?'-':v.toFixed(1)}
 // ツリー表示の折りたたみ状態 (2秒毎の再描画を跨いで保持)
-const sysTree={srv:true,dsk:true};
-let lastSysmon=null;
-function sysleaf(label,value,pct,warnPct,tip){
+const sysTree={srv:true,dsk:true,gpu:true};
+const gpuTree={}; // 各 GPU ノード ('gpu0','gpu1',...)
+let lastSysmon=null, lastGpus=null;
+function sysleaf(label,value,pct,warnPct,hotPct,tip){
  const el=document.createElement('div');
- el.className='leaf'+(pct!==null&&pct>=warnPct?' warn':'');
+ let cls='leaf';
+ if(pct!==null){
+  if(hotPct!==null&&pct>=hotPct)cls+=' hot';
+  else if(warnPct!==null&&pct>=warnPct)cls+=' warn';
+ }
+ el.className=cls;
  if(tip)el.title=tip;
  const top=document.createElement('div');top.className='top';
  const bl=document.createElement('span');bl.className='bl';bl.textContent=label;
@@ -1932,43 +1912,83 @@ function sysnode(name,key){
  const tw=document.createElement('span');tw.className='tw';tw.textContent=sysTree[key]?'▼':'▶';
  const nm=document.createElement('b');nm.textContent=name;
  el.appendChild(tw);el.appendChild(nm);
- el.addEventListener('click',()=>{sysTree[key]=!sysTree[key];if(lastSysmon)renderSys(lastSysmon)});
+ el.addEventListener('click',()=>{sysTree[key]=!sysTree[key];renderSysCard()});
  return el}
-function renderSys(s){const c=document.getElementById('sysmc');if(!c||!s)return;c.innerHTML='';
- lastSysmon=s;
+function gpuNode(g,i){
+ const key='gpu'+i;
+ if(gpuTree[key]===undefined)gpuTree[key]=true;
+ const el=document.createElement('div');el.className='trow';
+ const tw=document.createElement('span');tw.className='tw';tw.textContent=gpuTree[key]?'▼':'▶';
+ const nm=document.createElement('b');nm.textContent=g.label||g.name;
+ el.appendChild(tw);el.appendChild(nm);
+ el.addEventListener('click',()=>{gpuTree[key]=!gpuTree[key];renderSysCard()});
+ return el}
+function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c.innerHTML='';
  const card=document.createElement('div');card.className='sysm';
- card.title='サーバの CPU 使用率・RAM・各 SSD 使用量 (/proc・statvfs、2秒更新)';
- const cpu=(s.cpu===null||s.cpu===undefined)?null:s.cpu;
- const cpuV=cpu===null?'-':cpu.toFixed(1)+'%';
- const memV=(s.mem_used===null||s.mem_used===undefined)?'-':bfmt(s.mem_used)+'/'+bfmt(s.mem_total)+'G';
- const memPct=(s.mem_total)?s.mem_used/s.mem_total*100:null;
- card.appendChild(sysnode('サーバ','srv'));
- if(!sysTree.srv){c.appendChild(card);return}
- card.appendChild(sysleaf('CPU',cpuV,cpu,90));
- card.appendChild(sysleaf('RAM',memV,memPct,95));
- const dskWrap=document.createElement('div');dskWrap.className='tsub';
- dskWrap.appendChild(sysnode('ディスク','dsk'));
- if(sysTree.dsk){
-  const body=document.createElement('div');body.className='tsub';
-  if(Array.isArray(s.disks)&&s.disks.length){
-   for(const dk of s.disks){
-    const t=(dk.total===null||dk.total===undefined)?null:dk.total;
-    const u=(dk.used===null||dk.used===undefined)?null:dk.used;
-    const v=(u===null||t===null)?'-':bfmt(u)+'/'+bfmt(t)+'G';
-    const pct=(t&&u!==null)?u/t*100:null;
-    const tip=(dk.label?dk.label+' ('+dk.device+')':dk.device);
-    body.appendChild(sysleaf(dk.label_short||dk.device,v,pct,90,tip));
+ card.title='サーバの CPU・RAM・各 SSD・各 GPU 使用量 (/proc・statvfs・nvidia-smi、2秒更新)';
+ const s=lastSysmon;
+ if(s){
+  const cpu=(s.cpu===null||s.cpu===undefined)?null:s.cpu;
+  const cpuV=cpu===null?'-':cpu.toFixed(1)+'%';
+  const memV=(s.mem_used===null||s.mem_used===undefined)?'-':bfmt(s.mem_used)+'/'+bfmt(s.mem_total)+'G';
+  const memPct=(s.mem_total)?s.mem_used/s.mem_total*100:null;
+  card.appendChild(sysnode('サーバ','srv'));
+  if(sysTree.srv){
+   card.appendChild(sysleaf('CPU',cpuV,cpu,90));
+   card.appendChild(sysleaf('RAM',memV,memPct,95));
+   const dskWrap=document.createElement('div');dskWrap.className='tsub';
+   dskWrap.appendChild(sysnode('ディスク','dsk'));
+   if(sysTree.dsk){
+    const body=document.createElement('div');body.className='tsub';
+    if(Array.isArray(s.disks)&&s.disks.length){
+     for(const dk of s.disks){
+      const t=(dk.total===null||dk.total===undefined)?null:dk.total;
+      const u=(dk.used===null||dk.used===undefined)?null:dk.used;
+      const v=(u===null||t===null)?'-':bfmt(u)+'/'+bfmt(t)+'G';
+      const pct=(t&&u!==null)?u/t*100:null;
+      const tip=(dk.label?dk.label+' ('+dk.device+')':dk.device);
+      body.appendChild(sysleaf(dk.label_short||dk.device,v,pct,90,null,tip));
+     }
+    }else{
+     const du=(s.disk_used===null||s.disk_used===undefined)?null:s.disk_used;
+     const v=(du===null)?'-':bfmt(du)+'/'+bfmt(s.disk_total)+'G';
+     const pct=(s.disk_total&&du!==null)?s.disk_used/s.disk_total*100:null;
+     body.appendChild(sysleaf('ディスク',v,pct,90,null));
+    }
+    dskWrap.appendChild(body);
    }
-  }else{
-   const du=(s.disk_used===null||s.disk_used===undefined)?null:s.disk_used;
-   const v=(du===null)?'-':bfmt(du)+'/'+bfmt(s.disk_total)+'G';
-   const pct=(s.disk_total&&du!==null)?s.disk_used/s.disk_total*100:null;
-   body.appendChild(sysleaf('ディスク',v,pct,90));
+   card.appendChild(dskWrap);
   }
-  dskWrap.appendChild(body);
  }
- card.appendChild(dskWrap);
+ // GPU (データが来ない間はこのノード自体を表示しない。「サーバ」を折りたたんだ時も隠す)
+ if(Array.isArray(lastGpus)&&lastGpus.length&&(!s||sysTree.srv)){
+  const gw=document.createElement('div');gw.className=s?'tsub':'';
+  gw.appendChild(sysnode('GPU','gpu'));
+  if(sysTree.gpu){
+   const body=document.createElement('div');body.className='tsub';
+   lastGpus.forEach((g,i)=>{
+    const gwrap=document.createElement('div');gwrap.className='tsub';
+    gwrap.appendChild(gpuNode(g,i));
+    if(gpuTree['gpu'+i]){
+     const gb=document.createElement('div');gb.className='tsub';
+     // バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、VRAM 使用率 (warn 95%)、電力 max_power 満杯
+     const tp=(g.temp/90*100);
+     gb.appendChild(sysleaf('温度',g.temp+'℃',tp,75/90*100,85/90*100));
+     const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
+     gb.appendChild(sysleaf('VRAM',mv,g.mem_total?g.mem_used/g.mem_total*100:null,95));
+     const mp=g.max_power||250;
+     gb.appendChild(sysleaf('電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
+     gwrap.appendChild(gb);
+    }
+    body.appendChild(gwrap);
+   });
+   gw.appendChild(body);
+  }
+  card.appendChild(gw);
+ }
  c.appendChild(card)}
+function renderSys(s){lastSysmon=s;renderSysCard()}
+function renderGpu(gpus){lastGpus=gpus;renderSysCard()}
 function onSysmon(ev){renderSys(ev)}
 function onError(ev){const d=document.createElement('div');d.className='seg bad';d.innerHTML='<div class="ja"></div>';d.querySelector('.ja').textContent=ev.text;main.appendChild(d)}
 const H={turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError,turn_ctx:onTurnCtx,gpu:onGpu,sysmon:onSysmon};
