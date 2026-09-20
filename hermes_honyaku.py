@@ -857,7 +857,7 @@ class TokenMeter:
 # --------------------------------------------------------------------------
 # GPU 温度モニター (ヘッダーのメータ用)
 # --------------------------------------------------------------------------
-GPU_SMI_QUERY = ["--query-gpu=name,temperature.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"]
+GPU_SMI_QUERY = ["--query-gpu=name,temperature.gpu,power.draw,memory.used,memory.total", "--format=csv,noheader,nounits"]
 
 
 def short_gpu_label(name):
@@ -877,7 +877,7 @@ def short_gpu_label(name):
 
 
 class GpuMonitor:
-    """nvidia-smi で GPU の温度・VRAM 使用量を読み、5 秒間隔で gpu イベントを BUS に流す。
+    """nvidia-smi で GPU の温度・消費電力・VRAM 使用量を読み、5 秒間隔で gpu イベントを BUS に流す。
 
     1 枚でも複数枚でもそのまま対応する (nvidia-smi は全カードを返すため、
     2 枚目を増設しても設定変更は不要)。nvidia-smi が見つからない・実行できない環境では
@@ -903,9 +903,15 @@ class GpuMonitor:
         out = []
         for line in r.stdout.splitlines():
             parts = [p.strip() for p in line.split(",")]
-            if len(parts) >= 4 and parts[1].lstrip("-").isdigit():
+            # name, temp, power, mem_used, mem_total
+            if len(parts) >= 5 and parts[1].lstrip("-").isdigit():
+                try:
+                    power = float(parts[2])
+                except ValueError:
+                    power = 0.0  # 消費電力センサーのないカード (N/A)
                 out.append({"name": parts[0], "label": short_gpu_label(parts[0]),
-                            "temp": int(parts[1]), "mem_used": float(parts[2]), "mem_total": float(parts[3])})
+                            "temp": int(parts[1]), "power": power,
+                            "mem_used": float(parts[3]), "mem_total": float(parts[4])})
         return out
 
     def _loop(self):
@@ -1385,10 +1391,19 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .ctxg.warn{color:var(--warn)}
 .ctxg.hot .fill{background:var(--bad)}
 .ctxg.hot .txt,.ctxg.hot{color:var(--bad)}
-.gpug{display:inline-flex;align-items:center;gap:5px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:1px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-.gpug .mem{color:var(--muted)}
-.gpug.warn{color:var(--warn)}
-.gpug.hot{color:var(--bad)}
+.gpug{display:flex;flex-direction:column;gap:3px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.gpug .ghead{display:flex;align-items:center;gap:6px;white-space:nowrap}
+.gpug .ghead b{color:#fff}
+.gpug .pw{color:var(--muted);margin-left:auto}
+.gpug .brow{display:flex;align-items:center;gap:6px}
+.gpug .brow .bl{width:30px;color:var(--muted);flex:none}
+.gpug .brow .bval{width:66px;text-align:right;flex:none;color:#cfe8e4}
+.gpug .bar{flex:1;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.gpug .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
+.gpug .brow.warn .fill{background:var(--warn)}
+.gpug .brow.warn .bval{color:var(--warn)}
+.gpug .brow.hot .fill{background:var(--bad)}
+.gpug .brow.hot .bval{color:var(--bad)}
 /* システム情報パネル (左列。スクロールしても固定) */
 #shell{display:grid;grid-template-columns:260px 1fr}
 #syspanel{position:sticky;top:46px;align-self:start;max-height:calc(100vh - 56px);overflow-y:auto;min-width:0;padding:10px 12px 24px}
@@ -1400,7 +1415,7 @@ background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--
 #syspanel .ctxg{width:100%}
 #syspanel .ctxg .bar{flex:1;width:auto}
 #gpuc{display:flex;flex-direction:column;gap:4px}
-#syspanel .gpug{display:flex;width:100%}
+#syspanel .gpug{width:100%}
 .turn.hidden{display:none}
 .segs .note{color:var(--muted);font-size:12.5px}
 header select{background:#131a1f;color:var(--ink);padding:1px 4px;font:12px "Courier New",ui-monospace,monospace;
@@ -1664,11 +1679,15 @@ function onStatus(ev){const d=document.getElementById('tdot');d.className='dot '
   document.getElementById('tq').textContent=ev.queue>0?'(待ち '+ev.queue+')':'';
   if(ev.gpus!==undefined)renderGpu(ev.gpus)}
 function renderGpu(gpus){const c=document.getElementById('gpuc');if(!c)return;c.innerHTML='';
-  for(const g of (gpus||[])){const d=document.createElement('span');
-   d.className='gpug'+(g.temp>=85?' hot':g.temp>=75?' warn':'');
-   d.title='GPU '+g.name+' の温度とVRAM使用量 (nvidia-smi、5秒更新)';
+  for(const g of (gpus||[])){const d=document.createElement('div');
+   d.className='gpug';
+   d.title='GPU '+g.name+' の温度・消費電力・VRAM (nvidia-smi、5秒更新)';
+   const tcls=g.temp>=85?' hot':g.temp>=75?' warn':'';
+   const mcls=(g.mem_total&&g.mem_used/g.mem_total>=0.95)?' warn':'';
    const mem=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0);
-   d.innerHTML='<b>'+esc(g.label)+'</b>'+g.temp+'℃<span class="mem">'+mem+'GiB</span>';
+   const trow='<div class="brow'+tcls+'"><span class="bl">温度</span><span class="bval">'+g.temp+'℃</span><span class="bar"><span class="fill" style="width:'+Math.max(0,Math.min(100,g.temp/90*100))+'%"></span></span></div>';
+   const mrow='<div class="brow'+mcls+'"><span class="bl">VRAM</span><span class="bval">'+mem+'G</span><span class="bar"><span class="fill" style="width:'+(g.mem_total?Math.max(0,Math.min(100,g.mem_used/g.mem_total*100)):0)+'%"></span></span></div>';
+   d.innerHTML='<div class="ghead"><b>'+esc(g.label)+'</b><span class="pw">'+g.power.toFixed(0)+'W</span></div>'+trow+mrow;
    c.appendChild(d)}}
 function onGpu(ev){renderGpu(ev.gpus)}
 function onError(ev){const d=document.createElement('div');d.className='seg bad';d.innerHTML='<div class="ja"></div>';d.querySelector('.ja').textContent=ev.text;main.appendChild(d)}
