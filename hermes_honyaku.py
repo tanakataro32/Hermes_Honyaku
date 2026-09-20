@@ -22,6 +22,7 @@ Hermes Agent と llama-server の間に挟む中継サーバー。
 import collections
 import configparser
 import datetime
+import hashlib
 import http.client
 import json
 import logging
@@ -38,6 +39,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 log = logging.getLogger("honyaku")
+# 起動ごとに変わる値。イベント id とターン番号は再起動で 1 から振り直されるので、
+# ブラウザが再起動前の値と混同しないようにイベントに添える
+BOOT_ID = int(time.time())
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -162,26 +166,31 @@ class EventBus:
     def since(self, last_id):
         """last_id より後のイベント。バッファから消えていれば None (全再生が必要)"""
         with self.lock:
+            if last_id > self.next_id:
+                # ブラウザが覚えている id の方が新しい = 中継サーバーが再起動して id が若返った → 全再生
+                return None
             if self.events and self.events[0]["id"] > last_id + 1:
                 return None
             evs = [e for e in self.events if e["id"] > last_id]
             # リングバッファから turn_start / seg が落ちても、その後の ja だけ残ることがある。
             # ターン要約から欠けたイベントを補って先頭に追加する (画面の原文が失われないように)
             have = {e["id"] for e in evs}
+            extra = []
             for e in evs:
                 n = e.get("turn")
                 info = self.turns.get(n) if n is not None else None
                 if info is None:
                     continue
                 if info.get("start") and info["start"]["id"] not in have:
-                    evs.insert(0, dict(info["start"]))
+                    extra.append(dict(info["start"]))
                     have.add(info["start"]["id"])
                 if e.get("type") == "ja":
                     pair = info["segs"].get(e["seg"])
                     seg_ev = pair and pair["seg"]
                     if seg_ev is not None and seg_ev["id"] not in have:
-                        evs.insert(0, dict(seg_ev))
+                        extra.append(dict(seg_ev))
                         have.add(seg_ev["id"])
+            evs = extra + evs
             evs.sort(key=lambda e: e["id"])
             return evs
 
@@ -293,7 +302,8 @@ class ThinkTagSplitter:
 # --------------------------------------------------------------------------
 BOUNDARY_RE = re.compile(r"(?<=[.!?。！？])[ \t]+|\n+")
 ABBREV = {"e.g", "i.e", "etc", "vs", "cf", "mr", "mrs", "ms", "dr", "st", "no", "fig", "approx", "ref", "vol"}
-NUMBER_DOT_RE = re.compile(r"(?:^|\s)\d+[.)]$")
+# 行頭の "2." / "3)" だけを箇条書きの番号とみなす ("port 8080." のように数字で終わる文は普通の文末)
+NUMBER_DOT_RE = re.compile(r"(?:^|\n)[ \t]*\d+[.)]$")
 
 
 def bad_period_boundary(before):
@@ -398,11 +408,13 @@ class Turn:
         with Turn.active_lock:
             Turn.active[self.n] = self
         ev = {"type": "turn_start", "turn": self.n, "model": model, "context": context,
-              "source": source, "task": task}
+              "source": source, "task": task, "boot": BOOT_ID}
         BUS.publish(ev)
         self.translator.jlog.write(ev)
-        # 前のターンの翻訳待ちを中断して新しいターンの翻訳を優先
-        self.translator.new_turn(self.n)
+        # 前のターンの翻訳待ちを中断して新しいターンの翻訳を優先。
+        # 背景タスク (タイトル生成など。翻訳しない) の開始では、直前のターンの訳文を捨てる理由がないので中断しない
+        if not task:
+            self.translator.new_turn(self.n)
 
     def feed_think(self, text):
         if not text:
@@ -592,7 +604,7 @@ class Translator:
 
     def new_turn(self, n):
         """新しいターンの開始: 終了済みターンの翻訳待ちを中断し、新しいターンの翻訳を優先する。
-        中断された行は原文を訳文欄に置く (how='skip')。実行中の数件 (workers 分) は完了するが、
+        中断された行は原文を訳文欄に置く (how='interrupted'。画面では翻訳失敗と同じ黄色)。実行中の数件 (workers 分) は完了するが、
         以降のキューには古いターンのものが残らないため新しいターンの翻訳が先に行く。"""
         with Turn.active_lock:
             active = set(Turn.active)
@@ -607,7 +619,7 @@ class Translator:
             else:
                 self.q.put(item)
         for t, seg_id, text in purged:
-            ev = {"type": "ja", "turn": t, "seg": seg_id, "text": text, "how": "skip", "ok": True, "sec": 0}
+            ev = {"type": "ja", "turn": t, "seg": seg_id, "text": text, "how": "interrupted", "ok": False, "sec": 0}
             BUS.publish(ev)
             self.jlog.write(ev)
         if purged:
@@ -730,76 +742,107 @@ class Translator:
 # 失敗や未対応の場合は 1 トークン ≒ 4 文字の粗い推定に落ちる)
 # --------------------------------------------------------------------------
 class TokenMeter:
+    """ターン見出しのコンテキストメータ用。
+
+    llama-server の /apply-template でチャットテンプレート適用後のプロンプト文字列を得て /tokenize で数える
+    (モデルに実際に入るトークン数に近い)。/apply-template が無ければ各メッセージの本文をつないで数え、
+    /tokenize も使えなければ 1 トークン ≒ 4 文字の粗い推定に落ちる。
+    認証は Hermes からのリクエストの Authorization ヘッダーをそのまま使う (~/.hermes/config.yaml は予備)。
+    """
+
     def __init__(self, upstream, timeout=5.0):
         scheme, host, port = upstream
         self.scheme = scheme
         self.netloc = f"{host}:{port}"
         self.timeout = timeout
-        self.api_key = ""
+        self.api_key = self._read_api_key()
         self.lock = threading.Lock()
-        self.cache = {}  # (model, key) -> (tokens, exact)
+        self.cache = {}  # (model, messages のハッシュ) -> (tokens, exact)
         self.exact_ok = False
         self.exact_fail = 0
-        self.exact_last = 0.0
-        self._probe()
+        self.exact_fail_at = 0.0
+        self.template_ok = True
 
-    def _probe(self):
+    @staticmethod
+    def _read_api_key():
         try:
-            self.api_key = self._read_api_key()
-            self._tokenize("model", "ping")
-        except Exception:
-            pass
-
-    def _read_api_key(self):
-        try:
-            import yaml
+            import yaml  # 無くてもよい (標準ライブラリ外)
             with open(os.path.expanduser("~/.hermes/config.yaml"), encoding="utf-8") as f:
                 m = (yaml.safe_load(f) or {}).get("model") or {}
             return str(m.get("api_key") or "")
         except Exception:
             return ""
 
-    def _tokenize(self, model, text):
-        if self.api_key and (time.time() - self.exact_last > 60):
-            # API キーは llama-server 側で変わることもあるので、失敗したら 1 分おきに再取得
-            self.exact_last = time.time()
-            self.api_key = self._read_api_key() or self.api_key
-        body = json.dumps({"content": text, "model": model}).encode("utf-8")
+    def _post(self, path, payload, auth):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json"}
-        if self.api_key:
+        if auth:
+            headers["Authorization"] = auth
+        elif self.api_key:
             headers["Authorization"] = "Bearer " + self.api_key
         conn = http.client.HTTPSConnection(self.netloc, timeout=self.timeout) \
             if self.scheme == "https" else http.client.HTTPConnection(self.netloc, timeout=self.timeout)
         try:
-            conn.request("POST", "/tokenize", body=body, headers=headers)
+            conn.request("POST", path, body=body, headers=headers)
             resp = conn.getresponse()
-            data = json.loads(resp.read().decode("utf-8"))
+            raw = resp.read()
             if resp.status != 200:
-                raise ValueError(f"tokenize {resp.status}")
-            return len(data.get("tokens") or []), True
+                raise ValueError(f"{path} {resp.status}")
+            return json.loads(raw.decode("utf-8"))
         finally:
             conn.close()
 
-    def count_messages(self, model, messages):
-        """(推定トークン数, 正確か)。messages が同一 (ハッシュ一致) ならキャッシュを返す"""
+    def _prompt_text(self, model, messages, auth):
+        """トークン数を数える対象の文字列。/apply-template が使えればテンプレート適用後のプロンプト"""
+        if self.template_ok:
+            try:
+                data = self._post("/apply-template", {"model": model, "messages": messages}, auth)
+                if isinstance(data.get("prompt"), str):
+                    return data["prompt"]
+            except Exception as e:
+                log.debug("apply-template unavailable, counting message text instead: %s", e)
+            self.template_ok = False
+        parts = []
+        for m in messages:
+            c = m.get("content")
+            if isinstance(c, list):
+                c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+            if not isinstance(c, str):
+                c = json.dumps(c, ensure_ascii=False) if c is not None else ""
+            tc = m.get("tool_calls")
+            if tc:
+                c += "\n" + json.dumps(tc, ensure_ascii=False)
+            parts.append(f"{m.get('role', '')}\n{c}")
+        return "\n".join(parts)
+
+    def _tokenize(self, model, text, auth):
+        data = self._post("/tokenize", {"content": text, "model": model}, auth)
+        return len(data.get("tokens") or [])
+
+    def count_messages(self, model, messages, auth=None):
+        """(推定トークン数, 正確か)。messages が同一ならキャッシュを返す"""
         try:
             key = json.dumps(messages, ensure_ascii=False, sort_keys=True)
         except Exception:
             return 0, False
-        ck = (model, key)
+        ck = (model, hashlib.sha1(key.encode("utf-8")).hexdigest())
         with self.lock:
             if ck in self.cache:
                 return self.cache[ck]
-        exact = False
-        if self.exact_ok or self.exact_fail < 3:
+        n, exact = None, False
+        # 3 回続けて失敗したら 1 分間は推定値で済ませる (本体が落ちている間に毎ターン待たされないように)
+        if self.exact_ok or self.exact_fail < 3 or time.time() - self.exact_fail_at > 60:
             try:
-                n, exact = self._tokenize(model, key)
+                n = self._tokenize(model, self._prompt_text(model, messages, auth), auth)
+                exact = True
                 self.exact_ok = True
-            except Exception:
+                self.exact_fail = 0
+            except Exception as e:
                 self.exact_fail += 1
+                self.exact_fail_at = time.time()
                 self.exact_ok = False
-                n = max(1, len(key) // 4)
-        else:
+                log.debug("tokenize failed (%d): %s", self.exact_fail, e)
+        if n is None:
             n = max(1, len(key) // 4)
         with self.lock:
             if len(self.cache) > 512:
@@ -1003,6 +1046,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(content_length or 0))
         self.end_headers()
         self._chunked = chunked
+        self._started = True
 
     def _write(self, data):
         if not data:
@@ -1019,6 +1063,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
 
     def _send_error_json(self, status, message):
+        if getattr(self, "_started", False):
+            # 応答ヘッダーを送った後 (ストリーミング途中) は 2 つ目の応答を送れないので、切るだけ
+            log.debug("response already started, not sending error body")
+            return
         body = json.dumps({"error": {"message": message, "type": "proxy_error"}}).encode()
         self._begin(status, [("Content-Type", "application/json")], False, len(body))
         self._write(body)
@@ -1120,12 +1168,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 # 画面用のコンテキストメータ。/tokenize が (並列 1 の) 生成と干渉して遅くなる可能性があるため、
                 # 本線のスレッドで待たず別スレッドで数える (遅くても turn_ctx が後から届くだけで、応答は止まらない)
                 meter, model, messages = self.token_meter, req.get("model") or "", req.get("messages") or []
+                auth = self.headers.get("Authorization")
+                tn = turn.n  # 数え終わる前にターンが終わって turn 変数が None に戻ることがあるので、番号だけ持つ
                 def _meter():
                     try:
-                        n_tok, exact = meter.count_messages(model, messages)
+                        n_tok, exact = meter.count_messages(model, messages, auth)
                     except Exception:
                         n_tok, exact = 0, False
-                    BUS.publish({"type": "turn_ctx", "turn": turn.n, "tokens": n_tok, "exact": exact,
+                    BUS.publish({"type": "turn_ctx", "turn": tn, "tokens": n_tok, "exact": exact,
                                  "max_tokens": int(req.get("max_tokens") or 0),
                                  "ctx_limit": self.cfg.getint("ui", "ctx_limit")})
                 threading.Thread(target=_meter, name="ctx-meter", daemon=True).start()
@@ -1296,6 +1346,7 @@ body.showsrc .seg.done .src{display:block}
 .seg.untranslated{box-shadow:inset 0 0 0 1px var(--warn)}.seg.untranslated .ja{color:var(--en)}
 .seg.untranslated .src{display:none}
 body.showsrc .seg.untranslated .src{display:block}
+.sysnote{color:var(--muted);font-size:12px;text-align:center;margin:4px 0 14px}
 .empty{color:var(--muted);padding:40px;text-align:center;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);background:var(--face)}
 button{font:12px/1.6 "Noto Sans JP","Hiragino Sans","Yu Gothic UI",sans-serif;color:var(--ink);background:var(--face);
 border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);cursor:pointer;
@@ -1331,80 +1382,86 @@ const main=document.getElementById('main'), empty=document.getElementById('empty
 const turns={};
 const auto=document.getElementById('auto'), newest=document.getElementById('newest'), tobottom=document.getElementById('tobottom');
 const showsrc=document.getElementById('showsrc'), showans=document.getElementById('showans');
+// 自動スクロールの状態 (関数は下の「自動スクロール」の節。表示設定の復元時にも scroll() が呼ばれるので先に宣言する)
+let lagMode=false, lastAutoY=-1, scrollReq=0, pausedByScroll=false;
 // 表示設定はブラウザに記憶する
 function pref(key,el,apply){try{const v=localStorage.getItem('hh.'+key);if(v!==null)el.checked=(v==='1')}catch(e){}apply(el.checked);
   el.addEventListener('change',()=>{try{localStorage.setItem('hh.'+key,el.checked?'1':'0')}catch(e){}apply(el.checked)})}
-pref('showsrc',showsrc,v=>document.body.classList.toggle('showsrc',v));
-pref('showans',showans,v=>document.body.classList.toggle('noans',!v));
+pref('showsrc',showsrc,v=>{document.body.classList.toggle('showsrc',v);scroll()});
+pref('showans',showans,v=>{document.body.classList.toggle('noans',!v);scroll()});
 pref('newest',newest,v=>{const els=[...main.querySelectorAll('.turn')];els.sort((a,b)=>(Number(a.id.slice(1))-Number(b.id.slice(1)))*(v?-1:1));els.forEach(e=>main.appendChild(e));if(v)window.scrollTo(0,0);updateBtn()});
-pref('auto',auto,v=>updateBtn());
+pref('auto',auto,v=>{pausedByScroll=false;updateBtn();if(v)scroll()});
 const hidetask=document.getElementById('hidetask'), srcsel=document.getElementById('srcsel');
 pref('hidetask',hidetask,v=>applyFilters());
 srcsel.onchange=()=>applyFilters();
 function applyFilters(){for(const k in turns){const el=turns[k].el;
-  el.classList.toggle('hidden',(hidetask.checked&&el.classList.contains('task'))||(srcsel.value&&el.dataset.source!==srcsel.value))}}
+  el.classList.toggle('hidden',(hidetask.checked&&el.classList.contains('task'))||(srcsel.value&&el.dataset.source!==srcsel.value))}scroll()}
 function addSource(name){if(!name||[...srcsel.options].some(o=>o.value===name))return;const o=document.createElement('option');o.value=name;o.textContent=name;srcsel.appendChild(o)}
-document.getElementById('clear').onclick=()=>{for(const k in turns){turns[k].el.remove();delete turns[k]}const g=document.getElementById('ctxg');g.querySelector('.txt').textContent='ctx -';g.querySelector('.fill').style.width='0%';g.className='ctxg';g.title='最新ターンのコンテキスト使用量'};
-function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function clearScreen(){for(const k in turns){turns[k].el.remove();delete turns[k]}
+  [...main.children].forEach(c=>{if(c!==empty)c.remove()});empty.style.display='';lagMode=false;
+  const g=document.getElementById('ctxg');g.querySelector('.txt').textContent='ctx -';g.querySelector('.fill').style.width='0%';g.className='ctxg';g.title='最新ターンのコンテキスト使用量'}
+document.getElementById('clear').onclick=clearScreen;
+function sysnote(text){const d=document.createElement('div');d.className='sysnote';d.textContent=text;main.appendChild(d)}
+// 中継サーバーの起動 id。変わっていたら再起動された = ターン番号が 1 から振り直されるので、古い表示を片付ける
+let boot=null;
+function checkBoot(ev){if(ev.boot===undefined)return;if(boot!==null&&ev.boot!==boot){clearScreen();sysnote('中継サーバーが再起動しました ('+fmt(ev.ts||Date.now()/1000)+')')}boot=ev.boot}
+function esc(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function fmt(ts){const d=new Date(ts*1000);return d.toTimeString().slice(0,8)}
 function updateBtn(){tobottom.classList.toggle('show',!newest.checked&&!auto.checked)}
-let programmatic=false, progTimer=null, rafId=null;
-// 自動スクロールによる移動の直後だけ、ユーザーのスクロールと区別するためのフラグ
-function markProgrammatic(){programmatic=true;clearTimeout(progTimer);progTimer=setTimeout(()=>programmatic=false,120)}
-// 自動スクロールの目標: 画面の下端に「右列の最新データ」が来るところ。
-// 右列 = 訳文(segs)・ツール・回答。左列(英文のThinking)は追随対象にしない。
-// 翻訳待ちが3行以上たまっている間は「最後に翻訳済みの行」まで追随する (まだ訳が出ていない行を画面の端に張り付かせない)
-function lastDoneSeg(){
-  let bestEl=null;
-  const keys=Object.keys(turns).map(Number).sort((a,b)=>a-b);
-  for(const n of keys){
-    for(const c of turns[n].segs.children){
-      if(c.classList.contains('pending'))continue;
-      bestEl=c; // 番号順に辿るので、最後に残ったのが最新の実データ
-    }
+// ---- 自動スクロール ----
+// 目標: 「右列 (訳文・ツール・回答) の最新の行の下端」が画面の下端に来る位置。左列 (英文の Thinking) は追随対象にしない。
+// 翻訳待ちが 3 行以上たまっている間は最後に翻訳済みの行までしか進めず、待ちが 1 行以下に減るまでその状態を保つ
+// (2⇔3 行で目標が上下に揺れないようにヒステリシスを持たせる)。
+// 表示されていない要素 (非表示の背景タスク、「回答も表示」オフの回答、注記の行) は座標が取れないので数えない。
+const PAD=24;        // 最新の行の下に残す余白 (px)
+const PAUSE_PX=48;   // 目標からこれ以上離れたら (上下どちらでも) ユーザーが読んでいると判断して追随を止める
+const RESUME_PX=48;  // 止まった後、目標またはページ最下部にこの距離まで戻ってきたら追随を再開する
+function shown(el){return !!el&&el.getClientRects().length>0}
+function bottomOf(el){return el.getBoundingClientRect().bottom+window.scrollY}
+function maxScroll(){return Math.max(0,document.documentElement.scrollHeight-window.innerHeight)}
+function visibleTurns(){return Object.keys(turns).map(Number).sort((a,b)=>a-b).map(n=>turns[n]).filter(t=>!t.el.classList.contains('hidden'))}
+function segsOf(t){return [...t.segs.children].filter(c=>c.classList.contains('seg'))}
+function targetY(updateLag){
+  let best=0,pending=0,lastDone=null;
+  for(const t of visibleTurns()){
+    const segs=segsOf(t);
+    for(const c of segs){if(c.classList.contains('pending'))pending++;else lastDone=c}
+    const ls=segs[segs.length-1];
+    if(shown(ls))best=Math.max(best,bottomOf(ls));
+    if(t.tools.children.length&&shown(t.tools))best=Math.max(best,bottomOf(t.tools));
+    if(t.ans.textContent.trim()&&shown(t.ans))best=Math.max(best,bottomOf(t.ans));
   }
-  return bestEl}
-function countPending(){
-  let n=0;for(const k in turns)for(const c of turns[k].segs.children)if(c.classList.contains('pending'))n++;
-  return n}
-function targetY(){
-  let best=0;
-  for(const k in turns){
-    const t=turns[k];
-    const ls=t.segs.lastElementChild;
-    if(ls){const b=ls.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
-    if(t.tools&&t.tools.children.length){const b=t.tools.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
-    if(t.ans&&t.ans.textContent.trim()){const b=t.ans.getBoundingClientRect().bottom+window.scrollY;if(b>best)best=b}
-  }
-  if(!best)return document.documentElement.scrollHeight;
-  // 翻訳が追いついていない (待ち3行以上) 間は、最後に翻訳済みの行までしかスクロールしない
-  if(countPending()>=3){const d=lastDoneSeg();if(d){const b=d.getBoundingClientRect().bottom+window.scrollY;if(b<best)best=b}}
-  // 画面の下端に最新を合わせてスクロール (余白は最小限)
-  return Math.max(0,Math.min(best,document.documentElement.scrollHeight)-window.innerHeight+24);
+  if(!best)return maxScroll();
+  if(updateLag){if(pending>=3)lagMode=true;else if(pending<=1)lagMode=false}
+  if(lagMode&&shown(lastDone))best=Math.min(best,bottomOf(lastDone));
+  return Math.max(0,Math.min(maxScroll(),Math.round(best-window.innerHeight+PAD)));
 }
-function scroll(){if(newest.checked||!auto.checked)return;
-  // 瞬間ジャンプではなく、毎フレーム目標の残距離を指数減衰で縮めて滑らかに追従する
-  if(rafId!==null)return;
-  let last=performance.now();
-  const step=now=>{
-    rafId=null;
-    if(newest.checked||!auto.checked)return;
-    const dy=targetY()-window.scrollY;
-    if(Math.abs(dy)<1.5)return; // 目標に到達したら停止
-    const dt=Math.min(0.1,(now-last)/1000);last=now;
-    window.scrollTo(0,window.scrollY+dy*(1-Math.exp(-10*dt)));
-    markProgrammatic();
-    rafId=requestAnimationFrame(step);
-  };
-  rafId=requestAnimationFrame(step);
-}
-// 自動スクロール ON のとき: 最新訳文から離れて上にスクロールしたら止める
-function awayFromTarget(){return document.documentElement.scrollHeight-window.scrollY-window.innerHeight<80||window.scrollY+window.innerHeight>=targetY()-80}
-window.addEventListener('scroll',()=>{if(programmatic||newest.checked)return;
-  if(auto.checked&&!awayFromTarget()){auto.checked=false;updateBtn()}
-  // 再開は「ページ最下部までスクロールした場合」のみ (最新訳文が画面内であるだけでは再チェックされず、チェックを外せる)
-  else if(!auto.checked&&document.documentElement.scrollHeight-window.scrollY-window.innerHeight<80){auto.checked=true;updateBtn()}},{passive:true});
-tobottom.onclick=()=>{auto.checked=true;updateBtn();scroll()};
+// 描画 1 回につき 1 度だけ計算する (思考はトークン単位で届くので、そのたびに全ターンの座標を測ると重い)
+function doScroll(){scrollReq=0;if(newest.checked||!auto.checked)return;const y=targetY(true);lastAutoY=y;if(Math.abs(window.scrollY-y)>=1)window.scrollTo(0,y)}
+function scroll(){if(newest.checked||!auto.checked||scrollReq)return;scrollReq=requestAnimationFrame(doScroll)}
+function pause(){if(newest.checked||!auto.checked)return;auto.checked=false;pausedByScroll=true;if(scrollReq){cancelAnimationFrame(scrollReq);scrollReq=0}updateBtn()}
+function resume(){if(auto.checked)return;auto.checked=true;pausedByScroll=false;updateBtn();scroll()}
+// ユーザーの操作の検出。
+//  ・ホイール上 / PageUp / ↑ / Home / 指で下に引く → その場で止める (scroll イベントを待つと、次の訳文で引き戻されてしまう)
+//  ・スクロールバーを掴んだ (ページ内容の外側で mousedown) → その場で止める
+//  ・scroll イベント → 目標との距離で判断 (予備)。自分で動かした直後の分と、内容が増えて再配置を待っている間の分は無視する
+//    (上の方の行の訳文が届いて高さが変わると、ブラウザが表示位置を保つために scroll イベントを起こすため)
+//  ・再開は「スクロールで止まった」場合のみ。チェックを手で外したときは、ページ末尾に来ても勝手に付け直さない
+window.addEventListener('wheel',e=>{if(e.deltaY<0&&window.scrollY>0)pause()},{passive:true});
+window.addEventListener('keydown',e=>{if(e.target&&/^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(e.target.tagName))return;
+  if((e.key==='ArrowUp'||e.key==='PageUp'||e.key==='Home')&&window.scrollY>0)pause()});
+window.addEventListener('mousedown',e=>{if(e.clientX>=document.documentElement.clientWidth||e.clientY>=document.documentElement.clientHeight)pause()});
+let touchY=null;
+window.addEventListener('touchstart',e=>{touchY=e.touches[0].clientY},{passive:true});
+window.addEventListener('touchmove',e=>{if(touchY===null)return;if(e.touches[0].clientY-touchY>12&&window.scrollY>0)pause()},{passive:true});
+window.addEventListener('scroll',()=>{if(newest.checked)return;
+  const y=window.scrollY;
+  if(Math.abs(y-lastAutoY)<1.5)return;
+  const dist=targetY(false)-y; // 正 = 目標より上を見ている、負 = 目標より下 (左列の英文の続き) を見ている
+  if(auto.checked){if(!scrollReq&&Math.abs(dist)>PAUSE_PX)pause()}
+  else if(pausedByScroll&&(Math.abs(dist)<=RESUME_PX||maxScroll()-y<=RESUME_PX))resume()},{passive:true});
+window.addEventListener('resize',()=>scroll());
+tobottom.onclick=()=>{auto.checked=true;pausedByScroll=false;updateBtn();scroll()};
 function turn(n){return turns[n]}
 function onTurnStart(ev){
   empty.style.display='none';
@@ -1421,7 +1478,8 @@ function onTurnStart(ev){
   while(keys.length>40){const k=keys.shift();turns[k].el.remove();delete turns[k]}
   scroll();
 }
-function onThink(ev){const t=turn(ev.turn);if(!t)return;t.think.appendChild(document.createTextNode(ev.text));scroll()}
+function onThink(ev){const t=turn(ev.turn);if(!t)return;const l=t.think.lastChild;
+  if(l&&l.nodeType===3)l.appendData(ev.text);else t.think.appendChild(document.createTextNode(ev.text));scroll()}
 function onTurnCtx(ev){const t=turn(ev.turn);if(!t)return;const el=t.el.querySelector('.ctxm');if(!el)return;
   const lim=ev.ctx_limit||0;const k=v=>v>=1000?(v/1000).toFixed(1).replace(/\.0$/,'')+'k':v;
   el.textContent='ctx '+k(ev.tokens)+(lim?'/'+k(lim):'')+(ev.exact?'':'~')+' · max_out '+k(ev.max_tokens||0);
@@ -1439,7 +1497,7 @@ function onAnswer(ev){const t=turn(ev.turn);if(!t)return;t.ansRaw+=ev.text;if(!t
 function onTools(ev){const t=turn(ev.turn);if(!t)return;t.tools.innerHTML=(ev.tools||[]).map(x=>'<div title="'+esc(x.args)+'"><b>🔧 '+esc(x.name)+'</b><code>'+esc(x.args)+'</code></div>').join('');scroll()}
 // 最小限の Markdown 描画 (見出し・箇条書き・表・コード・引用・太字・斜体・リンク)
 function md(src){
-  const inline=s=>{s=esc(s).replace(/"/g,'&quot;');
+  const inline=s=>{s=esc(s);
     s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
     s=s.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
     s=s.replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g,'$1<i>$2</i>');
@@ -1475,12 +1533,14 @@ function onSeg(ev){const t=turn(ev.turn);if(!t)return;
     t.segEls[ev.seg]=s;}
   s.querySelector('.src').textContent=ev.src;scroll()}
 function onJa(ev){const t=turn(ev.turn);if(!t)return;let s=t.segEls[ev.seg];if(!s){onSeg({turn:ev.turn,seg:ev.seg,src:''});s=t.segEls[ev.seg]}
-  // 翻訳モデルが英語で返した (how='en') ときは、モデルの言い換えではなく原文を表示する
-  s.querySelector('.ja').textContent=ev.how==='en'?(s.querySelector('.src').textContent||ev.text):ev.text;
+  // 翻訳モデルが英語で返した (how='en') / 次のターンが始まって中断した (how='interrupted') ときは原文をそのまま黄色で表示する
+  const untr=ev.how==='en'||ev.how==='interrupted';
+  s.querySelector('.ja').textContent=untr?(s.querySelector('.src').textContent||ev.text):ev.text;
   s.classList.remove('pending');
-  s.classList.add(ev.how==='en'?'untranslated':ev.ok?'done':'bad');
+  s.classList.add(untr?'untranslated':ev.ok?'done':'bad');
   if(ev.how==='suspect')s.title='訳文が原文より極端に長いため、翻訳モデルが作文している可能性があります (原文を併記)';
   else if(ev.how==='en')s.title='翻訳失敗 (翻訳モデルが英語で返したため原文を表示)';
+  else if(ev.how==='interrupted')s.title='次のターンが始まったため翻訳を中断 (原文を表示)';
   scroll()}
 function onTurnEnd(ev){const t=turn(ev.turn);if(!t)return;t.think.classList.remove('live');
   t.st.textContent=(ev.reason==='stop'||ev.reason==='tool_calls'||ev.reason==='length'?'完了':ev.reason)+' · '+ev.elapsed+'s · '+ev.think_chars+'字 · '+ev.segments+'文';
@@ -1495,7 +1555,7 @@ function connect(){
   const es=new EventSource('/events');
   es.onopen=()=>{document.getElementById('sdot').className='dot ok';document.getElementById('stext').textContent='接続中'};
   es.onerror=()=>{document.getElementById('sdot').className='dot error';document.getElementById('stext').textContent='再接続待ち…'};
-  es.onmessage=e=>{try{const ev=JSON.parse(e.data);const h=H[ev.type];if(h)h(ev)}catch(err){console.error(err)}};
+  es.onmessage=e=>{try{const ev=JSON.parse(e.data);checkBoot(ev);const h=H[ev.type];if(h)h(ev)}catch(err){console.error(err)}};
 }
 connect();
 })();
@@ -1532,12 +1592,27 @@ class UIHandler(BaseHTTPRequestHandler):
             return self._send(200, "application/json; charset=utf-8", json.dumps(body, ensure_ascii=False).encode())
         if path == "/api/history":
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-            since = int((qs.get("since") or ["0"])[0])
-            evs = BUS.since(since)
+            since = self._parse_last_id((qs.get("since") or ["0"])[0])
+            evs = BUS.since(since) if since is not None else None
+            if evs is None:
+                evs = BUS.replay_from_recent_turns(self.cfg.getint("ui", "replay_turns"))
             return self._send(200, "application/json; charset=utf-8", json.dumps(evs, ensure_ascii=False).encode())
         if path == "/health":
             return self._send(200, "text/plain", b"ok")
         return self._send(404, "text/plain", b"not found")
+
+    @staticmethod
+    def _parse_last_id(s):
+        """SSE の id ("<boot>:<n>" または再起動前の形式 "<n>") から n を返す。
+        boot が今の起動と違う (中継サーバーが再起動した) 場合は None = 全再生が必要"""
+        try:
+            s = str(s)
+            if ":" in s:
+                boot, n = s.split(":", 1)
+                return int(n) if int(boot) == BOOT_ID else None
+            return int(s) if s.isdigit() else None
+        except Exception:
+            return None
 
     def _events(self):
         last = self.headers.get("Last-Event-ID")
@@ -1553,9 +1628,9 @@ class UIHandler(BaseHTTPRequestHandler):
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
             backlog = None
-            if last is not None and str(last).isdigit():
-                backlog = BUS.since(int(last))
-                seen = int(last)
+            seen = self._parse_last_id(last) if last is not None else None
+            if seen is not None:
+                backlog = BUS.since(seen)
             if backlog is None:
                 backlog = BUS.replay_from_recent_turns(self.cfg.getint("ui", "replay_turns"))
                 seen = BUS.latest_id()
@@ -1565,7 +1640,7 @@ class UIHandler(BaseHTTPRequestHandler):
             # 状態を一度送る
             self._emit({"id": seen, "type": "status", "translator": self.translator.status,
                         "engine": self.translator.engine, "queue": self.translator.q.qsize(),
-                        "error": self.translator.last_error, "ts": time.time()})
+                        "error": self.translator.last_error, "ts": time.time(), "boot": BOOT_ID})
             while True:
                 try:
                     ev = q.get(timeout=15)
@@ -1586,7 +1661,7 @@ class UIHandler(BaseHTTPRequestHandler):
 
     def _emit(self, ev):
         data = json.dumps(ev, ensure_ascii=False)
-        self.wfile.write(f"id: {ev.get('id', 0)}\ndata: {data}\n\n".encode("utf-8"))
+        self.wfile.write(f"id: {BOOT_ID}:{ev.get('id', 0)}\ndata: {data}\n\n".encode("utf-8"))
         self.wfile.flush()
 
 
