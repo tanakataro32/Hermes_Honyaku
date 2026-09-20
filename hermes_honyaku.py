@@ -1925,7 +1925,7 @@ function gpuNode(g,i){
  return el}
 function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c.innerHTML='';
  const card=document.createElement('div');card.className='sysm';
- card.title='サーバの CPU・RAM・各 SSD・各 GPU 使用量 (/proc・statvfs・nvidia-smi、2秒更新)';
+ card.title='サーバの GPU・CPU・RAM・各 SSD 使用量 (/proc・statvfs・nvidia-smi、2秒更新)';
  const s=lastSysmon;
  if(s){
   const cpu=(s.cpu===null||s.cpu===undefined)?null:s.cpu;
@@ -1934,6 +1934,32 @@ function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c
   const memPct=(s.mem_total)?s.mem_used/s.mem_total*100:null;
   card.appendChild(sysnode('サーバ','srv'));
   if(sysTree.srv){
+   // 表示順: GPU → CPU → RAM → ディスク
+   if(Array.isArray(lastGpus)&&lastGpus.length){
+    const gw=document.createElement('div');gw.className='tsub';
+    gw.appendChild(sysnode('GPU','gpu'));
+    if(sysTree.gpu){
+     const body=document.createElement('div');body.className='tsub';
+     lastGpus.forEach((g,i)=>{
+      const gwrap=document.createElement('div');gwrap.className='tsub';
+      gwrap.appendChild(gpuNode(g,i));
+      if(gpuTree['gpu'+i]){
+       const gb=document.createElement('div');gb.className='tsub';
+       // バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、VRAM 使用率 (warn 95%)、電力 max_power 満杯
+       const tp=(g.temp/90*100);
+       gb.appendChild(sysleaf('温度',g.temp+'℃',tp,75/90*100,85/90*100));
+       const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
+       gb.appendChild(sysleaf('VRAM',mv,g.mem_total?g.mem_used/g.mem_total*100:null,95));
+       const mp=g.max_power||250;
+       gb.appendChild(sysleaf('電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
+       gwrap.appendChild(gb);
+      }
+      body.appendChild(gwrap);
+     });
+     gw.appendChild(body);
+    }
+    card.appendChild(gw);
+   }
    card.appendChild(sysleaf('CPU',cpuV,cpu,90));
    card.appendChild(sysleaf('RAM',memV,memPct,95));
    const dskWrap=document.createElement('div');dskWrap.className='tsub';
@@ -1959,32 +1985,6 @@ function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c
    }
    card.appendChild(dskWrap);
   }
- }
- // GPU (データが来ない間はこのノード自体を表示しない。「サーバ」を折りたたんだ時も隠す)
- if(Array.isArray(lastGpus)&&lastGpus.length&&(!s||sysTree.srv)){
-  const gw=document.createElement('div');gw.className=s?'tsub':'';
-  gw.appendChild(sysnode('GPU','gpu'));
-  if(sysTree.gpu){
-   const body=document.createElement('div');body.className='tsub';
-   lastGpus.forEach((g,i)=>{
-    const gwrap=document.createElement('div');gwrap.className='tsub';
-    gwrap.appendChild(gpuNode(g,i));
-    if(gpuTree['gpu'+i]){
-     const gb=document.createElement('div');gb.className='tsub';
-     // バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、VRAM 使用率 (warn 95%)、電力 max_power 満杯
-     const tp=(g.temp/90*100);
-     gb.appendChild(sysleaf('温度',g.temp+'℃',tp,75/90*100,85/90*100));
-     const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
-     gb.appendChild(sysleaf('VRAM',mv,g.mem_total?g.mem_used/g.mem_total*100:null,95));
-     const mp=g.max_power||250;
-     gb.appendChild(sysleaf('電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
-     gwrap.appendChild(gb);
-    }
-    body.appendChild(gwrap);
-   });
-   gw.appendChild(body);
-  }
-  card.appendChild(gw);
  }
  c.appendChild(card)}
 function renderSys(s){lastSysmon=s;renderSysCard()}
