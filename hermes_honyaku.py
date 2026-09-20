@@ -67,8 +67,8 @@ class Config:
                            "timeout": "120", "temperature": "0.2",
                            "deepl_key": "", "deepl_url": "https://api-free.deepl.com/v2/translate"},
             "segment": {"max_chars": "500", "min_chars": "120", "idle_flush_sec": "2.0"},
-            "gpu": {"interval": "5", "power_max": "250"},
-             "sysmon": {"interval": "5"},
+            "gpu": {"interval": "2", "power_max": "250"},
+             "sysmon": {"interval": "2"},
             "log": {"dir": "logs", "level": "INFO"},
             "sources": {"127.0.0.1": "Hermes", "172.": "Open WebUI", "default": ""},
         })
