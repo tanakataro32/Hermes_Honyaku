@@ -67,7 +67,7 @@ class Config:
                            "timeout": "120", "temperature": "0.2",
                            "deepl_key": "", "deepl_url": "https://api-free.deepl.com/v2/translate"},
             "segment": {"max_chars": "500", "min_chars": "120", "idle_flush_sec": "2.0"},
-            "gpu": {"interval": "5"},
+            "gpu": {"interval": "5", "power_max": "250"},
             "log": {"dir": "logs", "level": "INFO"},
             "sources": {"127.0.0.1": "Hermes", "172.": "Open WebUI", "default": ""},
         })
@@ -857,7 +857,7 @@ class TokenMeter:
 # --------------------------------------------------------------------------
 # GPU 温度モニター (ヘッダーのメータ用)
 # --------------------------------------------------------------------------
-GPU_SMI_QUERY = ["--query-gpu=name,temperature.gpu,power.draw,memory.used,memory.total", "--format=csv,noheader,nounits"]
+GPU_SMI_QUERY = ["--query-gpu=index,name,temperature.gpu,power.draw,memory.used,memory.total", "--format=csv,noheader,nounits"]
 
 
 def short_gpu_label(name):
@@ -884,13 +884,16 @@ class GpuMonitor:
     静かに無効化する (gpu なし として UI に表示されるだけ)。
     """
 
-    def __init__(self, interval=5.0, timeout=5.0):
+    def __init__(self, interval=5.0, timeout=5.0, power_max=250.0):
         self.interval = interval
         self.timeout = timeout
         self.lock = threading.Lock()
         self.data = []
         self.updated = 0.0
         self.ok = False
+        # 電力バーの最大値 (既定 250W)。観測値が超えた場合はその値がそのまま最大値になる
+        self.default_max = power_max
+        self.hwm = {}  # GPU index -> これまでの観測最大電力 (高水位)
         self.no_smi = shutil.which("nvidia-smi") is None
         if not self.no_smi:
             self.thread = threading.Thread(target=self._loop, name="gpu-monitor", daemon=True)
@@ -903,15 +906,20 @@ class GpuMonitor:
         out = []
         for line in r.stdout.splitlines():
             parts = [p.strip() for p in line.split(",")]
-            # name, temp, power, mem_used, mem_total
-            if len(parts) >= 5 and parts[1].lstrip("-").isdigit():
+            # index, name, temp, power, mem_used, mem_total
+            if len(parts) >= 6 and parts[0].isdigit():
                 try:
-                    power = float(parts[2])
+                    power = float(parts[3])
                 except ValueError:
                     power = 0.0  # 消費電力センサーのないカード (N/A)
-                out.append({"name": parts[0], "label": short_gpu_label(parts[0]),
-                            "temp": int(parts[1]), "power": power,
-                            "mem_used": float(parts[3]), "mem_total": float(parts[4])})
+                out.append({"index": int(parts[0]), "name": parts[1], "label": short_gpu_label(parts[1]),
+                            "temp": int(parts[2]), "power": power,
+                            "mem_used": float(parts[4]), "mem_total": float(parts[5])})
+        # 電力バーの最大値 = 既定値と観測高水位の大きい方 (超えたらリアルタイムで最大値が上がる)
+        for g in out:
+            i = g["index"]
+            self.hwm[i] = max(self.hwm.get(i, 0.0), g["power"])
+            g["max_power"] = max(self.default_max, self.hwm[i])
         return out
 
     def _loop(self):
@@ -1394,10 +1402,9 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .gpug{display:flex;flex-direction:column;gap:3px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .gpug .ghead{display:flex;align-items:center;gap:6px;white-space:nowrap}
 .gpug .ghead b{color:#fff}
-.gpug .pw{color:var(--muted);margin-left:auto}
 .gpug .brow{display:flex;align-items:center;gap:6px}
 .gpug .brow .bl{width:30px;color:var(--muted);flex:none}
-.gpug .brow .bval{width:66px;text-align:right;flex:none;color:#cfe8e4}
+.gpug .brow .bval{width:78px;text-align:right;flex:none;color:#cfe8e4}
 .gpug .bar{flex:1;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .gpug .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
 .gpug .brow.warn .fill{background:var(--warn)}
@@ -1687,7 +1694,9 @@ function renderGpu(gpus){const c=document.getElementById('gpuc');if(!c)return;c.
    const mem=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0);
    const trow='<div class="brow'+tcls+'"><span class="bl">温度</span><span class="bval">'+g.temp+'℃</span><span class="bar"><span class="fill" style="width:'+Math.max(0,Math.min(100,g.temp/90*100))+'%"></span></span></div>';
    const mrow='<div class="brow'+mcls+'"><span class="bl">VRAM</span><span class="bval">'+mem+'G</span><span class="bar"><span class="fill" style="width:'+(g.mem_total?Math.max(0,Math.min(100,g.mem_used/g.mem_total*100)):0)+'%"></span></span></div>';
-   d.innerHTML='<div class="ghead"><b>'+esc(g.label)+'</b><span class="pw">'+g.power.toFixed(0)+'W</span></div>'+trow+mrow;
+   // 電力バーの最大値はサーバ側が管理 (既定250W、観測値で上書き)
+   const prow='<div class="brow"><span class="bl">電力</span><span class="bval">'+g.power.toFixed(0)+'/'+(g.max_power||250).toFixed(0)+'W</span><span class="bar"><span class="fill" style="width:'+(g.max_power?Math.max(0,Math.min(100,g.power/g.max_power*100)):0)+'%"></span></span></div>';
+   d.innerHTML='<div class="ghead"><b>'+esc(g.label)+'</b></div>'+trow+mrow+prow;
    c.appendChild(d)}}
 function onGpu(ev){renderGpu(ev.gpus)}
 function onError(ev){const d=document.createElement('div');d.className='seg bad';d.innerHTML='<div class="ja"></div>';d.querySelector('.ja').textContent=ev.text;main.appendChild(d)}
@@ -1854,7 +1863,8 @@ def main():
         log.exception("token meter init failed (context meter will use estimates)")
     UIHandler.cfg = cfg
     UIHandler.translator = translator
-    UIHandler.gpu_monitor = GpuMonitor(interval=cfg.getfloat("gpu", "interval"))
+    UIHandler.gpu_monitor = GpuMonitor(interval=cfg.getfloat("gpu", "interval"),
+                                       power_max=cfg.getfloat("gpu", "power_max"))
 
     proxy = Server((cfg.get("proxy", "listen_host"), cfg.getint("proxy", "listen_port")), ProxyHandler)
     ui = Server((cfg.get("ui", "listen_host"), cfg.getint("ui", "listen_port")), UIHandler)
