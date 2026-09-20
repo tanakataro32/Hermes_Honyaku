@@ -1888,10 +1888,59 @@ function bfmt(v){return v===null?'-':v.toFixed(1)}
 const sysTree={srv:true,dsk:true,gpu:true};
 const gpuTree={}; // 各 GPU ノード ('gpu0','gpu1',...)
 let lastSysmon=null, lastGpus=null;
-// ラベル先頭のアイコン (SVG は currentColor で周囲のテキスト色に追従)
-const IC_CPU='<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="2" width="2" height="4"/><rect x="11" y="2" width="2" height="4"/><rect x="15" y="2" width="2" height="4"/><rect x="7" y="18" width="2" height="4"/><rect x="11" y="18" width="2" height="4"/><rect x="15" y="18" width="2" height="4"/><rect x="2" y="7" width="4" height="2"/><rect x="2" y="11" width="4" height="2"/><rect x="2" y="15" width="4" height="2"/><rect x="18" y="7" width="4" height="2"/><rect x="18" y="11" width="4" height="2"/><rect x="18" y="15" width="4" height="2"/><rect x="5" y="5" width="14" height="14"/><text x="12" y="15.4" text-anchor="middle" font-size="9" font-weight="bold" font-family="monospace" fill="#131a1f">C</text></svg>';
-const IC_GPU='<svg width="24" height="12" viewBox="0 0 24 12" fill="currentColor"><rect x="1" y="1" width="2.5" height="10"/><rect x="1.75" y="2.2" width="1" height="1.8" fill="#131a1f"/><rect x="3.5" y="2" width="20" height="8"/><rect x="9.5" y="4.5" width="6" height="3" fill="#131a1f"/></svg>';
-const IC_DDR='<svg width="24" height="12" viewBox="0 0 24 12"><rect x="1.5" y="2" width="21" height="6" fill="#3d9950"/><rect x="3" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="5" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="7" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="8.8" y="5.5" width="1.8" height="2.5" fill="#131a1f"/><rect x="11.5" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="13.5" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="15.5" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="17.5" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="19.5" y="8" width="1.4" height="2.5" fill="#d4af37"/></svg>';
+// ラベル先頭のアイコン (実物風の固定配色: 緑=基板 / 金=端子・ピン / 銀=金属 / 黒=チップ。切欠きは背景色 #131a1f で抜く)
+// ---- CPU: LGA パッケージ (緑基板 + 銀の IHS + 金ピン、IHS は Win98 風ベベル) ----
+const IC_CPU='<svg width="14" height="14" viewBox="0 0 26 26" style="vertical-align:-2.5px" shape-rendering="crispEdges">'
++'<g fill="#d4af37">'
++'<rect x="6" y="1" width="2" height="4"/><rect x="10" y="1" width="2" height="4"/><rect x="14" y="1" width="2" height="4"/><rect x="18" y="1" width="2" height="4"/>'
++'<rect x="6" y="21" width="2" height="4"/><rect x="10" y="21" width="2" height="4"/><rect x="14" y="21" width="2" height="4"/><rect x="18" y="21" width="2" height="4"/>'
++'<rect x="1" y="6" width="4" height="2"/><rect x="1" y="10" width="4" height="2"/><rect x="1" y="14" width="4" height="2"/><rect x="1" y="18" width="4" height="2"/>'
++'<rect x="21" y="6" width="4" height="2"/><rect x="21" y="10" width="4" height="2"/><rect x="21" y="14" width="4" height="2"/><rect x="21" y="18" width="4" height="2"/>'
++'</g>'
++'<rect x="4" y="4" width="18" height="18" fill="#2f7d40"/>'          // 基板 (暗めの緑)
++'<rect x="5" y="5" width="16" height="16" fill="#3d9950"/>'          // 基板の縁取り (明るい緑)
++'<rect x="7" y="7" width="12" height="12" fill="#aeb9c2"/>'          // IHS 本体
++'<rect x="7" y="7" width="12" height="1" fill="#e4ebef"/><rect x="7" y="7" width="1" height="12" fill="#e4ebef"/>'   // 上左ハイライト
++'<rect x="7" y="18" width="12" height="1" fill="#6b7883"/><rect x="18" y="7" width="1" height="12" fill="#6b7883"/>' // 下右シャドウ
++'<rect x="10" y="10" width="6" height="6" fill="#c9d3da"/>'          // ダイの盛り上がり
++'<rect x="5" y="19" width="2" height="2" fill="#d4af37"/>'           // ピン1 マーカー
++'</svg>';
+
+// ---- GPU: グラフィックカード側面 (ブラケット + 2連ファンのクーラー + 緑基板 + 金のエッジコネクタ) ----
+const IC_GPU='<svg width="26" height="13" viewBox="0 0 52 26" style="vertical-align:-2px">'
++'<g shape-rendering="crispEdges">'
++'<rect x="0" y="0" width="7" height="3" fill="#c3ced6"/>'                            // ブラケット上部のタブ
++'<rect x="1" y="1" width="4" height="25" fill="#aeb9c2"/><rect x="1" y="1" width="1" height="25" fill="#e4ebef"/>' // ブラケット
++'<rect x="2.5" y="6" width="1.5" height="5" fill="#131a1f"/><rect x="2.5" y="13" width="1.5" height="5" fill="#131a1f"/>' // 出力端子
++'<rect x="5" y="17" width="46" height="4" fill="#3d9950"/><rect x="5" y="20" width="46" height="1" fill="#2f7d40"/>' // 基板
++'<rect x="11" y="21" width="7" height="4" fill="#d4af37"/><rect x="20" y="21" width="24" height="4" fill="#d4af37"/>' // PCIe x16 (短い部分 / 切欠き / 長い部分)
++'<rect x="5" y="2" width="46" height="15" fill="#3a444c"/>'                            // クーラーのシュラウド
++'<rect x="5" y="2" width="46" height="1" fill="#5c6a74"/><rect x="50" y="2" width="1" height="15" fill="#242b30"/><rect x="5" y="16" width="46" height="1" fill="#242b30"/>' // ベベル
++'</g>'
++'<g fill="#1c2226" stroke="#6c7a85" stroke-width="1"><circle cx="19" cy="9.5" r="6.2"/><circle cx="37" cy="9.5" r="6.2"/></g>' // ファン枠
++'<g fill="none" stroke="#9aa8b3" stroke-width="1.3" stroke-linecap="round">'
++'<path d="M19 9.5 q4.5 -4.5 3.5 -4.5 M19 9.5 q-4.5 2.2 -4 3.5 M19 9.5 q1.2 4.5 2.5 4.5"/>'                    // 羽根 (3枚)
++'<path d="M37 9.5 q4.5 -4.5 3.5 -4.5 M37 9.5 q-4.5 2.2 -4 3.5 M37 9.5 q1.2 4.5 2.5 4.5"/>'
++'</g>'
++'<g fill="#c3ced6"><circle cx="19" cy="9.5" r="1.5"/><circle cx="37" cy="9.5" r="1.5"/></g>' // ハブ
++'</svg>';
+
+// ---- DDR: DIMM (緑基板 + 黒いメモリチップ 8 個 + 金の端子とキー切欠き + 側面のラッチ溝) ----
+const IC_DDR='<svg width="26" height="13" viewBox="0 0 52 26" style="vertical-align:-2px" shape-rendering="crispEdges">'
++'<rect x="1" y="3" width="50" height="16" fill="#3d9950"/>'                           // 基板
++'<rect x="1" y="3" width="50" height="1" fill="#5fb872"/><rect x="1" y="18" width="50" height="1" fill="#2f7d40"/>' // 基板の上下エッジ
++'<rect x="1" y="9" width="1.5" height="4" fill="#131a1f"/><rect x="49.5" y="9" width="1.5" height="4" fill="#131a1f"/>' // ラッチ溝
++'<g fill="#161b1f">'
++'<rect x="5" y="6" width="4.5" height="7"/><rect x="10.5" y="6" width="4.5" height="7"/><rect x="16" y="6" width="4.5" height="7"/><rect x="21.5" y="6" width="4.5" height="7"/>'
++'<rect x="27" y="6" width="4.5" height="7"/><rect x="32.5" y="6" width="4.5" height="7"/><rect x="38" y="6" width="4.5" height="7"/><rect x="43.5" y="6" width="4.5" height="7"/>'
++'</g>'
++'<g fill="#3f4a52"><rect x="5" y="6" width="4.5" height="1"/><rect x="10.5" y="6" width="4.5" height="1"/><rect x="16" y="6" width="4.5" height="1"/><rect x="21.5" y="6" width="4.5" height="1"/><rect x="27" y="6" width="4.5" height="1"/><rect x="32.5" y="6" width="4.5" height="1"/><rect x="38" y="6" width="4.5" height="1"/><rect x="43.5" y="6" width="4.5" height="1"/></g>' // チップ上面のハイライト
++'<g fill="#d4af37">'
++'<rect x="3" y="19" width="1.5" height="5"/><rect x="5.5" y="19" width="1.5" height="5"/><rect x="8" y="19" width="1.5" height="5"/><rect x="10.5" y="19" width="1.5" height="5"/><rect x="13" y="19" width="1.5" height="5"/><rect x="15.5" y="19" width="1.5" height="5"/><rect x="18" y="19" width="1.5" height="5"/>'
++'<rect x="24" y="19" width="1.5" height="5"/><rect x="26.5" y="19" width="1.5" height="5"/><rect x="29" y="19" width="1.5" height="5"/><rect x="31.5" y="19" width="1.5" height="5"/><rect x="34" y="19" width="1.5" height="5"/><rect x="36.5" y="19" width="1.5" height="5"/><rect x="39" y="19" width="1.5" height="5"/><rect x="41.5" y="19" width="1.5" height="5"/><rect x="44" y="19" width="1.5" height="5"/><rect x="46.5" y="19" width="1.5" height="5"/>'
++'</g>'
++'<rect x="20.5" y="16" width="2.5" height="8" fill="#131a1f"/>'                        // キー切欠き
++'</svg>';
 function hesc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function sysleaf(label,value,pct,warnPct,hotPct,tip){
  const el=document.createElement('div');
