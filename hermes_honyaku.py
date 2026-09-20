@@ -29,7 +29,9 @@ import logging
 import os
 import queue
 import re
+import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -65,6 +67,7 @@ class Config:
                            "timeout": "120", "temperature": "0.2",
                            "deepl_key": "", "deepl_url": "https://api-free.deepl.com/v2/translate"},
             "segment": {"max_chars": "500", "min_chars": "120", "idle_flush_sec": "2.0"},
+            "gpu": {"interval": "5"},
             "log": {"dir": "logs", "level": "INFO"},
             "sources": {"127.0.0.1": "Hermes", "172.": "Open WebUI", "default": ""},
         })
@@ -117,7 +120,7 @@ class EventBus:
         with self.lock:
             self.next_id += 1
             ev["id"] = self.next_id
-            if ev.get("type") != "status":
+            if ev.get("type") not in ("status", "gpu"):
                 self.events.append(ev)
             self._summarize(ev)
             subs = list(self.subs)
@@ -852,6 +855,89 @@ class TokenMeter:
 
 
 # --------------------------------------------------------------------------
+# GPU 温度モニター (ヘッダーのメータ用)
+# --------------------------------------------------------------------------
+GPU_SMI_QUERY = ["--query-gpu=name,temperature.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"]
+
+
+def short_gpu_label(name):
+    """GPU 名を型名に省略する。
+    'Tesla V100-PCIE-32GB' → 'V100'、'NVIDIA RTX A5000 24GB' → 'RTX A5000'、
+    'NVIDIA CMP 170HX' → 'CMP 170HX'。
+    複数カード (V100 + 改造 CMP 170HX など) でも型名で区別がつく。"""
+    n = name.strip()
+    n = re.sub(r"^NVIDIA\s+", "", n, flags=re.I)
+    for prefix in ("Tesla ", "GeForce ", "Quadro "):
+        if n.lower().startswith(prefix.lower()):
+            n = n[len(prefix):].strip()
+    if "-" in n:
+        n = n.split("-", 1)[0].strip()  # V100-PCIE-32GB の PCIe/VRAM 接尾辞を切る
+    n = re.sub(r"\s+\d+GB$", "", n, flags=re.I).strip()  # 末尾の VRAM 容量 (24GB 等) を切る
+    return n[:14] or name[:14]
+
+
+class GpuMonitor:
+    """nvidia-smi で GPU の温度・VRAM 使用量を読み、5 秒間隔で gpu イベントを BUS に流す。
+
+    1 枚でも複数枚でもそのまま対応する (nvidia-smi は全カードを返すため、
+    2 枚目を増設しても設定変更は不要)。nvidia-smi が見つからない・実行できない環境では
+    静かに無効化する (gpu なし として UI に表示されるだけ)。
+    """
+
+    def __init__(self, interval=5.0, timeout=5.0):
+        self.interval = interval
+        self.timeout = timeout
+        self.lock = threading.Lock()
+        self.data = []
+        self.updated = 0.0
+        self.ok = False
+        self.no_smi = shutil.which("nvidia-smi") is None
+        if not self.no_smi:
+            self.thread = threading.Thread(target=self._loop, name="gpu-monitor", daemon=True)
+            self.thread.start()
+
+    def _query(self):
+        r = subprocess.run(["nvidia-smi"] + GPU_SMI_QUERY, capture_output=True, text=True, timeout=self.timeout)
+        if r.returncode != 0:
+            raise RuntimeError((r.stderr or "").strip()[:200] or f"nvidia-smi {r.returncode}")
+        out = []
+        for line in r.stdout.splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 4 and parts[1].lstrip("-").isdigit():
+                out.append({"name": parts[0], "label": short_gpu_label(parts[0]),
+                            "temp": int(parts[1]), "mem_used": float(parts[2]), "mem_total": float(parts[3])})
+        return out
+
+    def _loop(self):
+        fails = 0
+        while True:
+            try:
+                data = self._query()
+                fails = 0
+                self.ok = True
+                with self.lock:
+                    self.data = data
+                    self.updated = time.time()
+            except Exception as e:
+                fails += 1
+                self.ok = False
+                if fails == 1:
+                    log.info("gpu monitor: nvidia-smi 取得に失敗 (次から再試続行): %s", e)
+            self._publish()
+            time.sleep(self.interval)
+
+    def _publish(self):
+        with self.lock:
+            gpus = self.data
+        BUS.publish({"type": "gpu", "gpus": gpus, "ok": self.ok})
+
+    def current(self):
+        """直近のスナップショット。SSE の初期 status にも載せる用"""
+        with self.lock:
+            return self.data
+
+
+# --------------------------------------------------------------------------
 # 非ストリーミング応答の組み立て (Hermes が stream=false で来た場合用)
 # --------------------------------------------------------------------------
 class ResponseAccumulator:
@@ -1299,6 +1385,10 @@ header .ctxg.warn .fill{background:var(--warn)}
 header .ctxg.warn{color:var(--warn)}
 header .ctxg.hot .fill{background:var(--bad)}
 header .ctxg.hot .txt,header .ctxg.hot{color:var(--bad)}
+header .gpug{display:inline-flex;align-items:center;gap:5px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:1px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+header .gpug .mem{color:var(--muted)}
+header .gpug.warn{color:var(--warn)}
+header .gpug.hot{color:var(--bad)}
 .turn.hidden{display:none}
 .segs .note{color:var(--muted);font-size:12.5px}
 header select{background:#131a1f;color:var(--ink);padding:1px 4px;font:12px "Courier New",ui-monospace,monospace;
@@ -1365,6 +1455,7 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));color:#fff;font-weight
  <span><span id="sdot" class="dot"></span><span id="stext">接続中…</span></span>
  <span title="翻訳サーバーの状態"><span id="tdot" class="dot"></span>翻訳: <span id="ttext">-</span> <span id="tq"></span></span>
  <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
+ <span id="gpuc"></span>
  <span class="sp"></span>
  <label><input type="checkbox" id="auto" checked> 自動スクロール</label>
  <label><input type="checkbox" id="newest"> 新しいターンを上に</label>
@@ -1548,9 +1639,18 @@ function onTurnEnd(ev){const t=turn(ev.turn);if(!t)return;t.think.classList.remo
   if(ev.task&&!t.el.classList.contains('task')){t.el.classList.add('task');const h=t.el.querySelector('h3 .src')||t.el.querySelector('h3 .n');h.insertAdjacentHTML('afterend','<span class="tk">背景タスク</span>');applyFilters()}}
 function onStatus(ev){const d=document.getElementById('tdot');d.className='dot '+(ev.translator==='ok'?(ev.queue>0?'busy':'ok'):ev.translator==='error'?'error':'');
   document.getElementById('ttext').textContent=ev.engine+(ev.translator==='error'?' エラー: '+ev.error:'');
-  document.getElementById('tq').textContent=ev.queue>0?'(待ち '+ev.queue+')':''}
+  document.getElementById('tq').textContent=ev.queue>0?'(待ち '+ev.queue+')':'';
+  if(ev.gpus!==undefined)renderGpu(ev.gpus)}
+function renderGpu(gpus){const c=document.getElementById('gpuc');if(!c)return;c.innerHTML='';
+  for(const g of (gpus||[])){const d=document.createElement('span');
+   d.className='gpug'+(g.temp>=85?' hot':g.temp>=75?' warn':'');
+   d.title='GPU '+g.name+' の温度とVRAM使用量 (nvidia-smi、5秒更新)';
+   const mem=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0);
+   d.innerHTML='<b>'+esc(g.label)+'</b>'+g.temp+'℃<span class="mem">'+mem+'GiB</span>';
+   c.appendChild(d)}}
+function onGpu(ev){renderGpu(ev.gpus)}
 function onError(ev){const d=document.createElement('div');d.className='seg bad';d.innerHTML='<div class="ja"></div>';d.querySelector('.ja').textContent=ev.text;main.appendChild(d)}
-const H={turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError,turn_ctx:onTurnCtx};
+const H={turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError,turn_ctx:onTurnCtx,gpu:onGpu};
 function connect(){
   const es=new EventSource('/events');
   es.onopen=()=>{document.getElementById('sdot').className='dot ok';document.getElementById('stext').textContent='接続中'};
@@ -1567,6 +1667,7 @@ class UIHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     cfg = None
     translator = None
+    gpu_monitor = None
 
     def log_message(self, fmt, *args):
         log.debug("ui %s - " + fmt, self.client_address[0], *args)
@@ -1588,7 +1689,8 @@ class UIHandler(BaseHTTPRequestHandler):
         if path == "/api/status":
             body = {"translator": self.translator.status, "engine": self.translator.engine,
                     "queue": self.translator.q.qsize(), "error": self.translator.last_error,
-                    "turns": Turn.counter, "active": sorted(Turn.active.keys())}
+                    "turns": Turn.counter, "active": sorted(Turn.active.keys()),
+                    "gpus": self.gpu_monitor.current() if self.gpu_monitor is not None else []}
             return self._send(200, "application/json; charset=utf-8", json.dumps(body, ensure_ascii=False).encode())
         if path == "/api/history":
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -1640,7 +1742,8 @@ class UIHandler(BaseHTTPRequestHandler):
             # 状態を一度送る
             self._emit({"id": seen, "type": "status", "translator": self.translator.status,
                         "engine": self.translator.engine, "queue": self.translator.q.qsize(),
-                        "error": self.translator.last_error, "ts": time.time(), "boot": BOOT_ID})
+                        "error": self.translator.last_error, "ts": time.time(), "boot": BOOT_ID,
+                        "gpus": self.gpu_monitor.current()})
             while True:
                 try:
                     ev = q.get(timeout=15)
@@ -1710,6 +1813,7 @@ def main():
         log.exception("token meter init failed (context meter will use estimates)")
     UIHandler.cfg = cfg
     UIHandler.translator = translator
+    UIHandler.gpu_monitor = GpuMonitor(interval=cfg.getfloat("gpu", "interval"))
 
     proxy = Server((cfg.get("proxy", "listen_host"), cfg.getint("proxy", "listen_port")), ProxyHandler)
     ui = Server((cfg.get("ui", "listen_host"), cfg.getint("ui", "listen_port")), UIHandler)
