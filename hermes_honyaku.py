@@ -67,7 +67,7 @@ class Config:
                            "timeout": "120", "temperature": "0.2",
                            "deepl_key": "", "deepl_url": "https://api-free.deepl.com/v2/translate"},
             "segment": {"max_chars": "500", "min_chars": "120", "idle_flush_sec": "2.0"},
-            "gpu": {"interval": "5"},
+            "gpu": {"interval": "5", "power_max": "250"},
             "log": {"dir": "logs", "level": "INFO"},
             "sources": {"127.0.0.1": "Hermes", "172.": "Open WebUI", "default": ""},
         })
@@ -857,7 +857,7 @@ class TokenMeter:
 # --------------------------------------------------------------------------
 # GPU 温度モニター (ヘッダーのメータ用)
 # --------------------------------------------------------------------------
-GPU_SMI_QUERY = ["--query-gpu=name,temperature.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"]
+GPU_SMI_QUERY = ["--query-gpu=index,name,temperature.gpu,power.draw,memory.used,memory.total", "--format=csv,noheader,nounits"]
 
 
 def short_gpu_label(name):
@@ -877,20 +877,23 @@ def short_gpu_label(name):
 
 
 class GpuMonitor:
-    """nvidia-smi で GPU の温度・VRAM 使用量を読み、5 秒間隔で gpu イベントを BUS に流す。
+    """nvidia-smi で GPU の温度・消費電力・VRAM 使用量を読み、5 秒間隔で gpu イベントを BUS に流す。
 
     1 枚でも複数枚でもそのまま対応する (nvidia-smi は全カードを返すため、
     2 枚目を増設しても設定変更は不要)。nvidia-smi が見つからない・実行できない環境では
     静かに無効化する (gpu なし として UI に表示されるだけ)。
     """
 
-    def __init__(self, interval=5.0, timeout=5.0):
+    def __init__(self, interval=5.0, timeout=5.0, power_max=250.0):
         self.interval = interval
         self.timeout = timeout
         self.lock = threading.Lock()
         self.data = []
         self.updated = 0.0
         self.ok = False
+        # 電力バーの最大値 (既定 250W)。観測値が超えた場合はその値がそのまま最大値になる
+        self.default_max = power_max
+        self.hwm = {}  # GPU index -> これまでの観測最大電力 (高水位)
         self.no_smi = shutil.which("nvidia-smi") is None
         if not self.no_smi:
             self.thread = threading.Thread(target=self._loop, name="gpu-monitor", daemon=True)
@@ -903,9 +906,20 @@ class GpuMonitor:
         out = []
         for line in r.stdout.splitlines():
             parts = [p.strip() for p in line.split(",")]
-            if len(parts) >= 4 and parts[1].lstrip("-").isdigit():
-                out.append({"name": parts[0], "label": short_gpu_label(parts[0]),
-                            "temp": int(parts[1]), "mem_used": float(parts[2]), "mem_total": float(parts[3])})
+            # index, name, temp, power, mem_used, mem_total
+            if len(parts) >= 6 and parts[0].isdigit():
+                try:
+                    power = float(parts[3])
+                except ValueError:
+                    power = 0.0  # 消費電力センサーのないカード (N/A)
+                out.append({"index": int(parts[0]), "name": parts[1], "label": short_gpu_label(parts[1]),
+                            "temp": int(parts[2]), "power": power,
+                            "mem_used": float(parts[4]), "mem_total": float(parts[5])})
+        # 電力バーの最大値 = 既定値と観測高水位の大きい方 (超えたらリアルタイムで最大値が上がる)
+        for g in out:
+            i = g["index"]
+            self.hwm[i] = max(self.hwm.get(i, 0.0), g["power"])
+            g["max_power"] = max(self.default_max, self.hwm[i])
         return out
 
     def _loop(self):
@@ -1378,17 +1392,37 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .turn h3 .tk{background:var(--face);color:var(--muted);padding:0 6px;border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
 .turn h3 .ctxm{font-family:"Courier New",ui-monospace,monospace;color:var(--muted)}
 .turn h3 .ctxm.hot{color:var(--warn)}
-header .ctxg{display:inline-flex;align-items:center;gap:7px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:1px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-header .ctxg .bar{width:90px;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-header .ctxg .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
-header .ctxg.warn .fill{background:var(--warn)}
-header .ctxg.warn{color:var(--warn)}
-header .ctxg.hot .fill{background:var(--bad)}
-header .ctxg.hot .txt,header .ctxg.hot{color:var(--bad)}
-header .gpug{display:inline-flex;align-items:center;gap:5px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:1px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-header .gpug .mem{color:var(--muted)}
-header .gpug.warn{color:var(--warn)}
-header .gpug.hot{color:var(--bad)}
+.ctxg{display:inline-flex;align-items:center;gap:7px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:1px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.ctxg .bar{width:90px;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.ctxg .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
+.ctxg.warn .fill{background:var(--warn)}
+.ctxg.warn{color:var(--warn)}
+.ctxg.hot .fill{background:var(--bad)}
+.ctxg.hot .txt,.ctxg.hot{color:var(--bad)}
+.gpug{display:flex;flex-direction:column;gap:3px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.gpug .ghead{display:flex;align-items:center;gap:6px;white-space:nowrap}
+.gpug .ghead b{color:#fff}
+.gpug .brow{display:flex;align-items:center;gap:6px}
+.gpug .brow .bl{width:30px;color:var(--muted);flex:none}
+.gpug .brow .bval{width:78px;text-align:right;flex:none;color:#cfe8e4}
+.gpug .bar{flex:1;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.gpug .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
+.gpug .brow.warn .fill{background:var(--warn)}
+.gpug .brow.warn .bval{color:var(--warn)}
+.gpug .brow.hot .fill{background:var(--bad)}
+.gpug .brow.hot .bval{color:var(--bad)}
+/* システム情報パネル (左列。スクロールしても固定) */
+#shell{display:grid;grid-template-columns:260px 1fr}
+#syspanel{position:sticky;top:46px;align-self:start;max-height:calc(100vh - 56px);overflow-y:auto;min-width:0;padding:10px 12px 24px}
+.sysbox{margin:0 0 10px;padding:6px 8px;font-size:12px;background:var(--face);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow:inset 1px 1px 0 rgba(255,255,255,.05)}
+.sysbox .cap{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;
+background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);padding:1px 6px;display:inline-block}
+.sysbox .row{display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden}
+.sysbox .row+.row{margin-top:5px}
+#syspanel .ctxg{width:100%}
+#syspanel .ctxg .bar{flex:1;width:auto}
+#gpuc{display:flex;flex-direction:column;gap:4px}
+#syspanel .gpug{width:100%}
 .turn.hidden{display:none}
 .segs .note{color:var(--muted);font-size:12.5px}
 header select{background:#131a1f;color:var(--ink);padding:1px 4px;font:12px "Courier New",ui-monospace,monospace;
@@ -1452,10 +1486,6 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));color:#fff;font-weight
 </style></head><body>
 <header>
  <b>Hermes Honyaku</b>
- <span><span id="sdot" class="dot"></span><span id="stext">接続中…</span></span>
- <span title="翻訳サーバーの状態"><span id="tdot" class="dot"></span>翻訳: <span id="ttext">-</span> <span id="tq"></span></span>
- <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
- <span id="gpuc"></span>
  <span class="sp"></span>
  <label><input type="checkbox" id="auto" checked> 自動スクロール</label>
  <label><input type="checkbox" id="newest"> 新しいターンを上に</label>
@@ -1466,7 +1496,21 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));color:#fff;font-weight
  <label><button id="clear">画面を消去</button></label>
 </header>
 <button id="tobottom" type="button">↓ 最新へ (自動スクロール再開)</button>
+<div id="shell">
+<aside id="syspanel">
+ <div class="sysbox"><span class="cap">接続</span>
+  <div class="row"><span id="sdot" class="dot"></span><span id="stext">接続中…</span></div>
+  <div class="row" title="翻訳サーバーの状態"><span id="tdot" class="dot"></span>翻訳: <span id="ttext">-</span> <span id="tq"></span></div>
+ </div>
+ <div class="sysbox"><span class="cap">コンテキスト</span>
+  <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
+ </div>
+ <div class="sysbox"><span class="cap">GPU</span>
+  <div id="gpuc"></div>
+ </div>
+</aside>
 <main id="main"><div class="empty" id="empty">Hermes Agent からの要求を待っています。<br>~/.hermes/config.yaml の model.base_url を中継サーバーに向けてください。</div></main>
+</div>
 <script>
 (function(){
 const main=document.getElementById('main'), empty=document.getElementById('empty');
@@ -1642,11 +1686,17 @@ function onStatus(ev){const d=document.getElementById('tdot');d.className='dot '
   document.getElementById('tq').textContent=ev.queue>0?'(待ち '+ev.queue+')':'';
   if(ev.gpus!==undefined)renderGpu(ev.gpus)}
 function renderGpu(gpus){const c=document.getElementById('gpuc');if(!c)return;c.innerHTML='';
-  for(const g of (gpus||[])){const d=document.createElement('span');
-   d.className='gpug'+(g.temp>=85?' hot':g.temp>=75?' warn':'');
-   d.title='GPU '+g.name+' の温度とVRAM使用量 (nvidia-smi、5秒更新)';
+  for(const g of (gpus||[])){const d=document.createElement('div');
+   d.className='gpug';
+   d.title='GPU '+g.name+' の温度・消費電力・VRAM (nvidia-smi、5秒更新)';
+   const tcls=g.temp>=85?' hot':g.temp>=75?' warn':'';
+   const mcls=(g.mem_total&&g.mem_used/g.mem_total>=0.95)?' warn':'';
    const mem=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0);
-   d.innerHTML='<b>'+esc(g.label)+'</b>'+g.temp+'℃<span class="mem">'+mem+'GiB</span>';
+   const trow='<div class="brow'+tcls+'"><span class="bl">温度</span><span class="bval">'+g.temp+'℃</span><span class="bar"><span class="fill" style="width:'+Math.max(0,Math.min(100,g.temp/90*100))+'%"></span></span></div>';
+   const mrow='<div class="brow'+mcls+'"><span class="bl">VRAM</span><span class="bval">'+mem+'G</span><span class="bar"><span class="fill" style="width:'+(g.mem_total?Math.max(0,Math.min(100,g.mem_used/g.mem_total*100)):0)+'%"></span></span></div>';
+   // 電力バーの最大値はサーバ側が管理 (既定250W、観測値で上書き)
+   const prow='<div class="brow"><span class="bl">電力</span><span class="bval">'+g.power.toFixed(0)+'/'+(g.max_power||250).toFixed(0)+'W</span><span class="bar"><span class="fill" style="width:'+(g.max_power?Math.max(0,Math.min(100,g.power/g.max_power*100)):0)+'%"></span></span></div>';
+   d.innerHTML='<div class="ghead"><b>'+esc(g.label)+'</b></div>'+trow+prow+mrow;
    c.appendChild(d)}}
 function onGpu(ev){renderGpu(ev.gpus)}
 function onError(ev){const d=document.createElement('div');d.className='seg bad';d.innerHTML='<div class="ja"></div>';d.querySelector('.ja').textContent=ev.text;main.appendChild(d)}
@@ -1813,7 +1863,8 @@ def main():
         log.exception("token meter init failed (context meter will use estimates)")
     UIHandler.cfg = cfg
     UIHandler.translator = translator
-    UIHandler.gpu_monitor = GpuMonitor(interval=cfg.getfloat("gpu", "interval"))
+    UIHandler.gpu_monitor = GpuMonitor(interval=cfg.getfloat("gpu", "interval"),
+                                       power_max=cfg.getfloat("gpu", "power_max"))
 
     proxy = Server((cfg.get("proxy", "listen_host"), cfg.getint("proxy", "listen_port")), ProxyHandler)
     ui = Server((cfg.get("ui", "listen_host"), cfg.getint("ui", "listen_port")), UIHandler)
