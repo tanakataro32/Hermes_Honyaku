@@ -1888,6 +1888,11 @@ function bfmt(v){return v===null?'-':v.toFixed(1)}
 const sysTree={srv:true,dsk:true,gpu:true};
 const gpuTree={}; // 各 GPU ノード ('gpu0','gpu1',...)
 let lastSysmon=null, lastGpus=null;
+// ラベル先頭のアイコン (SVG は currentColor で周囲のテキスト色に追従)
+const IC_CPU='<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="2" width="2" height="4"/><rect x="11" y="2" width="2" height="4"/><rect x="15" y="2" width="2" height="4"/><rect x="7" y="18" width="2" height="4"/><rect x="11" y="18" width="2" height="4"/><rect x="15" y="18" width="2" height="4"/><rect x="2" y="7" width="4" height="2"/><rect x="2" y="11" width="4" height="2"/><rect x="2" y="15" width="4" height="2"/><rect x="18" y="7" width="4" height="2"/><rect x="18" y="11" width="4" height="2"/><rect x="18" y="15" width="4" height="2"/><rect x="5" y="5" width="14" height="14"/><text x="12" y="15.4" text-anchor="middle" font-size="9" font-weight="bold" font-family="monospace" fill="#131a1f">C</text></svg>';
+const IC_GPU='<svg width="24" height="12" viewBox="0 0 24 12" fill="currentColor"><rect x="1" y="1" width="2.5" height="10"/><rect x="1.75" y="2.2" width="1" height="1.8" fill="#131a1f"/><rect x="3.5" y="2" width="20" height="8"/><rect x="9.5" y="4.5" width="6" height="3" fill="#131a1f"/></svg>';
+const IC_DDR='<svg width="24" height="12" viewBox="0 0 24 12"><rect x="1.5" y="2" width="21" height="6" fill="#3d9950"/><rect x="3" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="5" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="7" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="8.8" y="5.5" width="1.8" height="2.5" fill="#131a1f"/><rect x="11.5" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="13.5" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="15.5" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="17.5" y="8" width="1.4" height="2.5" fill="#d4af37"/><rect x="19.5" y="8" width="1.4" height="2.5" fill="#d4af37"/></svg>';
+function hesc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function sysleaf(label,value,pct,warnPct,hotPct,tip){
  const el=document.createElement('div');
  let cls='leaf';
@@ -1898,7 +1903,7 @@ function sysleaf(label,value,pct,warnPct,hotPct,tip){
  el.className=cls;
  if(tip)el.title=tip;
  const top=document.createElement('div');top.className='top';
- const bl=document.createElement('span');bl.className='bl';bl.textContent=label;
+ const bl=document.createElement('span');bl.className='bl';bl.innerHTML=label;
  const bv=document.createElement('span');bv.className='bval';bv.textContent=value;
  top.appendChild(bl);top.appendChild(bv);
  const bar=document.createElement('div');bar.className='bar';
@@ -1910,7 +1915,7 @@ function sysleaf(label,value,pct,warnPct,hotPct,tip){
 function sysnode(name,key){
  const el=document.createElement('div');el.className='trow';
  const tw=document.createElement('span');tw.className='tw';tw.textContent=sysTree[key]?'▼':'▶';
- const nm=document.createElement('b');nm.textContent=name;
+ const nm=document.createElement('b');nm.innerHTML=name;
  el.appendChild(tw);el.appendChild(nm);
  el.addEventListener('click',()=>{sysTree[key]=!sysTree[key];renderSysCard()});
  return el}
@@ -1919,7 +1924,7 @@ function gpuNode(g,i){
  if(gpuTree[key]===undefined)gpuTree[key]=true;
  const el=document.createElement('div');el.className='trow';
  const tw=document.createElement('span');tw.className='tw';tw.textContent=gpuTree[key]?'▼':'▶';
- const nm=document.createElement('b');nm.textContent=g.label||g.name;
+ const nm=document.createElement('b');nm.innerHTML=IC_GPU+' '+hesc(g.label||g.name);
  el.appendChild(tw);el.appendChild(nm);
  el.addEventListener('click',()=>{gpuTree[key]=!gpuTree[key];renderSysCard()});
  return el}
@@ -1932,12 +1937,12 @@ function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c
   const cpuV=cpu===null?'-':cpu.toFixed(1)+'%';
   const memV=(s.mem_used===null||s.mem_used===undefined)?'-':bfmt(s.mem_used)+'/'+bfmt(s.mem_total)+'G';
   const memPct=(s.mem_total)?s.mem_used/s.mem_total*100:null;
-  card.appendChild(sysnode('サーバ','srv'));
+  card.appendChild(sysnode('🖥️ サーバ','srv'));
   if(sysTree.srv){
    // 表示順: GPU → CPU → RAM → ディスク
    if(Array.isArray(lastGpus)&&lastGpus.length){
     const gw=document.createElement('div');gw.className='tsub';
-    gw.appendChild(sysnode('GPU','gpu'));
+    gw.appendChild(sysnode(IC_GPU+' GPU','gpu'));
     if(sysTree.gpu){
      const body=document.createElement('div');body.className='tsub';
      lastGpus.forEach((g,i)=>{
@@ -1947,11 +1952,11 @@ function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c
        const gb=document.createElement('div');gb.className='tsub';
        // バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、VRAM 使用率 (warn 95%)、電力 max_power 満杯
        const tp=(g.temp/90*100);
-       gb.appendChild(sysleaf('温度',g.temp+'℃',tp,75/90*100,85/90*100));
+       gb.appendChild(sysleaf('🌡️ 温度',g.temp+'℃',tp,75/90*100,85/90*100));
        const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
-       gb.appendChild(sysleaf('VRAM',mv,g.mem_total?g.mem_used/g.mem_total*100:null,95));
+       gb.appendChild(sysleaf(IC_DDR+' VRAM',mv,g.mem_total?g.mem_used/g.mem_total*100:null,95));
        const mp=g.max_power||250;
-       gb.appendChild(sysleaf('電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
+       gb.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
        gwrap.appendChild(gb);
       }
       body.appendChild(gwrap);
@@ -1960,10 +1965,10 @@ function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c
     }
     card.appendChild(gw);
    }
-   card.appendChild(sysleaf('CPU',cpuV,cpu,90));
-   card.appendChild(sysleaf('RAM',memV,memPct,95));
+   card.appendChild(sysleaf(IC_CPU+' CPU',cpuV,cpu,90));
+   card.appendChild(sysleaf(IC_DDR+' RAM',memV,memPct,95));
    const dskWrap=document.createElement('div');dskWrap.className='tsub';
-   dskWrap.appendChild(sysnode('ディスク','dsk'));
+   dskWrap.appendChild(sysnode('💾 ディスク','dsk'));
    if(sysTree.dsk){
     const body=document.createElement('div');body.className='tsub';
     if(Array.isArray(s.disks)&&s.disks.length){
@@ -1973,13 +1978,13 @@ function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c
       const v=(u===null||t===null)?'-':bfmt(u)+'/'+bfmt(t)+'G';
       const pct=(t&&u!==null)?u/t*100:null;
       const tip=(dk.label?dk.label+' ('+dk.device+')':dk.device);
-      body.appendChild(sysleaf(dk.label_short||dk.device,v,pct,90,null,tip));
+      body.appendChild(sysleaf('💾 '+hesc(dk.label_short||dk.device),v,pct,90,null,tip));
      }
     }else{
      const du=(s.disk_used===null||s.disk_used===undefined)?null:s.disk_used;
      const v=(du===null)?'-':bfmt(du)+'/'+bfmt(s.disk_total)+'G';
      const pct=(s.disk_total&&du!==null)?s.disk_used/s.disk_total*100:null;
-     body.appendChild(sysleaf('ディスク',v,pct,90,null));
+     body.appendChild(sysleaf('💾 ディスク',v,pct,90,null));
     }
     dskWrap.appendChild(body);
    }
