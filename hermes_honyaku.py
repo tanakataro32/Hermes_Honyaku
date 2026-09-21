@@ -1973,7 +1973,7 @@ function gpuNode(g,i){
  if(gpuTree[key]===undefined)gpuTree[key]=true;
  const el=document.createElement('div');el.className='trow';
  const tw=document.createElement('span');tw.className='tw';tw.textContent=gpuTree[key]?'▼':'▶';
- const nm=document.createElement('b');nm.innerHTML=IC_GPU+' '+hesc(g.label||g.name);
+ const nm=document.createElement('b');nm.textContent=g.label||g.name;
  el.appendChild(tw);el.appendChild(nm);
  el.addEventListener('click',()=>{gpuTree[key]=!gpuTree[key];renderSysCard()});
  return el}
