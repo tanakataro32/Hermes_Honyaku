@@ -1583,10 +1583,10 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .turn h3 .ctxm.hot{color:var(--warn)}
 .ctxg{display:inline-flex;align-items:center;gap:7px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:1px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .ctxg .bar{width:90px;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-.ctxg .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
-.ctxg.warn .fill{background:var(--warn)}
+/* プログレスバーは全て 3 段階カラー: 0-50% 緑 / 50-80% 黄 / 80-100% 赤 (境界に 1px の仕切り)。
+   グラデーションはバー全幅に固定し (JS で background-size を 100/幅 倍にする)、fill が伸びた分だけ色が現れる */
+.ctxg .fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#46b35e 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat;transition:width .25s,background-size .25s}
 .ctxg.warn{color:var(--warn)}
-.ctxg.hot .fill{background:var(--bad)}
 .ctxg.hot .txt,.ctxg.hot{color:var(--bad)}
 .sysm{display:flex;flex-direction:column;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .sysm .trow{display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none}
@@ -1602,13 +1602,9 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .sysm .leaf .bl{color:var(--muted);white-space:nowrap;flex:none}
 .sysm .leaf .bval{margin-left:auto;color:#cfe8e4;white-space:nowrap}
 .sysm .bar{height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-.sysm .bar .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s,background-size .25s}
-.sysm .leaf.warn .bar .fill{background:var(--warn)}
+.sysm .bar .fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#46b35e 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat;transition:width .25s,background-size .25s} /* 3 段階カラー (.ctxg .fill と同じ) */
 .sysm .leaf.warn .bval{color:var(--warn)}
-.sysm .leaf.hot .bar .fill{background:var(--bad)}
 .sysm .leaf.hot .bval{color:var(--bad)}
-/* 3 段階バー: 0-50% 緑 / 50-80% 黄 / 80-100% 赤 (境界に 1px の仕切り)。warn/hot より後ろに置いて単色指定に勝たせる。ゾーンはバー全幅に固定で、fill が伸びた分だけ見える */
-.sysm .leaf.tri .bar .fill{background:linear-gradient(90deg,#46b35e 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat}
 /* システム情報パネル (左列。スクロールしても固定) */
 #shell{display:grid;grid-template-columns:260px 1fr}
 #shell>main{min-width:0;overflow-wrap:anywhere}
@@ -1732,7 +1728,7 @@ function applyFilters(){for(const k in turns){const el=turns[k].el;
 function addSource(name){if(!name||[...srcsel.options].some(o=>o.value===name))return;const o=document.createElement('option');o.value=name;o.textContent=name;srcsel.appendChild(o)}
 function clearScreen(){for(const k in turns){turns[k].el.remove();delete turns[k]}
   [...main.children].forEach(c=>{if(c!==empty)c.remove()});empty.style.display='';lagMode=false;
-  const g=document.getElementById('ctxg');g.querySelector('.txt').textContent='ctx -';g.querySelector('.fill').style.width='0%';g.className='ctxg';g.title='最新ターンのコンテキスト使用量'}
+  const g=document.getElementById('ctxg');g.querySelector('.txt').textContent='ctx -';setFill(g.querySelector('.fill'),0);g.className='ctxg';g.title='最新ターンのコンテキスト使用量'}
 document.getElementById('clear').onclick=clearScreen;
 function sysnote(text){const d=document.createElement('div');d.className='sysnote';d.textContent=text;main.appendChild(d)}
 // 中継サーバーの起動 id。変わっていたら再起動された = ターン番号が 1 から振り直されるので、古い表示を片付ける
@@ -1821,7 +1817,7 @@ function onTurnCtx(ev){const t=turn(ev.turn);if(!t)return;const el=t.el.querySel
   // ヘッダーの固定メーターにも反映 (最新ターンの使用量)
   const g=document.getElementById('ctxg');
   g.querySelector('.txt').textContent='ctx '+k(ev.tokens)+(lim?'/'+k(lim):'')+(ev.exact?'':'~');
-  g.querySelector('.fill').style.width=(lim?Math.min(100,ev.tokens/lim*100):0)+'%';
+  setFill(g.querySelector('.fill'),lim?Math.min(100,ev.tokens/lim*100):0);
   g.className='ctxg'+(lim&&ev.tokens/lim>=0.8?' hot':lim&&ev.tokens/lim>=0.5?' warn':'');
   g.title='最新ターンのコンテキスト使用量'+(ev.exact?' (llama-server の /tokenize)':' (推定値)')+(ev.max_tokens?' · max_out '+k(ev.max_tokens):'');
   scroll()}
@@ -1944,10 +1940,11 @@ const IC_DDR='<svg width="26" height="13" viewBox="0 0 52 26" style="vertical-al
 +'<rect x="20.5" y="16" width="2.5" height="8" fill="#131a1f"/>'                        // キー切欠き
 +'</svg>';
 function hesc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
-function sysleaf(label,value,pct,warnPct,hotPct,tip,tri){
+// 3 段階バーの fill を幅 w% にする。グラデーションがバー全幅 (100%) に一致するよう background-size を 100/w 倍に拡大
+function setFill(fill,w){fill.style.width=w+'%';fill.style.backgroundSize=(w>0?(10000/w)+'% 100%':'100% 100%')}
+function sysleaf(label,value,pct,warnPct,hotPct,tip){
  const el=document.createElement('div');
  let cls='leaf';
- if(tri)cls+=' tri';
  if(pct!==null){
   if(hotPct!==null&&pct>=hotPct)cls+=' hot';
   else if(warnPct!==null&&pct>=warnPct)cls+=' warn';
@@ -1960,9 +1957,7 @@ function sysleaf(label,value,pct,warnPct,hotPct,tip,tri){
  top.appendChild(bl);top.appendChild(bv);
  const bar=document.createElement('div');bar.className='bar';
  const fill=document.createElement('span');fill.className='fill';
- const w=(pct===null?0:Math.max(0,Math.min(100,pct)));
- fill.style.width=w+'%';
- if(tri&&w>0)fill.style.backgroundSize=(10000/w)+'% 100%'; // 幅 w% の fill 上でグラデーションがバー全幅 (100%) になるように拡大
+ setFill(fill,pct===null?0:Math.max(0,Math.min(100,pct)));
  bar.appendChild(fill);
  el.appendChild(top);el.appendChild(bar);
  return el}
@@ -2004,13 +1999,13 @@ function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c
       gwrap.appendChild(gpuNode(g,i));
       if(gpuTree['gpu'+i]){
        const gb=document.createElement('div');gb.className='tsub';
-       // バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、VRAM 使用率 (warn 95%)、電力 max_power 満杯 (緑/黄/赤の 3 段階バー)
+       // バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、VRAM 使用率 (warn 95%)、電力 max_power 満杯 
        const tp=(g.temp/90*100);
        gb.appendChild(sysleaf('🌡️ 温度',g.temp+'℃',tp,75/90*100,85/90*100));
        const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
        gb.appendChild(sysleaf(IC_DDR+' VRAM',mv,g.mem_total?g.mem_used/g.mem_total*100:null,95));
        const mp=g.max_power||250;
-       gb.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null,null,null,true));
+       gb.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
        gwrap.appendChild(gb);
       }
       body.appendChild(gwrap);
@@ -2032,13 +2027,13 @@ function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c
       const v=(u===null||t===null)?'-':bfmt(u)+'/'+bfmt(t)+'G';
       const pct=(t&&u!==null)?u/t*100:null;
       const tip=(dk.label?dk.label+' ('+dk.device+')':dk.device);
-      body.appendChild(sysleaf('💾 '+hesc(dk.label_short||dk.device),v,pct,90,null,tip,true));
+      body.appendChild(sysleaf('💾 '+hesc(dk.label_short||dk.device),v,pct,90,null,tip));
      }
     }else{
      const du=(s.disk_used===null||s.disk_used===undefined)?null:s.disk_used;
      const v=(du===null)?'-':bfmt(du)+'/'+bfmt(s.disk_total)+'G';
      const pct=(s.disk_total&&du!==null)?s.disk_used/s.disk_total*100:null;
-     body.appendChild(sysleaf('💾 ディスク',v,pct,90,null,null,true));
+     body.appendChild(sysleaf('💾 ディスク',v,pct,90,null));
     }
     dskWrap.appendChild(body);
    }
