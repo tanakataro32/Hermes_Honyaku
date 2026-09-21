@@ -1603,12 +1603,12 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .sysm .leaf .bval{margin-left:auto;color:#cfe8e4;white-space:nowrap}
 .sysm .bar{height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .sysm .bar .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s,background-size .25s}
-/* 3 段階バー: 0-50% 緑 / 50-80% 黄 / 80-100% 赤 (境界に 1px の仕切り)。ゾーンはバー全幅に固定で、fill が伸びた分だけ見える */
-.sysm .leaf.tri .bar .fill{background:linear-gradient(90deg,#46b35e 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat}
 .sysm .leaf.warn .bar .fill{background:var(--warn)}
 .sysm .leaf.warn .bval{color:var(--warn)}
 .sysm .leaf.hot .bar .fill{background:var(--bad)}
 .sysm .leaf.hot .bval{color:var(--bad)}
+/* 3 段階バー: 0-50% 緑 / 50-80% 黄 / 80-100% 赤 (境界に 1px の仕切り)。warn/hot より後ろに置いて単色指定に勝たせる。ゾーンはバー全幅に固定で、fill が伸びた分だけ見える */
+.sysm .leaf.tri .bar .fill{background:linear-gradient(90deg,#46b35e 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat}
 /* システム情報パネル (左列。スクロールしても固定) */
 #shell{display:grid;grid-template-columns:260px 1fr}
 #shell>main{min-width:0;overflow-wrap:anywhere}
@@ -2032,13 +2032,13 @@ function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c
       const v=(u===null||t===null)?'-':bfmt(u)+'/'+bfmt(t)+'G';
       const pct=(t&&u!==null)?u/t*100:null;
       const tip=(dk.label?dk.label+' ('+dk.device+')':dk.device);
-      body.appendChild(sysleaf('💾 '+hesc(dk.label_short||dk.device),v,pct,90,null,tip));
+      body.appendChild(sysleaf('💾 '+hesc(dk.label_short||dk.device),v,pct,90,null,tip,true));
      }
     }else{
      const du=(s.disk_used===null||s.disk_used===undefined)?null:s.disk_used;
      const v=(du===null)?'-':bfmt(du)+'/'+bfmt(s.disk_total)+'G';
      const pct=(s.disk_total&&du!==null)?s.disk_used/s.disk_total*100:null;
-     body.appendChild(sysleaf('💾 ディスク',v,pct,90,null));
+     body.appendChild(sysleaf('💾 ディスク',v,pct,90,null,null,true));
     }
     dskWrap.appendChild(body);
    }
