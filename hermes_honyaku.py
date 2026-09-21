@@ -1602,7 +1602,9 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .sysm .leaf .bl{color:var(--muted);white-space:nowrap;flex:none}
 .sysm .leaf .bval{margin-left:auto;color:#cfe8e4;white-space:nowrap}
 .sysm .bar{height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-.sysm .bar .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s}
+.sysm .bar .fill{display:block;height:100%;width:0%;background:var(--acc);transition:width .25s,background .25s,background-size .25s}
+/* 3 段階バー: 0-50% 緑 / 50-80% 黄 / 80-100% 赤 (境界に 1px の仕切り)。ゾーンはバー全幅に固定で、fill が伸びた分だけ見える */
+.sysm .leaf.tri .bar .fill{background:linear-gradient(90deg,#46b35e 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat}
 .sysm .leaf.warn .bar .fill{background:var(--warn)}
 .sysm .leaf.warn .bval{color:var(--warn)}
 .sysm .leaf.hot .bar .fill{background:var(--bad)}
@@ -1942,9 +1944,10 @@ const IC_DDR='<svg width="26" height="13" viewBox="0 0 52 26" style="vertical-al
 +'<rect x="20.5" y="16" width="2.5" height="8" fill="#131a1f"/>'                        // キー切欠き
 +'</svg>';
 function hesc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
-function sysleaf(label,value,pct,warnPct,hotPct,tip){
+function sysleaf(label,value,pct,warnPct,hotPct,tip,tri){
  const el=document.createElement('div');
  let cls='leaf';
+ if(tri)cls+=' tri';
  if(pct!==null){
   if(hotPct!==null&&pct>=hotPct)cls+=' hot';
   else if(warnPct!==null&&pct>=warnPct)cls+=' warn';
@@ -1957,7 +1960,9 @@ function sysleaf(label,value,pct,warnPct,hotPct,tip){
  top.appendChild(bl);top.appendChild(bv);
  const bar=document.createElement('div');bar.className='bar';
  const fill=document.createElement('span');fill.className='fill';
- fill.style.width=(pct===null?0:Math.max(0,Math.min(100,pct)))+'%';
+ const w=(pct===null?0:Math.max(0,Math.min(100,pct)));
+ fill.style.width=w+'%';
+ if(tri&&w>0)fill.style.backgroundSize=(10000/w)+'% 100%'; // 幅 w% の fill 上でグラデーションがバー全幅 (100%) になるように拡大
  bar.appendChild(fill);
  el.appendChild(top);el.appendChild(bar);
  return el}
@@ -1999,13 +2004,13 @@ function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c
       gwrap.appendChild(gpuNode(g,i));
       if(gpuTree['gpu'+i]){
        const gb=document.createElement('div');gb.className='tsub';
-       // バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、VRAM 使用率 (warn 95%)、電力 max_power 満杯
+       // バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、VRAM 使用率 (warn 95%)、電力 max_power 満杯 (緑/黄/赤の 3 段階バー)
        const tp=(g.temp/90*100);
        gb.appendChild(sysleaf('🌡️ 温度',g.temp+'℃',tp,75/90*100,85/90*100));
        const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
        gb.appendChild(sysleaf(IC_DDR+' VRAM',mv,g.mem_total?g.mem_used/g.mem_total*100:null,95));
        const mp=g.max_power||250;
-       gb.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
+       gb.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null,null,null,true));
        gwrap.appendChild(gb);
       }
       body.appendChild(gwrap);
