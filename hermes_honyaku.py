@@ -1983,14 +1983,26 @@ button:active{border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 background:linear-gradient(90deg,var(--bar1),var(--bar2));color:#fff;font-weight:700}
 #tobottom:active{filter:brightness(.85)}
 header .ver{font-size:11px;font-weight:400;color:rgba(234,255,251,.72);white-space:nowrap}
-/* GPU 行の hstop ボタン (右寄せ・赤・リセットアイコン) */
-.sysm .trow .hsbtn{margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:22px;height:18px;padding:0;
+/* GPU 行の hstop ボタン (右寄せ・リセットアイコン)。黄 = hstop (裏の作業だけ) / 赤 = hstop --all */
+.sysm .trow .hsbtns{margin-left:auto;display:inline-flex;gap:4px}
+.sysm .trow .hsbtn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:18px;padding:0;
 background:#b3261e;border-color:#e0695f #4a0d09 #4a0d09 #e0695f;box-shadow:inset 1px 1px 0 rgba(255,255,255,.15)}
 .sysm .trow .hsbtn:hover{background:#cc3127}
 .sysm .trow .hsbtn:active{border-color:#4a0d09 #e0695f #e0695f #4a0d09}
 .sysm .trow .hsbtn:disabled{cursor:wait;background:#7a2a24}
-.sysm .trow .hsbtn:disabled svg{animation:hsspin 1s linear infinite}
+/* 黄: Windows XP の「休止状態 / スタンバイ」ボタンの色 (明るい黄 → 琥珀のグラデーション) */
+.sysm .trow .hsbtn.jobs{background:linear-gradient(#ffe57a,#f7c21a 55%,#e09b00);border-color:#fff1b0 #7a5000 #7a5000 #fff1b0}
+.sysm .trow .hsbtn.jobs:hover{background:linear-gradient(#fff0a0,#ffd02e 55%,#eeaa08)}
+.sysm .trow .hsbtn.jobs:active{border-color:#7a5000 #fff1b0 #fff1b0 #7a5000}
+.sysm .trow .hsbtn.jobs:disabled{background:linear-gradient(#b89a45,#a8801a)}
+.sysm .trow .hsbtn.run svg{animation:hsspin 1s linear infinite}
 @keyframes hsspin{to{transform:rotate(360deg)}}
+/* hstop ボタンのツールチップ (カードの外に置くので 2 秒ごとの再描画でも消えない) */
+#hstip{position:fixed;z-index:30;display:none;white-space:nowrap;padding:5px 8px;font-size:12px;line-height:1.55;color:var(--ink);pointer-events:none;
+background:#131a1f;border:1px solid var(--hv);box-shadow:2px 2px 0 rgba(0,0,0,.45)}
+#hstip b{display:block;color:#fff}
+#hstip .jobs{color:#ffd24a}#hstip .all{color:#f08a82}
+#hstip .busy{color:var(--warn)}
 /* hstop の結果ダイアログ (Win98 風) */
 #hsdlg{padding:0;min-width:320px;max-width:min(720px,calc(100vw - 32px));color:var(--ink);background:var(--face);
 border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow:4px 4px 0 rgba(0,0,0,.45)}
@@ -2017,6 +2029,7 @@ color:#cfe8e4;background:#131a1f;border:2px solid;border-color:var(--sv) var(--h
  <select id="srcsel"><option value="">すべての発信元</option></select>
  <label><button id="clear">画面を消去</button></label>
 </header>
+<div id="hstip" role="tooltip"></div>
 <dialog id="hsdlg"><div class="dt" id="hsdt"></div><pre id="hsout"></pre><div class="db"><button type="button" id="hsok">OK</button></div></dialog>
 <button id="tobottom" type="button">↓ 最新へ (自動スクロール再開)</button>
 <div id="shell">
@@ -2307,11 +2320,38 @@ function gpuNode(g,i){
  el.appendChild(tw);el.appendChild(nm);
  el.addEventListener('click',()=>{gpuTree[key]=!gpuTree[key];renderSysCard()});
  return el}
-// ---- hstop --all (Hermes を全部止める) ボタン: GPU 行の右端 ----
+// ---- hstop ボタン: GPU 行の右端。黄 = hstop (裏の作業だけ) / 赤 = hstop --all (本体も起動し直す) ----
 const IC_RESET='<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">'
 +'<path d="M13.2 9.2A5.4 5.4 0 1 1 11.6 4" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="square"/>'
 +'<path d="M9 1.6h5.4V7z" fill="#fff"/></svg>';
-let hstopBusy=false;
+// 黄色の地では白い矢印が沈むので、XP のアイコンと同じく濃い琥珀の縁取りを付ける
+const IC_RESET_Y='<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">'
++'<path d="M13.2 9.2A5.4 5.4 0 1 1 11.6 4" fill="none" stroke="#8a5a00" stroke-width="4" stroke-linecap="square"/>'
++'<path d="M9 1.6h5.4V7z" fill="#8a5a00" stroke="#8a5a00" stroke-width="1.8" stroke-linejoin="round"/>'
++'<path d="M13.2 9.2A5.4 5.4 0 1 1 11.6 4" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="square"/>'
++'<path d="M9 1.6h5.4V7z" fill="#fff"/></svg>';
+const HSTOP={
+ jobs:{args:'hstop',icon:IC_RESET_Y,all:false,
+  tip:'<b class="jobs">裏の作業を止める (hstop)</b>cron の定期実行・本棚などのアプリが頼んだ<br>AI の作業を止める。<br>デスクトップアプリの会話は止まらない',
+  ask:'Hermes の裏の作業を止めます (hstop)。\ncron の定期実行・本棚などのアプリが頼んだ AI の作業を止めます。\nデスクトップアプリの会話は止まりません。\n\n続けますか？'},
+ all:{args:'hstop --all',icon:IC_RESET,all:true,
+  tip:'<b class="all">Hermes を全部止める (hstop --all)</b>裏の作業に加え、Hermes の本体を起動し直す。<br>デスクトップアプリの会話も止まる (自動で再開しない)。<br>終わったらデスクトップアプリからつなぎ直す',
+  ask:'Hermes を全部止めます (hstop --all)。\nデスクトップアプリの会話も止まり、Hermes の本体を起動し直します。\n\n続けますか？'}};
+let hstopBusy=null; // 実行中のボタン ('jobs' / 'all')。サーバー側も 1 つずつしか実行しない
+let hstipKey=null, hstipEl=null;
+function hstipHtml(key){
+ return HSTOP[key].tip+(hstopBusy?'<br><span class="busy">'+HSTOP[hstopBusy].args+' を実行中…</span>':'')}
+function hstipShow(key,btn){
+ const t=document.getElementById('hstip');hstipKey=key;hstipEl=btn;
+ t.innerHTML=hstipHtml(key);t.style.display='block';
+ const r=btn.getBoundingClientRect(),w=t.offsetWidth,h=t.offsetHeight;
+ let x=Math.min(r.right-w,window.innerWidth-w-8);x=Math.max(8,x);
+ let y=r.bottom+6;if(y+h>window.innerHeight-8)y=r.top-h-6;
+ t.style.left=x+'px';t.style.top=y+'px'}
+function hstipHide(){hstipKey=null;hstipEl=null;document.getElementById('hstip').style.display='none'}
+// ボタンは 2 秒ごとに作り直されるので、ボタンの mouseleave ではなくマウスの位置で消す
+document.addEventListener('mousemove',e=>{if(hstipKey&&!(e.target.closest&&e.target.closest('.hsbtn')))hstipHide()});
+window.addEventListener('scroll',hstipHide,true);
 function hstopResult(ok,title,text){
  const d=document.getElementById('hsdlg');
  d.className=ok?'':'bad';
@@ -2319,25 +2359,34 @@ function hstopResult(ok,title,text){
  document.getElementById('hsout').textContent=text||'(出力なし)';
  if(d.open)d.close();
  d.showModal()}
-async function runHstop(){
+async function runHstop(key){
+ const m=HSTOP[key];
  if(hstopBusy)return;
- if(!confirm('Hermes を全部止めます (hstop --all)。\nデスクトップアプリの会話も止まり、Hermes の本体を起動し直します。\n\n続けますか？'))return;
- hstopBusy=true;renderSysCard();
+ hstipHide();
+ if(!confirm(m.ask))return;
+ hstopBusy=key;renderSysCard();
  try{
-  const r=await fetch('/api/hstop',{method:'POST',headers:{'X-Honyaku':'1'}});
+  const r=await fetch('/api/hstop',{method:'POST',headers:{'X-Honyaku':'1','Content-Type':'application/json'},body:JSON.stringify({all:m.all})});
   let j=null;try{j=await r.json()}catch(e){}
-  if(!j)hstopResult(false,'hstop --all 失敗 (HTTP '+r.status+')','');
-  else if(j.ok)hstopResult(true,'hstop --all 完了',j.output);
-  else hstopResult(false,'hstop --all 失敗'+(j.code!==null&&j.code!==undefined?' (終了コード '+j.code+')':''),j.output);
+  if(!j)hstopResult(false,m.args+' 失敗 (HTTP '+r.status+')','');
+  else if(j.ok)hstopResult(true,m.args+' 完了',j.output);
+  else hstopResult(false,m.args+' 失敗'+(j.code!==null&&j.code!==undefined?' (終了コード '+j.code+')':''),j.output);
  }catch(e){
-  hstopResult(false,'hstop --all 失敗','中継サーバーにつながりませんでした: '+e);
- }finally{hstopBusy=false;renderSysCard()}}
-function hstopBtn(){
- const b=document.createElement('button');b.type='button';b.className='hsbtn';b.innerHTML=IC_RESET;
- b.disabled=hstopBusy;
- b.title=hstopBusy?'hstop --all 実行中…':'Hermes を全部止める (hstop --all)\n単発の作業を止め、Hermes の本体を起動し直す (デスクトップアプリの会話も止まる)';
- b.addEventListener('click',e=>{e.stopPropagation();runHstop()});
+  hstopResult(false,m.args+' 失敗','中継サーバーにつながりませんでした: '+e);
+ }finally{hstopBusy=null;renderSysCard()}}
+function hstopBtn(key){
+ const m=HSTOP[key];
+ const b=document.createElement('button');b.type='button';b.className='hsbtn '+key+(hstopBusy===key?' run':'');
+ b.innerHTML=m.icon;b.disabled=!!hstopBusy;b.setAttribute('aria-label',m.args);
+ b.addEventListener('click',e=>{e.stopPropagation();runHstop(key)});
+ b.addEventListener('mouseenter',()=>hstipShow(key,b));
+ // 再描画でマウスの下に作り直されたボタンは mouseenter が来ないので、表示中なら新しいボタンに付け替える
+ if(hstipKey===key){hstipEl=b;document.getElementById('hstip').innerHTML=hstipHtml(key)}
  return b}
+function hstopBtns(){
+ const w=document.createElement('span');w.className='hsbtns';
+ w.appendChild(hstopBtn('jobs'));w.appendChild(hstopBtn('all'));
+ return w}
 function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c.innerHTML='';
  const card=document.createElement('div');card.className='sysm';
  card.title='サーバの GPU・CPU・RAM・各 SSD 使用量 (/proc・statvfs・nvidia-smi、2秒更新)';
@@ -2352,7 +2401,7 @@ function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c
    // 表示順: GPU → CPU → RAM → ディスク
    if(Array.isArray(lastGpus)&&lastGpus.length){
     const gw=document.createElement('div');gw.className='tsub';
-    const gn=sysnode(IC_GPU+' GPU','gpu');gn.appendChild(hstopBtn());
+    const gn=sysnode(IC_GPU+' GPU','gpu');gn.appendChild(hstopBtns());
     gw.appendChild(gn);
     if(sysTree.gpu){
      const body=document.createElement('div');body.className='tsub';
@@ -2484,17 +2533,21 @@ class UIHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
         n = int(self.headers.get("Content-Length") or 0)
-        if n > 0:
-            self.rfile.read(n)
+        body = self.rfile.read(n) if n > 0 else b""
         if path == "/api/hstop":
-            return self._hstop()
+            try:
+                req = json.loads(body.decode("utf-8")) if body else {}
+            except ValueError:
+                req = {}
+            # {"all": false} = hstop (裏の作業だけ) / それ以外 = hstop --all (本文なしも --all: 以前の画面との互換)
+            return self._hstop(bool(req.get("all", True)) if isinstance(req, dict) else True)
         return self._send(404, "text/plain", b"not found")
 
     def _json(self, status, body):
         return self._send(status, "application/json; charset=utf-8", json.dumps(body, ensure_ascii=False).encode())
 
-    def _hstop(self):
-        """画面の GPU 行のボタン: hstop --all を実行して出力を返す (server-deploy の hstop)。
+    def _hstop(self, all_=True):
+        """画面の GPU 行のボタン: hstop (黄) / hstop --all (赤) を実行して出力を返す (server-deploy の hstop)。
         独自ヘッダー必須 = 他のサイトのページからは送れない (CORS のプリフライトで止まる)"""
         if self.headers.get("X-Honyaku") != "1":
             return self._json(403, {"ok": False, "code": None, "output": "forbidden"})
@@ -2507,22 +2560,24 @@ class UIHandler(BaseHTTPRequestHandler):
                        "server-deploy の install.sh で ~/.local/bin/hstop を作るか、config の [hstop] path に場所を書いてください")
                 log.warning("hstop: not found: %s", exe)
                 return self._json(200, {"ok": False, "code": None, "output": msg})
-            log.info("hstop --all: run from %s (%s)", self.client_address[0], exe)
+            args = ["--all"] if all_ else []
+            name = " ".join(["hstop"] + args)
+            log.info("%s: run from %s (%s)", name, self.client_address[0], exe)
             try:
-                r = subprocess.run([exe, "--all"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                r = subprocess.run([exe] + args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, errors="replace",
                                    timeout=self.cfg.getfloat("hstop", "timeout"))
             except subprocess.TimeoutExpired as e:
                 out = e.output or ""
                 if isinstance(out, bytes):
                     out = out.decode("utf-8", "replace")
-                log.warning("hstop --all: timeout")
+                log.warning("%s: timeout", name)
                 return self._json(200, {"ok": False, "code": None,
                                         "output": out + "\n(時間内に終わりませんでした。サーバーで hstop -n を実行して状況を確認してください)"})
             except OSError as e:
-                log.warning("hstop --all: %s", e)
+                log.warning("%s: %s", name, e)
                 return self._json(200, {"ok": False, "code": None, "output": f"hstop を実行できません: {e}"})
-            log.info("hstop --all: exit %d\n%s", r.returncode, r.stdout.rstrip())
+            log.info("%s: exit %d\n%s", name, r.returncode, r.stdout.rstrip())
             return self._json(200, {"ok": r.returncode == 0, "code": r.returncode, "output": r.stdout.rstrip()})
         finally:
             self.hstop_lock.release()
