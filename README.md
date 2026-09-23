@@ -78,7 +78,8 @@ Windows からも SMB で `config.local.ini` を編集できます)。画面は 
 `lighttpd-honyaku.conf` は GitHub の画面からコピーするか、下の「2b. 引っ越し」の手順で旧フォルダのものを使います。
 
 ```bash
-sudo cp lighttpd-honyaku.conf /etc/lighttpd/conf-enabled/90-honyaku.conf
+sudo cp lighttpd-honyaku.conf /etc/lighttpd/honyaku.conf
+grep -q '"/etc/lighttpd/honyaku.conf"' /etc/lighttpd/lighttpd.conf || echo 'include "/etc/lighttpd/honyaku.conf"' | sudo tee -a /etc/lighttpd/lighttpd.conf
 sudo lighttpd -tt -f /etc/lighttpd/lighttpd.conf && sudo systemctl restart lighttpd
 curl -sI http://127.0.0.1/honyaku/config.ini | head -1    # 403 Forbidden なら OK
 
@@ -121,7 +122,8 @@ git status --short        # M config.ini などが出たら止める (手で変�
 git fetch origin && git checkout main && git pull origin main
 
 # 1. lighttpd で /honyaku/ を塞ぐ (フォルダを置く前に)
-sudo cp lighttpd-honyaku.conf /etc/lighttpd/conf-enabled/90-honyaku.conf
+sudo cp lighttpd-honyaku.conf /etc/lighttpd/honyaku.conf
+grep -q '"/etc/lighttpd/honyaku.conf"' /etc/lighttpd/lighttpd.conf || echo 'include "/etc/lighttpd/honyaku.conf"' | sudo tee -a /etc/lighttpd/lighttpd.conf
 sudo lighttpd -tt -f /etc/lighttpd/lighttpd.conf && sudo systemctl restart lighttpd
 curl -sI http://127.0.0.1/honyaku/config.ini | head -1    # 403 Forbidden なら OK (200 / 404 なら先に進まない)
 
