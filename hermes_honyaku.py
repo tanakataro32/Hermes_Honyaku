@@ -29,6 +29,7 @@ import logging
 import os
 import queue
 import re
+import select
 import shutil
 import socket
 import subprocess
@@ -1527,6 +1528,10 @@ def is_task_request(req):
     return False
 
 
+class ClientGone(Exception):
+    """中継中に Hermes 側が接続を切った"""
+
+
 class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     cfg = None
@@ -1609,6 +1614,35 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if self._chunked:
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
+
+    def _client_gone(self):
+        """Hermes 側 (呼び出し元) が接続を切ったか。応答を待っている間の HTTP クライアントは何も送らないので、
+        読めるのに 0 バイト = 相手が閉じた (プロセスが止められた場合もカーネルが閉じる)"""
+        try:
+            r, _, _ = select.select([self.connection], [], [], 0)
+            if not r:
+                return False
+            return self.connection.recv(1, socket.MSG_PEEK) == b""
+        except (BlockingIOError, InterruptedError):
+            return False
+        except (OSError, ValueError):
+            return True
+
+    def _watch_client(self, conn, gone, stop, interval=0.5):
+        """中継中に Hermes 側の切断を見張り、切れたら上流 (llama-server) への接続を切って生成を止めさせる。
+        切らないと、stream=false の要求 (応答を最後にまとめて返す) やプロンプト処理中は Honyaku が切断に気づかず、
+        Hermes を止めても (hstop など) 生成が最後まで続く"""
+        def run():
+            while not stop.wait(interval):
+                if self._client_gone():
+                    gone.set()
+                    try:
+                        if conn.sock is not None:
+                            conn.sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    return
+        threading.Thread(target=run, name="client-watch", daemon=True).start()
 
     def _send_error_json(self, status, message):
         if getattr(self, "_started", False):
@@ -1696,9 +1730,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         conn = None
         turn = None
+        gone, stop = threading.Event(), threading.Event()
         try:
             conn = self._connect()
             conn.request("POST", self.path, body=body, headers=self._upstream_headers(len(body)))
+            self._watch_client(conn, gone, stop)
             resp = conn.getresponse()
             ctype = resp.getheader("Content-Type") or ""
             if resp.status != 200 or "text/event-stream" not in ctype:
@@ -1734,6 +1770,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             finish = "stop"
             while True:
                 line = resp.readline()
+                if gone.is_set():
+                    raise ClientGone()
                 if not line:
                     break
                 if client_stream:
@@ -1772,11 +1810,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 data = json.dumps(acc.build(), ensure_ascii=False).encode("utf-8")
                 self._begin(200, [("Content-Type", "application/json")], False, len(data))
                 self._write(data)
-        except (BrokenPipeError, ConnectionResetError):
-            log.info("client disconnected (chat)")
+        except (BrokenPipeError, ConnectionResetError, ClientGone):
+            log.info("client disconnected (chat)%s", ": 上流の生成を打ち切りました" if gone.is_set() else "")
             if turn:
                 turn.finish("client_disconnected")
         except Exception as e:
+            if gone.is_set():  # 見張りが上流を切ったせいで getresponse / readline が失敗した
+                log.info("client disconnected (chat): 上流の生成を打ち切りました")
+                if turn:
+                    turn.finish("client_disconnected")
+                return
             log.exception("chat proxy error")
             if turn:
                 turn.finish("error")
@@ -1785,6 +1828,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
         finally:
+            stop.set()
             if conn:
                 conn.close()
 
