@@ -1632,11 +1632,14 @@ background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--
 background:#12181d;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);padding:6px 8px}
 .think.live::after{content:"▍";color:var(--acc);animation:bl 1s steps(2) infinite}
 @keyframes bl{50%{opacity:0}}
-.ans{margin-top:10px;padding:8px 10px;background:#12181d;color:var(--ja);font-size:14.5px;line-height:1.75;word-break:break-word;
-border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+/* 最終回答: ティール強調 (背景トーン + アクセントビベール + 回答チップ。新色なし、既存パレットの再利用) */
+.ans{margin-top:10px;padding:8px 10px;background:#0f3d3a;color:var(--ja);font-size:14.5px;line-height:1.75;word-break:break-word;
+border:2px solid;border-color:#46a79e var(--sv) var(--sv) #46a79e}
 .ans:empty{display:none}
 body.noans .ans{display:none}
-.ans .cap{margin-bottom:4px}
+.ans .cap{margin-bottom:6px}
+.ans .cap .chip{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#0b1013;background:var(--acc);padding:1px 8px;font-weight:700;
+border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .ans p{margin:0 0 8px}.ans p:last-child{margin-bottom:0}
 .ans h3,.ans h4,.ans h5,.ans h6{margin:10px 0 6px;font-size:15px;color:var(--acc)}
 .ans ul,.ans ol{margin:0 0 8px;padding-left:22px}.ans li{margin:2px 0}
@@ -1821,7 +1824,7 @@ function onTurnCtx(ev){const t=turn(ev.turn);if(!t)return;const el=t.el.querySel
   g.className='ctxg'+(lim&&ev.tokens/lim>=0.8?' hot':lim&&ev.tokens/lim>=0.5?' warn':'');
   g.title='最新ターンのコンテキスト使用量'+(ev.exact?' (llama-server の /tokenize)':' (推定値)')+(ev.max_tokens?' · max_out '+k(ev.max_tokens):'');
   scroll()}
-function renderAns(t){t.ansTimer=null;t.ans.innerHTML=t.ansRaw.trim()?'<div class="cap">回答</div>'+md(t.ansRaw):'';scroll()}
+function renderAns(t){t.ansTimer=null;t.ans.innerHTML=t.ansRaw.trim()?'<div class="cap"><span class="chip">回答</span></div>'+md(t.ansRaw):'';scroll()}
 function onAnswer(ev){const t=turn(ev.turn);if(!t)return;t.ansRaw+=ev.text;if(!t.ansTimer)t.ansTimer=setTimeout(()=>renderAns(t),150)}
 function onTools(ev){const t=turn(ev.turn);if(!t)return;t.tools.innerHTML=(ev.tools||[]).map(x=>'<div title="'+esc(x.args)+'"><b>🔧 '+esc(x.name)+'</b><code>'+esc(x.args)+'</code></div>').join('');scroll()}
 // 最小限の Markdown 描画 (見出し・箇条書き・表・コード・引用・太字・斜体・リンク)
