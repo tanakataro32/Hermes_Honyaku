@@ -19,6 +19,6 @@ if changed hermes-honyaku.service; then
     echo "    sudo cp $DEPLOY_DIR/hermes-honyaku.service /etc/systemd/system/ && sudo systemctl daemon-reload"
 fi
 if changed lighttpd-honyaku.conf; then
-    echo "    sudo cp $DEPLOY_DIR/lighttpd-honyaku.conf /etc/lighttpd/conf-enabled/90-honyaku.conf && sudo systemctl restart lighttpd"
+    echo "    sudo cp $DEPLOY_DIR/lighttpd-honyaku.conf /etc/lighttpd/honyaku.conf && sudo lighttpd -tt -f /etc/lighttpd/lighttpd.conf && sudo systemctl restart lighttpd"
 fi
 echo "    sudo systemctl restart hermes-honyaku"
