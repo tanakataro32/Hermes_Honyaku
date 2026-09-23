@@ -5,12 +5,14 @@
 Description=Hermes Honyaku (reasoning proxy + translator + viewer)
 After=network-online.target llama-server.service
 Wants=network-online.target
+# 置き場所 (/mnt/smb_data) が使えるようになってから起動する
+RequiresMountsFor=/mnt/smb_data/htdocs/honyaku
 
 [Service]
 User=masa
 Group=masa
-WorkingDirectory=/home/masa/hermes_honyaku
-ExecStart=/usr/bin/python3 /home/masa/hermes_honyaku/hermes_honyaku.py /home/masa/hermes_honyaku/config.ini
+WorkingDirectory=/mnt/smb_data/htdocs/honyaku
+ExecStart=/usr/bin/python3 /mnt/smb_data/htdocs/honyaku/hermes_honyaku.py /mnt/smb_data/htdocs/honyaku/config.ini
 Restart=on-failure
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1

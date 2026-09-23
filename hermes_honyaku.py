@@ -150,12 +150,13 @@ class Config:
         self.path = None
         self.local_path = None
         if path and os.path.exists(path):
-            cp.read(path, encoding="utf-8")
+            # utf-8-sig: Windows から SMB 越しにメモ帳などで編集して BOM が付いても読めるように
+            cp.read(path, encoding="utf-8-sig")
             self.path = path
             # 同じフォルダの config.local.ini があれば上書き (git 管理外。個人の設定はこちらに書く)
             local = os.path.join(os.path.dirname(os.path.abspath(path)), "config.local.ini")
             if os.path.exists(local):
-                cp.read(local, encoding="utf-8")
+                cp.read(local, encoding="utf-8-sig")
                 self.local_path = local
         self.cp = cp
 

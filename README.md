@@ -72,11 +72,20 @@ llmsv 側の設定 (`config.ini` の `model = honyaku`) はどのモデルでも
 
 ## 2. llmsv 側 (中継サーバー) の準備
 
+置き場所は本だなと同じ `/mnt/smb_data/htdocs` の下の `honyaku` です (アプリ名 `honyaku` で [server-deploy](https://github.com/tanakataro32/server-deploy) の `deploy` の対象になり、
+Windows からも SMB で `config.local.ini` を編集できます)。画面は lighttpd ではなく自前のポート 8765 で出すので、
+**置く前に lighttpd から `/honyaku/` を見えないようにします** (htdocs の中は URL で見えるため。`logs/` の思考ログや `config.local.ini` を取らせない)。
+`lighttpd-honyaku.conf` は GitHub の画面からコピーするか、下の「2b. 引っ越し」の手順で旧フォルダのものを使います。
+
 ```bash
-cd ~
-git clone https://github.com/tanakataro32/Hermes_Honyaku.git hermes_honyaku
-cd hermes_honyaku
-nano config.ini          # [translator] url の IP が Windows 機と合っているか確認
+sudo cp lighttpd-honyaku.conf /etc/lighttpd/conf-enabled/90-honyaku.conf
+sudo lighttpd -tt -f /etc/lighttpd/lighttpd.conf && sudo systemctl restart lighttpd
+curl -sI http://127.0.0.1/honyaku/config.ini | head -1    # 403 Forbidden なら OK
+
+deploy --new -n honyaku https://github.com/tanakataro32/Hermes_Honyaku main   # 確認だけ
+deploy --new honyaku https://github.com/tanakataro32/Hermes_Honyaku main      # /mnt/smb_data/htdocs/honyaku に置く
+cd /mnt/smb_data/htdocs/honyaku
+nano config.local.ini    # [translator] url の IP が Windows 機と合っているか確認 (変えたい項目だけ書く)
 python3 hermes_honyaku.py   # まず手動で起動して動作確認
 ```
 
@@ -94,11 +103,46 @@ Windows 機のブラウザで http://192.168.1.50:8765/ を開き、ヘッダー
 常駐化する場合:
 
 ```bash
+cd /mnt/smb_data/htdocs/honyaku
 sudo cp hermes-honyaku.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now hermes-honyaku
 journalctl -u hermes-honyaku -f
 ```
+
+## 2b. 引っ越し: ~/hermes_honyaku → /mnt/smb_data/htdocs/honyaku (一回だけ)
+
+以前の置き場所 `/home/masa/hermes_honyaku` で動かしている場合の手順です。Hermes の接続先 (8081) と画面の URL (8765) は変わりません。
+
+```bash
+# 0. 旧フォルダを main の最新に (lighttpd-honyaku.conf と新しい hermes-honyaku.service を手元に持ってくる)
+cd ~/hermes_honyaku
+git status --short        # M config.ini などが出たら止める (手で変えた値は config.local.ini に移してから)
+git fetch origin && git checkout main && git pull origin main
+
+# 1. lighttpd で /honyaku/ を塞ぐ (フォルダを置く前に)
+sudo cp lighttpd-honyaku.conf /etc/lighttpd/conf-enabled/90-honyaku.conf
+sudo lighttpd -tt -f /etc/lighttpd/lighttpd.conf && sudo systemctl restart lighttpd
+curl -sI http://127.0.0.1/honyaku/config.ini | head -1    # 403 Forbidden なら OK (200 / 404 なら先に進まない)
+
+# 2. 新しい場所に置く
+deploy --new honyaku https://github.com/tanakataro32/Hermes_Honyaku main
+
+# 3. 設定とログを移す (無ければ飛ばしてよい)
+cp -p ~/hermes_honyaku/config.local.ini /mnt/smb_data/htdocs/honyaku/
+cp -rp ~/hermes_honyaku/logs /mnt/smb_data/htdocs/honyaku/
+
+# 4. サービスを新しい場所に切り替える
+sudo systemctl stop hermes-honyaku
+sudo cp /mnt/smb_data/htdocs/honyaku/hermes-honyaku.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start hermes-honyaku
+journalctl -u hermes-honyaku -n 6    # config: /mnt/smb_data/htdocs/honyaku/config.ini と v1.0.0 · <コミット> が出れば OK
+```
+
+- `~/.config/server-deploy/apps` に `honyaku /home/masa/hermes_honyaku` を書いていたら、その行を消します
+  (htdocs の直下は登録しなくても `deploy` が見つけます。`deploy --list` に honyaku が新しい場所で出れば OK)。
+- 画面 (http://192.168.1.50:8765/) で思考・翻訳・GPU 行のボタンが動くのを確かめてから、旧フォルダを消します: `rm -rf ~/hermes_honyaku`
 
 ## 3. Hermes Agent の接続先を切り替える
 
@@ -163,7 +207,7 @@ Open WebUI (Docker) の接続先も中継サーバーに向ければ、同じ画
 1. **中継サーバーを Docker からも届く口で待ち受ける**。`config.ini` の `[proxy]` を `listen_host = 0.0.0.0` に変えて再起動します。
 
    ```bash
-   nano ~/hermes_honyaku/config.ini      # listen_host = 0.0.0.0
+   nano /mnt/smb_data/htdocs/honyaku/config.local.ini      # [proxy] listen_host = 0.0.0.0
    sudo systemctl restart hermes-honyaku
    ```
 
@@ -208,13 +252,15 @@ Hermes が会話タイトルを付けるための要求も同じ扱いです。
 
 DeepL を使う場合は `engine = deepl` にして `deepl_key` を設定します (Free プランは月 50 万文字まで。思考ログは量が多いので上限に注意)。
 
-## 5b. 更新 (git pull 後)
+## 5b. 更新 (deploy のあと)
 
-`hermes_honyaku.py` や `config.ini` を git から更新した場合は、**再起動しないと新コードは動きません** (systemd がメモリ上の旧コードを動かし続けています)。ホストで:
+本だなと同じく `deploy` で GitHub の最新にします (Hermes に「honyaku をローカルに展開して」でも可)。
+`hermes_honyaku.py` や `config.ini` が変わっても、**再起動しないと新コードは動きません** (systemd がメモリ上の旧コードを動かし続けています)。
+deploy の最後 (`.deploy/post-deploy`) に、必要なコマンドが表示されます:
 
 ```bash
-cd ~/hermes_honyaku
-git pull
+deploy honyaku                      # 今のブランチ (main) の最新に
+deploy honyaku claude/xxx           # マージ前のブランチを試す (終わったら deploy honyaku main で戻す)
 sudo systemctl restart hermes-honyaku
 ```
 
