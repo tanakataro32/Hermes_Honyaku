@@ -37,6 +37,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -44,11 +45,84 @@ log = logging.getLogger("honyaku")
 # 起動ごとに変わる値。イベント id とターン番号は再起動で 1 から振り直されるので、
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
+# バージョン (タイトルの横に表示)。リリースのたびに手で上げる
+APP_VERSION = "1.0.0"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade",
 }
+
+
+# --------------------------------------------------------------------------
+# バージョン
+# --------------------------------------------------------------------------
+def git_commit(git):
+    """git の作業フォルダなら .git から直接コミットの短縮 ID と日付を読む (git コマンドは使わない)。
+    git でなければ None"""
+    try:
+        if os.path.isfile(git):  # worktree などで .git がファイル (gitdir: <path>) の場合
+            with open(git, encoding="utf-8") as f:
+                line = f.read().strip()
+            if not line.startswith("gitdir:"):
+                return None
+            git = os.path.join(os.path.dirname(git), line[7:].strip())
+        with open(os.path.join(git, "HEAD"), encoding="utf-8") as f:
+            head = f.read().strip()
+    except OSError:
+        return None
+    sha, reffile = "", os.path.join(git, "HEAD")
+    if head.startswith("ref: "):  # ブランチ上: ref のファイル、なければ packed-refs
+        ref = head[5:]
+        try:
+            with open(os.path.join(git, ref), encoding="utf-8") as f:
+                sha = f.read().strip()
+            reffile = os.path.join(git, ref)
+        except OSError:
+            try:
+                with open(os.path.join(git, "packed-refs"), encoding="utf-8") as f:
+                    m = re.search(r"^([0-9a-f]{40}) " + re.escape(ref) + r"$", f.read(), re.M)
+                if m:
+                    sha, reffile = m.group(1), os.path.join(git, "packed-refs")
+            except OSError:
+                pass
+    else:
+        sha = head  # detached HEAD
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return None
+    # コミット日時は loose object から読む (pull 直後の新しいコミットはたいてい loose)。
+    # pack 済みなら ref が最後に動いた日 (= 最後の pull / checkout) で代用
+    ts = 0
+    try:
+        with open(os.path.join(git, "objects", sha[:2], sha[2:]), "rb") as f:
+            raw = zlib.decompress(f.read()).decode("utf-8", "replace")
+        m = re.search(r"^committer .* (\d+) [+-]\d{4}$", raw, re.M)
+        if m:
+            ts = int(m.group(1))
+    except (OSError, zlib.error):
+        pass
+    if not ts:
+        try:
+            ts = int(os.path.getmtime(reffile))
+        except OSError:
+            ts = 0
+    date = datetime.date.fromtimestamp(ts).isoformat() if ts else ""
+    return {"commit": sha[:7], "date": date}
+
+
+def version_info():
+    """{'version': '1.0.0', 'commit': '4d23053' | '', 'date': '2026-09-23' | '',
+        'label': 'v1.0.0 · 4d23053 · 09/23', 'title': 'バージョン 1.0.0（コミット 4d23053、2026-09-23）'}"""
+    info = {"version": APP_VERSION, "commit": "", "date": ""}
+    info.update(git_commit(os.path.join(APP_DIR, ".git")) or {})
+    label, title = "v" + info["version"], "バージョン " + info["version"]
+    if info["commit"]:
+        label += " · " + info["commit"]
+        title += "（コミット " + info["commit"] + ("、" + info["date"] if info["date"] else "") + "）"
+    if info["date"]:
+        label += " · " + info["date"][5:].replace("-", "/")
+    info["label"], info["title"] = label, title
+    return info
 
 
 # --------------------------------------------------------------------------
@@ -69,6 +143,7 @@ class Config:
             "segment": {"max_chars": "500", "min_chars": "120", "idle_flush_sec": "2.0", "code_words": ""},
             "gpu": {"interval": "2", "power_max": "250"},
              "sysmon": {"interval": "2"},
+            "hstop": {"path": "", "timeout": "120"},
             "log": {"dir": "logs", "level": "INFO"},
             "sources": {"127.0.0.1": "Hermes", "172.": "Open WebUI", "default": ""},
         })
@@ -1862,13 +1937,32 @@ button:active{border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 #tobottom{position:fixed;right:16px;bottom:16px;z-index:6;display:none;padding:6px 14px;
 background:linear-gradient(90deg,var(--bar1),var(--bar2));color:#fff;font-weight:700}
 #tobottom:active{filter:brightness(.85)}
+header .ver{font-size:11px;font-weight:400;color:rgba(234,255,251,.72);white-space:nowrap}
+/* GPU 行の hstop ボタン (右寄せ・赤・リセットアイコン) */
+.sysm .trow .hsbtn{margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:22px;height:18px;padding:0;
+background:#b3261e;border-color:#e0695f #4a0d09 #4a0d09 #e0695f;box-shadow:inset 1px 1px 0 rgba(255,255,255,.15)}
+.sysm .trow .hsbtn:hover{background:#cc3127}
+.sysm .trow .hsbtn:active{border-color:#4a0d09 #e0695f #e0695f #4a0d09}
+.sysm .trow .hsbtn:disabled{cursor:wait;background:#7a2a24}
+.sysm .trow .hsbtn:disabled svg{animation:hsspin 1s linear infinite}
+@keyframes hsspin{to{transform:rotate(360deg)}}
+/* hstop の結果ダイアログ (Win98 風) */
+#hsdlg{padding:0;min-width:320px;max-width:min(720px,calc(100vw - 32px));color:var(--ink);background:var(--face);
+border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow:4px 4px 0 rgba(0,0,0,.45)}
+#hsdlg::backdrop{background:rgba(0,0,0,.45)}
+#hsdlg .dt{padding:3px 8px;font-size:12px;font-weight:700;color:#fff;background:linear-gradient(90deg,var(--bar1),var(--bar2))}
+#hsdlg.bad .dt{background:linear-gradient(90deg,#6b1510,#b3261e)}
+#hsdlg pre{margin:10px;padding:8px;max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-all;font:12px/1.5 "Courier New",ui-monospace,monospace;
+color:#cfe8e4;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+#hsdlg .db{display:flex;justify-content:flex-end;padding:0 10px 10px}
+#hsdlg .db button{min-width:72px}
 #tobottom.show{display:block}
 ::-webkit-scrollbar{width:14px;height:14px}
 ::-webkit-scrollbar-track{background:repeating-conic-gradient(#2b353d 0% 25%,#1c242b 0% 50%) 0 0/4px 4px}
 ::-webkit-scrollbar-thumb{background:var(--face);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
 </style></head><body>
 <header>
- <b>Hermes Honyaku</b>
+ <b>Hermes Honyaku</b> <span class="ver" title="@@VER_TITLE@@">@@VER_LABEL@@</span>
  <span class="sp"></span>
  <label><input type="checkbox" id="auto" checked> 自動スクロール</label>
  <label><input type="checkbox" id="newest"> 新しいターンを上に</label>
@@ -1878,6 +1972,7 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));color:#fff;font-weight
  <select id="srcsel"><option value="">すべての発信元</option></select>
  <label><button id="clear">画面を消去</button></label>
 </header>
+<dialog id="hsdlg"><div class="dt" id="hsdt"></div><pre id="hsout"></pre><div class="db"><button type="button" id="hsok">OK</button></div></dialog>
 <button id="tobottom" type="button">↓ 最新へ (自動スクロール再開)</button>
 <div id="shell">
 <aside id="syspanel">
@@ -2167,6 +2262,37 @@ function gpuNode(g,i){
  el.appendChild(tw);el.appendChild(nm);
  el.addEventListener('click',()=>{gpuTree[key]=!gpuTree[key];renderSysCard()});
  return el}
+// ---- hstop --all (Hermes を全部止める) ボタン: GPU 行の右端 ----
+const IC_RESET='<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">'
++'<path d="M13.2 9.2A5.4 5.4 0 1 1 11.6 4" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="square"/>'
++'<path d="M9 1.6h5.4V7z" fill="#fff"/></svg>';
+let hstopBusy=false;
+function hstopResult(ok,title,text){
+ const d=document.getElementById('hsdlg');
+ d.className=ok?'':'bad';
+ document.getElementById('hsdt').textContent=title;
+ document.getElementById('hsout').textContent=text||'(出力なし)';
+ if(d.open)d.close();
+ d.showModal()}
+async function runHstop(){
+ if(hstopBusy)return;
+ if(!confirm('Hermes を全部止めます (hstop --all)。\nデスクトップアプリの会話も止まり、Hermes の本体を起動し直します。\n\n続けますか？'))return;
+ hstopBusy=true;renderSysCard();
+ try{
+  const r=await fetch('/api/hstop',{method:'POST',headers:{'X-Honyaku':'1'}});
+  let j=null;try{j=await r.json()}catch(e){}
+  if(!j)hstopResult(false,'hstop --all 失敗 (HTTP '+r.status+')','');
+  else if(j.ok)hstopResult(true,'hstop --all 完了',j.output);
+  else hstopResult(false,'hstop --all 失敗'+(j.code!==null&&j.code!==undefined?' (終了コード '+j.code+')':''),j.output);
+ }catch(e){
+  hstopResult(false,'hstop --all 失敗','中継サーバーにつながりませんでした: '+e);
+ }finally{hstopBusy=false;renderSysCard()}}
+function hstopBtn(){
+ const b=document.createElement('button');b.type='button';b.className='hsbtn';b.innerHTML=IC_RESET;
+ b.disabled=hstopBusy;
+ b.title=hstopBusy?'hstop --all 実行中…':'Hermes を全部止める (hstop --all)\n単発の作業を止め、Hermes の本体を起動し直す (デスクトップアプリの会話も止まる)';
+ b.addEventListener('click',e=>{e.stopPropagation();runHstop()});
+ return b}
 function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c.innerHTML='';
  const card=document.createElement('div');card.className='sysm';
  card.title='サーバの GPU・CPU・RAM・各 SSD 使用量 (/proc・statvfs・nvidia-smi、2秒更新)';
@@ -2181,7 +2307,8 @@ function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c
    // 表示順: GPU → CPU → RAM → ディスク
    if(Array.isArray(lastGpus)&&lastGpus.length){
     const gw=document.createElement('div');gw.className='tsub';
-    gw.appendChild(sysnode(IC_GPU+' GPU','gpu'));
+    const gn=sysnode(IC_GPU+' GPU','gpu');gn.appendChild(hstopBtn());
+    gw.appendChild(gn);
     if(sysTree.gpu){
      const body=document.createElement('div');body.className='tsub';
      lastGpus.forEach((g,i)=>{
@@ -2242,10 +2369,27 @@ function connect(){
   es.onerror=()=>{document.getElementById('sdot').className='dot error';document.getElementById('stext').textContent='再接続待ち…'};
   es.onmessage=e=>{try{const ev=JSON.parse(e.data);checkBoot(ev);const h=H[ev.type];if(h)h(ev)}catch(err){console.error(err)}};
 }
+document.getElementById('hsok').addEventListener('click',()=>document.getElementById('hsdlg').close());
 connect();
 })();
 </script></body></html>
 """
+
+
+def build_index_html(ver):
+    """画面の HTML にバージョン表示を差し込む"""
+    def esc(t):
+        return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    return INDEX_HTML.replace("@@VER_TITLE@@", esc(ver["title"])).replace("@@VER_LABEL@@", esc(ver["label"]))
+
+
+def find_hstop(cfg):
+    """hstop の実行ファイル。config の [hstop] path > PATH > ~/.local/bin/hstop (server-deploy の install.sh が作る)。
+    systemd から起動すると ~/.local/bin が PATH に入らないので最後の候補も見る"""
+    p = cfg.get("hstop", "path")
+    if p:
+        return os.path.expanduser(p)
+    return shutil.which("hstop") or os.path.expanduser("~/.local/bin/hstop")
 
 
 class UIHandler(BaseHTTPRequestHandler):
@@ -2254,6 +2398,8 @@ class UIHandler(BaseHTTPRequestHandler):
     translator = None
     gpu_monitor = None
     sysmon_monitor = None
+    index_html = INDEX_HTML
+    hstop_lock = threading.Lock()
 
     def log_message(self, fmt, *args):
         log.debug("ui %s - " + fmt, self.client_address[0], *args)
@@ -2269,7 +2415,7 @@ class UIHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         if path in ("/", "/index.html"):
-            return self._send(200, "text/html; charset=utf-8", INDEX_HTML.encode("utf-8"))
+            return self._send(200, "text/html; charset=utf-8", self.index_html.encode("utf-8"))
         if path == "/events":
             return self._events()
         if path == "/api/status":
@@ -2289,6 +2435,52 @@ class UIHandler(BaseHTTPRequestHandler):
         if path == "/health":
             return self._send(200, "text/plain", b"ok")
         return self._send(404, "text/plain", b"not found")
+
+    def do_POST(self):
+        path = urllib.parse.urlsplit(self.path).path
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > 0:
+            self.rfile.read(n)
+        if path == "/api/hstop":
+            return self._hstop()
+        return self._send(404, "text/plain", b"not found")
+
+    def _json(self, status, body):
+        return self._send(status, "application/json; charset=utf-8", json.dumps(body, ensure_ascii=False).encode())
+
+    def _hstop(self):
+        """画面の GPU 行のボタン: hstop --all を実行して出力を返す (server-deploy の hstop)。
+        独自ヘッダー必須 = 他のサイトのページからは送れない (CORS のプリフライトで止まる)"""
+        if self.headers.get("X-Honyaku") != "1":
+            return self._json(403, {"ok": False, "code": None, "output": "forbidden"})
+        if not self.hstop_lock.acquire(blocking=False):
+            return self._json(409, {"ok": False, "code": None, "output": "hstop はすでに実行中です。終わるまで待ってください"})
+        try:
+            exe = find_hstop(self.cfg)
+            if not os.path.isfile(exe) or not os.access(exe, os.X_OK):
+                msg = (f"hstop が見つかりません ({exe})。\n"
+                       "server-deploy の install.sh で ~/.local/bin/hstop を作るか、config の [hstop] path に場所を書いてください")
+                log.warning("hstop: not found: %s", exe)
+                return self._json(200, {"ok": False, "code": None, "output": msg})
+            log.info("hstop --all: run from %s (%s)", self.client_address[0], exe)
+            try:
+                r = subprocess.run([exe, "--all"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True, errors="replace",
+                                   timeout=self.cfg.getfloat("hstop", "timeout"))
+            except subprocess.TimeoutExpired as e:
+                out = e.output or ""
+                if isinstance(out, bytes):
+                    out = out.decode("utf-8", "replace")
+                log.warning("hstop --all: timeout")
+                return self._json(200, {"ok": False, "code": None,
+                                        "output": out + "\n(時間内に終わりませんでした。サーバーで hstop -n を実行して状況を確認してください)"})
+            except OSError as e:
+                log.warning("hstop --all: %s", e)
+                return self._json(200, {"ok": False, "code": None, "output": f"hstop を実行できません: {e}"})
+            log.info("hstop --all: exit %d\n%s", r.returncode, r.stdout.rstrip())
+            return self._json(200, {"ok": r.returncode == 0, "code": r.returncode, "output": r.stdout.rstrip()})
+        finally:
+            self.hstop_lock.release()
 
     @staticmethod
     def _parse_last_id(s):
@@ -2377,6 +2569,8 @@ def main():
     cfg = Config(path)
     logging.basicConfig(level=getattr(logging, cfg.get("log", "level").upper(), logging.INFO),
                         format="%(asctime)s %(levelname)s %(message)s")
+    ver = version_info()
+    log.info("Hermes Honyaku %s", ver["label"])
     if cfg.path:
         log.info("config: %s%s", cfg.path, (" + " + cfg.local_path) if cfg.local_path else "")
     else:
@@ -2399,6 +2593,7 @@ def main():
     except Exception:
         log.exception("token meter init failed (context meter will use estimates)")
     UIHandler.cfg = cfg
+    UIHandler.index_html = build_index_html(ver)
     UIHandler.translator = translator
     UIHandler.gpu_monitor = GpuMonitor(interval=cfg.getfloat("gpu", "interval"),
                                        power_max=cfg.getfloat("gpu", "power_max"))

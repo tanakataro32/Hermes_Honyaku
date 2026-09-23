@@ -130,6 +130,15 @@ model:
   電力は既定 250W (config.ini の `[gpu] power_max`) を最大値として埋め、観測値が超えた場合はその値がリアルタイムで最大値になります。
   GPU が複数枚ある場合はすべて表示されるので、2 枚目を増設した場合は設定変更なしで自動表示されます。
   nvidia-smi がない環境 (または llama-server 以外のマシンで中継だけ動かしている場合) では何も表示されません。
+- **Hermes を全部止めるボタン** (システムパネルの GPU 行の右端、赤い ↻): 押すと確認のあと、サーバーで `hstop --all` を実行し、
+  出力 (止めた作業・本体の再起動・GPU の状態) をダイアログで表示します。Hermes の単発の作業を止め、Hermes の本体 (ダッシュボード) を起動し直すので、
+  デスクトップアプリの会話も止まります。AI モデル (llama-server) と中継サーバー自身には触りません。
+  `hstop` は [server-deploy](https://github.com/tanakataro32/server-deploy) の `install.sh` で入る `~/.local/bin/hstop` を使います (場所が違うときは config の `[hstop] path`)。
+  常駐化しているときは、下の `hermes-honyaku.service` (`KillMode=process` 入り) を入れ直してください。
+  入れ直さないと、ボタンで起動し直した本体が中継サーバーの再起動で一緒に止まります。
+- **バージョン** (タイトルの横): `v1.0.0 · 4d23053 · 09/23` のように、バージョン・コミットの短縮 ID・コミット日を表示します
+  (マウスを乗せると詳細)。コミットは `git clone` したフォルダで動かしているときだけ出ます (ZIP 展開なら `v1.0.0` のみ)。
+  バージョンは `hermes_honyaku.py` の先頭の `APP_VERSION` をリリースのたびに手で上げます。起動ログにも出ます。
 - 左列 **Thinking (原文)**: モデルの思考がトークン単位でそのまま流れます。
 - 右列 **日本語**: 文の区切りごとに翻訳結果が並びます。翻訳待ちの間は黄色のバーで原文が出て、訳文が届くと緑に変わります。
   翻訳が追いつかないときも左列は止まらず、右列が順に追いつきます。
@@ -192,6 +201,8 @@ Hermes が会話タイトルを付けるための要求も同じ扱いです。
 | segment | code_words | コマンド行と判定する行頭の語を追加する (空白区切り)。コマンド / コードの行は翻訳せず原文のまま表示 |
 | gpu | interval | ヘッダーの GPU メータ (温度・VRAM・電力バー) の読み取り間隔 (既定 5)。nvidia-smi がない環境では自動で表示なし |
 | gpu | power_max | 電力バーの最大値 (W、既定 250)。観測値が超えるとその値がリアルタイムで最大値に上がる |
+| hstop | path | GPU 行の赤いボタンで実行する hstop の場所。空欄なら PATH → `~/.local/bin/hstop` の順に探す |
+| hstop | timeout | hstop --all がこの秒数 (既定 120) で終わらなければ打ち切ってエラー表示 |
 | log | dir | 原文と訳文を JSONL で残すフォルダ (日付ごと 1 ファイル)。空欄で無効 |
 | sources | (IP の前方一致) | 接続元 IP からターンの発信元ラベルを決める。`127.0.0.1 = Hermes`、`172. = Open WebUI` など |
 
@@ -208,6 +219,14 @@ sudo systemctl restart hermes-honyaku
 ```
 
 `config.local.ini` と `windows\local_settings.bat` は git 管理外なので pull で消えません。
+
+`hermes-honyaku.service` が変わったときは、入れ直してから再起動します:
+
+```bash
+sudo cp hermes-honyaku.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart hermes-honyaku
+```
 
 ## 6. 困ったとき
 

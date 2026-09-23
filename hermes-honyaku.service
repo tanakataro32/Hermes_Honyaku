@@ -14,6 +14,9 @@ ExecStart=/usr/bin/python3 /home/masa/hermes_honyaku/hermes_honyaku.py /home/mas
 Restart=on-failure
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+# 画面のボタンで hstop --all を実行すると、起動し直した Hermes の本体がこのサービスの配下に入る。
+# このサービスの再起動・停止で Hermes の本体まで止めないよう、止めるのは中継サーバー (python3) だけにする
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target
