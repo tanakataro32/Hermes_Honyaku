@@ -66,7 +66,7 @@ class Config:
                            "model": "honyaku", "api_key": "", "workers": "3",
                            "timeout": "120", "temperature": "0.2",
                            "deepl_key": "", "deepl_url": "https://api-free.deepl.com/v2/translate"},
-            "segment": {"max_chars": "500", "min_chars": "120", "idle_flush_sec": "2.0"},
+            "segment": {"max_chars": "500", "min_chars": "120", "idle_flush_sec": "2.0", "code_words": ""},
             "gpu": {"interval": "2", "power_max": "250"},
              "sysmon": {"interval": "2"},
             "log": {"dir": "logs", "level": "INFO"},
@@ -325,23 +325,182 @@ def bad_period_boundary(before):
     return False
 
 
+# ---- コマンド / コード行の判定 ----
+# 行頭がこれらの語 (コマンド名) で始まる行はコマンド行とみなす (config.ini の [segment] code_words で追加できる)
+CODE_WORDS = set("""
+cd sudo git python python3 py pip pip3 pipx uv npm npx pnpm yarn node deno curl wget docker docker-compose podman
+systemctl journalctl service ls ll cat grep rg egrep fgrep rm rmdir mkdir cp mv chmod chown chgrp echo export unset ssh scp
+rsync apt apt-get yum dnf brew snap sed awk find tail head ps kill pkill killall make cmake cargo rustc gcc g++ clang
+dotnet msbuild powershell pwsh bash sh zsh source nvidia-smi ufw ping netstat ss ip tar zip unzip touch xargs tee
+nano vim vi code less more which whereis whoami df du free top htop mount umount ln env printenv printf sort uniq wc
+jq sqlite3 mysql psql conda poetry pytest python3.10 python3.11 python3.12 gh hf huggingface-cli ollama llama-server
+llama-cli set dir type copy del cls start call wmic reg net sc taskkill tasklist ipconfig ifconfig nslookup dig
+""".split())
+CODE_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_CODE_LINE_RES = [
+    # シェル: プロンプト / パス / 変数代入 / スクリプト実行 / オプション
+    re.compile(r"^\s*(\$|>|#!|PS [A-Z]:\\|[A-Z]:\\)"),
+    re.compile(r"^\s*(\./|\.\./|~/|/[\w.-]+/)"),
+    re.compile(r"^\s*(export\s+|set\s+)?[A-Za-z_][\w]*(\[[^\]]*\])?\s*(=|\+=|-=|:=)\s*\S"),
+    re.compile(r"^\s*\$?[\w.-]+\.(py|sh|bat|cmd|ps1|exe|js|ts|rb|pl|php)\b"),
+    re.compile(r"^\s*--?[A-Za-z]"),
+    re.compile(r"&&|\|\||2>&1|\$\(|\$\{|>>|\|\s*(grep|awk|sed|sort|head|tail|xargs|wc|jq|less|tee|cut|tr|uniq)\b"),
+    # PowerShell の 動詞-名詞
+    re.compile(r"^\s*(Get|Set|New|Remove|Start|Stop|Invoke|Test|Add|Import|Export|Write|Select|Where|Out|Format|"
+               r"ConvertTo|ConvertFrom|Read|Clear|Copy|Move|Rename|Restart|Enable|Disable|Install|Uninstall|Update)-[A-Z]\w+\b"),
+    # Python
+    re.compile(r"^\s*import\s+[\w.]+(\s*,\s*[\w.]+)*(\s+as\s+\w+)?\s*$"),
+    re.compile(r"^\s*from\s+[\w.]+\s+import\s+"),
+    re.compile(r"^\s*(async\s+)?(def|class)\s+\w+.*[:({]\s*$"),
+    re.compile(r"^\s*(if|elif|for|while|with|try|except|finally|else)\b.*:\s*$"),
+    re.compile(r"^\s*(return|raise|yield|await|assert|del|global|nonlocal)\b.*[()\[\]\"'.=]"),
+    re.compile(r"^\s*(return|break|continue|pass)\s*$"),
+    re.compile(r"^\s*@\w+"),
+    # JS / TS / C 系 / Java / C#
+    re.compile(r"^\s*(function|const|let|var|#include|#define|#if|#endif|#pragma|using|namespace|package|"
+               r"public|private|protected|static|void|int|long|float|double|char|bool|string|struct|enum|interface|"
+               r"typedef|extern|template|override|virtual|abstract|final|new)\b.*[=;(){}<>\[\]]"),
+    re.compile(r"^\s*(import|export)\b.*\bfrom\s+['\"]"),
+    re.compile(r"^\s*(//|/\*|\*/|\*\s)"),
+    re.compile(r"[{};]\s*$|\)\s*:\s*$|=>\s*\{?\s*$|\bend\s*$"),
+    re.compile(r"^\s*[{}\[\]()]"),
+    re.compile(r"^\s*</?[A-Za-z][\w-]*(\s+[\w-]+=\"[^\"]*\")*\s*/?>"),
+    # VB.NET
+    re.compile(r"^\s*(Dim|ReDim|Imports|Module|Namespace|Structure|Enum|Interface|Delegate|Event|Property|Const|"
+               r"Sub|Function|End Sub|End Function|End If|End With|End Class|End Module|End Select|End Try|Next|Loop|"
+               r"Private Sub|Public Sub|Private Function|Public Function|Protected|Friend|Shared|Overrides|Overridable|"
+               r"Handles|AddHandler|RemoveHandler|Try|Catch|Finally|Throw|Select Case|Case|ElseIf|MsgBox|Console\.)\b"),
+    # SQL
+    re.compile(r"^\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|GRANT|WITH)\b.*\b(FROM|INTO|TABLE|SET|WHERE|"
+               r"VALUES|INDEX|VIEW|DATABASE|AS|ON)\b", re.I),
+    # JSON / dict / YAML の 1 行
+    re.compile(r"^\s*[\"'][^\"']+[\"']\s*:"),
+    re.compile(r"^\s*[\w.-]+\s*:\s*[\"'{\[\d]"),
+    # インデント + 記号 (フェンス無しで貼られたコードの中身)
+    re.compile(r"^(\t| {4,})(?![-*+]\s|\d+[.)]\s)\S.*[=(){}\[\];+\-*/%<>]"),
+    re.compile(r"^(\t| {4,})(return|raise|yield|await|pass|break|continue|print|if|for|while|else|elif|try|except)\b"),
+]
+# 単語の並びの中で「コードらしい語」: パス・記号・オプション・拡張子付きファイル名
+_CODEISH_TOKEN_RE = re.compile(r"[/\\=$(){}\[\];|&<>*~%@#^]|^-{1,2}[A-Za-z]|^[\w.-]+\.(py|sh|bat|cmd|ps1|exe|js|ts|json|ya?ml|"
+                               r"ini|toml|txt|log|md|csv|gguf|dll|so|h|c|cpp|cs|vb|rb|go|rs|sql)$")
+_MD_HEADING_RE = re.compile(r"^\s*#{1,6}\s")
+
+
+def line_is_code(line, extra_words=()):
+    """1 行がコマンド / プログラムコードとみなせるか (Markdown の見出し・箇条書きなどの文章は False)"""
+    s = line.strip()
+    if not s:
+        return False
+    if _MD_HEADING_RE.match(s):
+        return False
+    first = s.split()[0]
+    if first in CODE_WORDS or first in extra_words:
+        return True
+    raw = line.rstrip()  # 行頭のインデントを判定に使う規則があるので、左側は削らない
+    for r in _CODE_LINE_RES:
+        if r.search(raw):
+            return True
+    # 単語の半分以上がパスや記号なら、シェルの 1 行とみなす
+    tokens = s.split()
+    if len(tokens) >= 2:
+        codeish = sum(1 for t in tokens if _CODEISH_TOKEN_RE.search(t))
+        if codeish * 2 >= len(tokens):
+            return True
+    return False
+
+
+def is_code_label(text):
+    """コードの直前の短い見出し行 ("Command:" など) か。コードと同じ区切りにまとめる"""
+    return "\n" not in text and text.endswith(":") and len(text) <= 40 and len(text.split()) <= 4
+
+
 class Segmenter:
-    def __init__(self, max_chars, min_chars):
-        self.buf = ""
+    """思考テキストを翻訳の区切りに分ける。文章は文の切れ目でまとめ、コマンド / コードの行は
+    文章と混ぜず ("code" 区切りとして) 翻訳せずそのまま出す。
+    feed() / flush() は [(kind, text)] を返す (kind は "text" か "code")。"""
+
+    def __init__(self, max_chars, min_chars, code_words=()):
+        self.done = ""     # 改行まで届いた文章の行
+        self.line = ""     # 改行がまだ届いていない途中の行
+        self.code = []     # 出力待ちのコード行
+        self.in_fence = False
         self.max_chars = max_chars
         self.min_chars = min_chars
+        self.code_words = set(code_words)
         self.last_feed = time.time()
+
+    # 互換: 溜まっている文章 (デバッグ表示用)
+    @property
+    def buf(self):
+        return self.done + self.line
+
+    def has_pending(self):
+        return bool(self.done.strip() or self.line.strip() or self.code)
 
     def feed(self, text):
-        self.buf += text
         self.last_feed = time.time()
-        return self._drain()
-
-    def _drain(self):
         segs = []
+        self.line += text
+        while "\n" in self.line:
+            ln, self.line = self.line.split("\n", 1)
+            self._route_line(ln, segs)
+        self._drain_prose(segs)
+        return segs
+
+    def _is_code(self, line):
+        return line_is_code(line, self.code_words)
+
+    def _route_line(self, ln, segs):
+        """改行まで届いた 1 行を、コードか文章かに振り分ける"""
+        if CODE_FENCE_RE.match(ln):
+            self.in_fence = not self.in_fence
+            is_code = True
+        else:
+            is_code = self.in_fence or self._is_code(ln)
+        if is_code:
+            # コードの手前で文章の段落は終わりなので、溜まっている文章を出し切る
+            if self.done.strip():
+                self._drain_prose(segs, view=self.done)
+            rest = self.done.strip()
+            self.done = ""
+            if rest and is_code_label(rest):
+                # "Command:" のような短い見出しはコードと同じ区切りにまとめる
+                self.code.append(rest)
+            elif rest:
+                segs.append(("text", rest))
+            self.code.append(ln)
+        else:
+            self._emit_code(segs)
+            self.done += ln + "\n"
+
+    def _emit_code(self, segs):
+        if self.code:
+            text = "\n".join(self.code).strip("\n")
+            self.code = []
+            if text.strip():
+                segs.append(("code", text))
+
+    def _drain_prose(self, segs, view=None):
+        """文章を文の切れ目で切り出す。途中の行がコードらしければ、その行は含めずに待つ"""
+        if view is None:
+            hold = bool(self.line) and self._is_code(self.line)
+            view = self.done if hold else self.done + self.line
+        else:
+            hold = True
+        rest = self._cut(view, segs)
+        # _cut は先頭から削るだけなので、残りは view の末尾。途中の行が含まれていればその分を戻す
+        if hold:
+            self.done = rest
+        elif len(rest) >= len(self.line):
+            self.done = rest[:len(rest) - len(self.line)]
+        else:
+            self.done = ""
+            self.line = rest
+
+    def _cut(self, buf, segs):
         while True:
             cut = None
-            for m in BOUNDARY_RE.finditer(self.buf):
+            for m in BOUNDARY_RE.finditer(buf):
                 is_newline = "\n" in m.group(0)
                 is_paragraph = m.group(0).count("\n") >= 2
                 if is_newline:
@@ -351,34 +510,51 @@ class Segmenter:
                         continue
                 else:
                     # 区切りの手前が短すぎる / 番号や略語の直後では切らない
-                    if m.start() < self.min_chars or bad_period_boundary(self.buf[:m.start()]):
+                    if m.start() < self.min_chars or bad_period_boundary(buf[:m.start()]):
                         continue
                     # 空白区切りは、続きが届いていることを確認してから切る
-                    if m.end() >= len(self.buf):
+                    if m.end() >= len(buf):
                         break
                 cut = (m.start(), m.end())
                 break
             if cut is None:
-                if len(self.buf) > self.max_chars:
+                if len(buf) > self.max_chars:
                     # 長すぎる場合は空白で強制分割
-                    sp = self.buf.rfind(" ", self.min_chars, self.max_chars)
+                    sp = buf.rfind(" ", self.min_chars, self.max_chars)
                     if sp < 0:
                         sp = self.max_chars
                     cut = (sp, sp + 1)
                 else:
                     break
-            seg = self.buf[:cut[0]].strip()
-            self.buf = self.buf[cut[1]:]
+            seg = buf[:cut[0]].strip()
+            buf = buf[cut[1]:]
             if seg:
-                segs.append(seg)
-        return segs
+                segs.append(("text", seg))
+        return buf
 
     def idle_for(self):
         return time.time() - self.last_feed
 
-    def flush(self):
-        rest, self.buf = self.buf.strip(), ""
-        return [rest] if rest else []
+    def flush(self, final=True):
+        """溜まっている分をすべて出す。final=False (思考が止まったときの idle flush) では、
+        コマンドの途中で止まっている行は改行が届くまで待ち、確定している文章だけ出す"""
+        segs = []
+        if not final and self.line and self._is_code(self.line):
+            self._drain_prose(segs, view=self.done)
+            rest = self.done.strip()
+            if rest and not is_code_label(rest):
+                self.done = ""
+                segs.append(("text", rest))
+            return segs
+        if self.line:
+            self._route_line(self.line, segs)
+            self.line = ""
+        self._emit_code(segs)
+        rest = self.done.strip()
+        self.done = ""
+        if rest:
+            segs.append(("text", rest))
+        return segs
 
 
 # --------------------------------------------------------------------------
@@ -398,7 +574,8 @@ class Turn:
         self.context = context
         self.translator = translator
         self.lock = threading.Lock()
-        self.segmenter = Segmenter(cfg.getint("segment", "max_chars"), cfg.getint("segment", "min_chars"))
+        self.segmenter = Segmenter(cfg.getint("segment", "max_chars"), cfg.getint("segment", "min_chars"),
+                                   cfg.get("segment", "code_words").split())
         self.tags = ThinkTagSplitter()
         self.seg_count = 0
         self.think_chars = 0
@@ -427,8 +604,8 @@ class Turn:
         BUS.publish({"type": "think", "turn": self.n, "text": text})
         with self.lock:
             segs = self.segmenter.feed(text)
-        for s in segs:
-            self._submit(s)
+        for kind, s in segs:
+            self._submit(s, kind)
 
     def feed_content(self, text):
         if not text:
@@ -477,22 +654,22 @@ class Turn:
 
     def idle_flush(self, idle_sec):
         with self.lock:
-            if self.finished or not self.segmenter.buf.strip():
+            if self.finished or not self.segmenter.has_pending():
                 return
             if self.segmenter.idle_for() < idle_sec:
                 return
-            segs = self.segmenter.flush()
-        for s in segs:
-            self._submit(s)
+            segs = self.segmenter.flush(final=False)
+        for kind, s in segs:
+            self._submit(s, kind)
 
-    def _submit(self, text):
+    def _submit(self, text, kind="text"):
         if self.task:
             # 背景タスク (タイトル生成・タグ生成など) は翻訳キューに入れない
             return
         with self.lock:
             self.seg_count += 1
             seg_id = self.seg_count
-        self.translator.submit(self.n, seg_id, text)
+        self.translator.submit(self.n, seg_id, text, kind)
 
     def finish(self, reason="stop"):
         for kind, part in self.tags.flush():
@@ -513,8 +690,8 @@ class Turn:
         with self.lock:
             self.finished = True
             segs = self.segmenter.flush()
-        for s in segs:
-            self._submit(s)
+        for kind, s in segs:
+            self._submit(s, kind)
         with Turn.active_lock:
             Turn.active.pop(self.n, None)
         if self.tool_calls:
@@ -599,10 +776,16 @@ class Translator:
             t.start()
         threading.Thread(target=self._idle_loop, name="idle-flush", daemon=True).start()
 
-    def submit(self, turn, seg_id, text):
-        ev = {"type": "seg", "turn": turn, "seg": seg_id, "src": text}
+    def submit(self, turn, seg_id, text, kind="text"):
+        ev = {"type": "seg", "turn": turn, "seg": seg_id, "src": text, "kind": kind}
         BUS.publish(ev)
         self.jlog.write(ev)
+        if kind == "code":
+            # コマンド / プログラムコードの区切りは翻訳せず、原文をそのまま訳文欄に出す
+            ev = {"type": "ja", "turn": turn, "seg": seg_id, "text": text, "how": "code", "ok": True, "sec": 0}
+            BUS.publish(ev)
+            self.jlog.write(ev)
+            return
         self.q.put((turn, seg_id, text))
         self._publish_status()
 
@@ -1667,6 +1850,9 @@ body.showsrc .seg.done .src{display:block}
 .seg.untranslated{box-shadow:inset 0 0 0 1px var(--warn)}.seg.untranslated .ja{color:var(--en)}
 .seg.untranslated .src{display:none}
 body.showsrc .seg.untranslated .src{display:block}
+.seg.code{box-shadow:inset 0 0 0 1px var(--muted)}
+.seg.code .ja{font-family:"Courier New",ui-monospace,monospace;font-size:13px;color:var(--en);white-space:pre-wrap;word-break:break-all}
+.seg.code .src{display:none!important}
 .sysnote{color:var(--muted);font-size:12px;text-align:center;margin:4px 0 14px}
 .empty{color:var(--muted);padding:40px;text-align:center;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);background:var(--face)}
 button{font:12px/1.6 "Noto Sans JP","Hiragino Sans","Yu Gothic UI",sans-serif;color:var(--ink);background:var(--face);
@@ -1869,8 +2055,9 @@ function onJa(ev){const t=turn(ev.turn);if(!t)return;let s=t.segEls[ev.seg];if(!
   const untr=ev.how==='en'||ev.how==='interrupted';
   s.querySelector('.ja').textContent=untr?(s.querySelector('.src').textContent||ev.text):ev.text;
   s.classList.remove('pending');
-  s.classList.add(untr?'untranslated':ev.ok?'done':'bad');
-  if(ev.how==='suspect')s.title='訳文が原文より極端に長いため、翻訳モデルが作文している可能性があります (原文を併記)';
+  s.classList.add(ev.how==='code'?'code':untr?'untranslated':ev.ok?'done':'bad');
+  if(ev.how==='code')s.title='コマンド / プログラムコードのため翻訳せず原文を表示';
+  else if(ev.how==='suspect')s.title='訳文が原文より極端に長いため、翻訳モデルが作文している可能性があります (原文を併記)';
   else if(ev.how==='en')s.title='翻訳失敗 (翻訳モデルが英語で返したため原文を表示)';
   else if(ev.how==='interrupted')s.title='次のターンが始まったため翻訳を中断 (原文を表示)';
   scroll()}
