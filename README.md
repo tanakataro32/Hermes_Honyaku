@@ -179,6 +179,8 @@ model:
 - **Hermes を全部止めるボタン** (システムパネルの GPU 行の右端、赤い ↻): 押すと確認のあと、サーバーで `hstop --all` を実行し、
   出力 (止めた作業・本体の再起動・GPU の状態) をダイアログで表示します。Hermes の単発の作業を止め、Hermes の本体 (ダッシュボード) を起動し直すので、
   デスクトップアプリの会話も止まります。AI モデル (llama-server) と中継サーバー自身には触りません。
+  Hermes が止まると、中継サーバーは 1 秒以内に気づいて llama-server への要求を切るので、生成中だった思考もそこで止まります
+  (stream=false の要求やプロンプト処理中も同じ)。止めた会話が本体の起動し直しで自動再開しないようにするのは hstop 側の役目です。
   `hstop` は [server-deploy](https://github.com/tanakataro32/server-deploy) の `install.sh` で入る `~/.local/bin/hstop` を使います (場所が違うときは config の `[hstop] path`)。
   常駐化しているときは、下の `hermes-honyaku.service` (`KillMode=process` 入り) を入れ直してください。
   入れ直さないと、ボタンで起動し直した本体が中継サーバーの再起動で一緒に止まります。
