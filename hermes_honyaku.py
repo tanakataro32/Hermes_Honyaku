@@ -47,7 +47,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -2372,7 +2372,8 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
 .mview label:has(#clear){min-height:0;margin-top:6px}
 .mother a{margin-top:6px;color:var(--ink);text-decoration:none;background:var(--face);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
 .mother a:active{border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-.mother .note{font-size:11.5px;color:var(--muted);margin:-4px 0 4px 30px}
+.mother .note,.mview .note{font-size:11.5px;color:var(--muted);margin:-4px 0 4px 30px}
+.mview .note:empty,.mother .note:empty{display:none}
 .mver{font-size:11px;color:var(--muted);text-align:right;padding:2px 2px 0}
 /* 黄色のボタンの一覧: スマホでは下からの板にする (塗り分けた原文を見比べる機能は省く) */
 .mob #jobdlg{top:auto;bottom:0;left:0;right:0;width:100%;padding-bottom:env(safe-area-inset-bottom)}
@@ -2451,6 +2452,7 @@ let moReq=0, moStop=null, moStopN=null;   // 原文の最新行の欄 (下の「
 if(MOB){
   const view=document.getElementById('mshview'), sys=document.getElementById('mshsys');
   document.querySelectorAll('header label, header select').forEach(e=>view.appendChild(e));
+  const why=document.createElement('div');why.className='note';why.id='autowhy';view.querySelector('label').after(why);
   document.getElementById('mctx').appendChild(document.getElementById('ctxg'));
   document.querySelectorAll('#syspanel .sysbox').forEach(b=>{if(b.querySelector('#sysmc,#sdot'))sys.appendChild(b)});
   document.querySelector('#jobdlg .jn').textContent='cron の定期実行・本棚などのアプリが頼んだ AI の作業です。止める作業にチェックを付けてください (2 秒ごとに更新)。デスクトップアプリの会話は止まりません。';
@@ -2571,7 +2573,9 @@ function animStep(){animReq=0;if(animY===null)return;const d=animY-animPos;
   if(animPos===animY){animY=null;return}
   animReq=requestAnimationFrame(animStep)}
 function scroll(){if(newest.checked||!auto.checked||scrollReq)return;scrollReq=requestAnimationFrame(doScroll)}
-function pause(){if(newest.checked||!auto.checked)return;auto.checked=false;pausedByScroll=true;holdUp=false;if(scrollReq){cancelAnimationFrame(scrollReq);scrollReq=0}animStop();updateBtn()}
+// why = 止めた理由 (スマホ表示のメニューに「最後に止まった理由」として出す。実機でしか起きない止まり方を調べるため)
+function pause(why){if(newest.checked||!auto.checked)return;auto.checked=false;pausedByScroll=true;holdUp=false;if(scrollReq){cancelAnimationFrame(scrollReq);scrollReq=0}animStop();updateBtn();
+  const w=document.getElementById('autowhy');if(w)w.textContent='最後に止まった理由: '+(why||'-')+' ('+new Date().toTimeString().slice(0,8)+')'}
 function resume(){if(auto.checked)return;auto.checked=true;pausedByScroll=false;updateBtn();scroll()}
 // ユーザーの操作の検出。
 //  ・ホイール上 / PageUp / ↑ / Home / 指で下に引く → その場で止める (scroll イベントを待つと、次の訳文で引き戻されてしまう)
@@ -2579,19 +2583,27 @@ function resume(){if(auto.checked)return;auto.checked=true;pausedByScroll=false;
 //  ・scroll イベント → 目標との距離で判断 (予備)。自分で動かした直後の分と、内容が増えて再配置を待っている間の分は無視する
 //    (上の方の行の訳文が届いて高さが変わると、ブラウザが表示位置を保つために scroll イベントを起こすため)
 //  ・再開は「スクロールで止まった」場合のみ。チェックを手で外したときは、ページ末尾に来ても勝手に付け直さない
-window.addEventListener('wheel',e=>{if(e.deltaY<0&&window.scrollY>0)pause()},{passive:true});
+//  ・スマホ表示では止めるのは指で下に引いたときだけ。iPhone の Safari は、ページ自身が動かしたスクロールの scroll イベントを遅れて (古い位置のまま) 送ってくるので、
+//    距離で判断すると、流している最中に自分で止まってしまう。スクロールバーも無いので mousedown も見ない (指で押すと mousedown も起きるため)。
+//    メニューの中や、横向きの左の欄 (原文・GPU) を指で動かしたときはページが動かないので止めない
+window.addEventListener('wheel',e=>{if(e.deltaY<0&&window.scrollY>0)pause('ホイールで上へ')},{passive:true});
 window.addEventListener('keydown',e=>{if(e.target&&/^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(e.target.tagName))return;
-  if((e.key==='ArrowUp'||e.key==='PageUp'||e.key==='Home')&&window.scrollY>0)pause()});
-window.addEventListener('mousedown',e=>{if(e.clientX>=document.documentElement.clientWidth||e.clientY>=document.documentElement.clientHeight)pause()});
-let touchY=null;
-window.addEventListener('touchstart',e=>{touchY=e.touches[0].clientY},{passive:true});
-window.addEventListener('touchmove',e=>{if(touchY===null)return;if(e.touches[0].clientY-touchY>12&&window.scrollY>0)pause()},{passive:true});
+  if((e.key==='ArrowUp'||e.key==='PageUp'||e.key==='Home')&&window.scrollY>0)pause('キーで上へ')});
+window.addEventListener('mousedown',e=>{if(MOB)return;if(e.clientX>=document.documentElement.clientWidth||e.clientY>=document.documentElement.clientHeight)pause('スクロールバー')});
+let touchY=null, touching=false;
+function ownScroller(el){return !!(el&&el.closest&&(el.closest('dialog')||(MOB&&el.closest('#mtop')&&matchMedia('(orientation:landscape)').matches)))}
+window.addEventListener('touchstart',e=>{touching=true;touchY=ownScroller(e.target)?null:e.touches[0].clientY},{passive:true});
+window.addEventListener('touchmove',e=>{if(touchY===null)return;if(e.touches[0].clientY-touchY>12&&window.scrollY>0)pause('指で下に引いた')},{passive:true});
+window.addEventListener('touchend',e=>{if(!e.touches.length){touching=false;touchY=null}},{passive:true});
+window.addEventListener('touchcancel',()=>{touching=false;touchY=null},{passive:true});
 window.addEventListener('scroll',()=>{if(newest.checked)return;
   const y=window.scrollY;
   if(Math.abs(y-lastAutoY)<1.5)return;
+  // スマホ表示: 止める判断はしない (上の説明)。指で止めた後、指を離して最新の位置の近くまで戻ってきたら再開する
+  if(MOB){if(!auto.checked&&pausedByScroll&&!touching&&(Math.abs(targetY(false)-y)<=RESUME_PX||maxScroll()-y<=RESUME_PX))resume();return}
   // 正 = 目標より上を見ている、負 = 目標より下 (左列の英文の続き) を見ている。回答ブロックをまたいで待っている間は、待っている位置が目標
   const dist=(auto.checked&&holdUp?lastAutoY:targetY(false))-y;
-  if(auto.checked){if(!scrollReq&&Math.abs(dist)>PAUSE_PX)pause()}
+  if(auto.checked){if(!scrollReq&&Math.abs(dist)>PAUSE_PX)pause('スクロール')}
   else if(pausedByScroll&&(Math.abs(dist)<=RESUME_PX||maxScroll()-y<=RESUME_PX))resume()},{passive:true});
 window.addEventListener('resize',()=>scroll());
 tobottom.onclick=()=>{auto.checked=true;pausedByScroll=false;holdUp=false;updateBtn();scroll()};
@@ -2956,7 +2968,7 @@ function renderJobs(){
   const ns=jobTurns(x.pid),live=ns.filter(n=>turns[n].think.classList.contains('live'));
   for(const n of (live.length?live:ns.slice(-1))){
    const a=document.createElement('a');a.href='#t'+n;a.textContent='#'+n;
-   a.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();pause();turns[n]&&turns[n].el.scrollIntoView({block:'center'})});
+   a.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();pause('ターンへ移動');turns[n]&&turns[n].el.scrollIntoView({block:'center'})});
    tn.appendChild(a)}
   if(live.length)tn.insertAdjacentHTML('beforeend','<span class="lv"> 推測中</span>');
   row.append(cb,sw,cl,el,rq,tn);
@@ -2979,7 +2991,7 @@ function renderJobs(){
    const cl=document.createElement('span');cl.className='cl';cl.textContent=name;
    const tn=document.createElement('span');tn.className='tn';
    for(const n of o.ns){const a=document.createElement('a');a.href='#t'+n;a.textContent='#'+n;
-    a.addEventListener('click',e=>{e.preventDefault();pause();turns[n]&&turns[n].el.scrollIntoView({block:'center'})});tn.appendChild(a)}
+    a.addEventListener('click',e=>{e.preventDefault();pause('ターンへ移動');turns[n]&&turns[n].el.scrollIntoView({block:'center'})});tn.appendChild(a)}
    tn.insertAdjacentHTML('beforeend','<span class="lv"> 推測中</span>');
    const hi=document.createElement('span');hi.className='hint';hi.textContent=o.hint;hi.title=o.hint;
    row.append(ic,cl,tn,hi);joblist.appendChild(row)}}
