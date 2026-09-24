@@ -47,7 +47,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.2.0"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -2088,12 +2088,24 @@ header b{font-size:13px;color:#fff;letter-spacing:.04em}
 .dot.ok{background:var(--acc)}.dot.error{background:var(--bad)}.dot.busy{background:var(--warn)}
 header label{color:var(--bar-ink);cursor:pointer;user-select:none}
 header .sp{flex:1}
-main{padding:10px 12px 24px}
-.turn{border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow:inset 1px 1px 0 rgba(255,255,255,.05),3px 3px 0 rgba(0,0,0,.35);margin:0 0 14px;background:var(--face)}
-.turn h3{margin:0;padding:3px 8px;font-size:12px;font-weight:600;color:#e8f4f1;display:flex;gap:10px;flex-wrap:wrap;
-background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+/* 和訳の流れ (右 70% / スマホは下): 原文の欄と同じ凹んだ枠 1 つにまとめ、1 文ごとの枠は付けない。ターンの見出しは枠の中の区切り。
+   一番上に「和訳」のタイトル行 (#mjcap) を貼り付け、翻訳待ちの数を出す。見出しを押すと、そのターンの原文全体を開く */
+main{margin:10px 12px 64px 0;padding:0 12px 10px;background:#12181d;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+#mjcap{display:flex;align-items:center;gap:6px;position:sticky;top:var(--hdrh,0px);z-index:4;min-height:28px;margin:0 -12px 8px;padding:2px 12px;
+font-size:11px;color:var(--muted);background:#12181d;border-bottom:1px solid var(--hv)}
+#mjcap .cap{font-size:10px;letter-spacing:.06em;color:var(--muted);background:var(--panel);padding:0 5px;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+#mjturn{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+#mjwait{flex:none;margin-left:auto;white-space:nowrap;color:var(--acc)}
+#mjwait.on{color:var(--warn)}
+#mjwait.on::after{content:"▍";animation:bl 1s steps(2) infinite}
+.turn{margin:0 0 12px}
+.turn h3{margin:0;padding:2px 8px;font-size:12px;font-weight:400;color:#e8f4f1;display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;
+background:linear-gradient(90deg,#333e46,#242d34);border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
+.turn h3>span{flex:none;white-space:nowrap}
+.turn h3 .tstop{height:18px;flex:none}
+.turn.showthink h3{border-bottom-color:var(--acc)}
 .turn h3 .n{color:#9fe8df;font-family:"Courier New",ui-monospace,monospace}
-.turn h3 .ctx{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--en)}
+.turn h3 .ctx{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--en)}
 .turn h3 .st{font-family:"Courier New",ui-monospace,monospace}
 .turn h3 .src{background:var(--acc);color:#0b1013;padding:0 6px;font-weight:700;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .turn h3 .who{padding:0 6px;font-weight:700;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);background:#2b3a55;color:#cfe0ff}
@@ -2108,27 +2120,34 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .ctxg .fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#46b35e 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat;transition:width .25s,background-size .25s}
 .ctxg.warn{color:var(--warn)}
 .ctxg.hot .txt,.ctxg.hot{color:var(--bad)}
-.sysm{display:flex;flex-direction:column;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.sysm{display:flex;flex-direction:column;font-family:"Courier New",ui-monospace,monospace;font-size:11px;line-height:1.45;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .sysm .trow{display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none}
 .sysm .trow .tw{width:10px;flex:none;color:var(--muted)}
 .sysm .trow b{color:#fff}
 .sysm .tsub .trow{margin-left:14px}
 .sysm .tsub .tsub .trow{margin-left:28px}
 .sysm .tsub .tsub .tsub .trow{margin-left:42px}
-.sysm .leaf{display:flex;flex-direction:column;gap:2px;margin:2px 0 2px 14px}
+/* メーターは 1 行: ラベル | バー | 数値 */
+.sysm .leaf{display:flex;align-items:center;gap:6px;margin:1px 0 1px 14px}
 .sysm .tsub .tsub .leaf{margin-left:28px}
 .sysm .tsub .tsub .tsub .leaf{margin-left:42px}
-.sysm .leaf .top{display:flex;align-items:baseline;gap:6px}
-.sysm .leaf .bl{color:var(--muted);white-space:nowrap;flex:none}
-.sysm .leaf .bval{margin-left:auto;color:#cfe8e4;white-space:nowrap}
+.sysm .leaf .top{display:contents}
+.sysm .leaf .bl{color:var(--muted);white-space:nowrap;flex:none;width:72px;overflow:hidden;text-overflow:ellipsis}
+.sysm .leaf .bar{flex:1;order:1;min-width:30px}
+.sysm .leaf .bval{order:2;color:#cfe8e4;white-space:nowrap;min-width:56px;text-align:right}
 .sysm .bar{height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .sysm .bar .fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#46b35e 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat;transition:width .25s,background-size .25s} /* 3 段階カラー (.ctxg .fill と同じ) */
 .sysm .leaf.warn .bval{color:var(--warn)}
 .sysm .leaf.hot .bval{color:var(--bad)}
 /* システム情報パネル (左列。スクロールしても固定) */
-#shell{display:grid;grid-template-columns:260px 1fr}
+/* 左 30% (上下に固定): 接続 / コンテキスト / システム (GPU・CPU・RAM・ディスク) / 原文の最新行 (空いた高さいっぱい) */
+#shell{display:grid;grid-template-columns:minmax(300px,30%) minmax(0,1fr)}
 #shell>main{min-width:0;overflow-wrap:anywhere}
-#syspanel{position:sticky;top:46px;align-self:start;max-height:calc(100vh - 56px);overflow-y:auto;min-width:0;padding:10px 12px 24px}
+#syspanel{position:sticky;top:var(--hdrh,36px);align-self:start;height:calc(100vh - var(--hdrh,36px));overflow-y:auto;min-width:0;padding:10px 12px;
+display:flex;flex-direction:column}
+#syspanel .sysbox{flex:none}
+#syspanel #morig{flex:1 1 auto;min-height:140px}
+#syspanel #motext{flex:1;height:auto;min-height:0;font-size:12px;line-height:1.5}
 .sysbox{margin:0 0 10px;padding:6px 8px;font-size:12px;background:var(--face);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow:inset 1px 1px 0 rgba(255,255,255,.05)}
 .sysbox .cap{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;
 background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);padding:1px 6px;display:inline-block}
@@ -2141,14 +2160,14 @@ background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--
 .segs .note{color:var(--muted);font-size:12.5px}
 header select{background:#131a1f;color:var(--ink);padding:1px 4px;font:12px "Courier New",ui-monospace,monospace;
 border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-.cols{display:grid;grid-template-columns:1fr 3fr;gap:0}
-@media (max-width:900px){.cols{grid-template-columns:1fr}}
-.col{padding:8px 10px;min-width:0}
-.col+.col{border-left:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-@media (max-width:900px){.col+.col{border-left:none;border-top:2px solid var(--line)}}
+.cols{display:block}
+.col{padding:8px 0 0;min-width:0}
+/* 原文の列は、見出しを押したとき (.showthink) だけ訳文の上に出す。訳文の列の「日本語」の見出しは出さない */
+.cols>.col:first-child,.cols .col>.cap{display:none}
+.turn.showthink .cols>.col:first-child{display:block}
 .col .cap{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;
 background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);padding:1px 6px;display:inline-block}
-.think{white-space:pre-wrap;word-break:break-word;color:var(--en);font-size:13.5px;line-height:1.6;
+.think{white-space:pre-wrap;word-break:break-word;color:var(--en);font-size:12.5px;line-height:1.6;
 background:#12181d;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);padding:6px 8px}
 .think.live::after{content:"▍";color:var(--acc);animation:bl 1s steps(2) infinite}
 @keyframes bl{50%{opacity:0}}
@@ -2172,22 +2191,25 @@ border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .ans blockquote{margin:6px 0;padding:2px 10px;border-left:3px solid var(--line);color:var(--en)}
 .ans hr{border:none;border-top:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);margin:8px 0}
 .ans a{color:var(--acc)}
+.ans pre,.ans table{display:block;overflow-x:auto}
 .tools{margin-top:8px;font-size:12.5px;color:var(--muted)}
-.tools div{padding:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tools div{padding:2px 0;overflow-wrap:anywhere}
 .tools b{color:var(--warn);font-weight:600;margin-right:6px}
 .tools code{font-family:"Courier New",ui-monospace,monospace;color:var(--en)}
-.seg{margin:0 0 8px;padding:6px 10px;background:var(--panel);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
+/* 訳文は枠を付けず段落のように並べる。英語のまま返った文は左に黄色の線、コードは等幅で左に灰色の線、エラーは赤い字。
+   翻訳待ちの文とその後ろ (と、そのターンのツール行・回答) は出さない = 訳し終わった所までが流れる */
+.seg{margin:0 0 10px;padding:0 2px}
 .seg .src{color:var(--muted);font-size:12px;line-height:1.5}
-.seg .ja{color:var(--ja);font-size:15px}
-.seg.pending{box-shadow:inset 0 0 0 1px var(--warn);border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
-.seg.done{box-shadow:inset 0 0 0 1px var(--acc)}
+.seg .ja{color:var(--ja);font-size:clamp(16px,.3vw + 12px,18px);line-height:1.7}
+.seg.pending,.seg.pending~.seg{display:none}
+.segs:has(.seg.pending)~.tools,.segs:has(.seg.pending)~.ans{display:none}
 .seg.done .src{display:none}
 body.showsrc .seg.done .src{display:block}
-.seg.bad{box-shadow:inset 0 0 0 1px var(--bad)}.seg.bad .ja{color:var(--bad)}.seg.bad .src{display:block!important}
-.seg.untranslated{box-shadow:inset 0 0 0 1px var(--warn)}.seg.untranslated .ja{color:var(--en)}
+.seg.bad .ja{color:var(--bad)}.seg.bad .src{display:block!important}
+.seg.untranslated{padding-left:8px;border-left:3px solid var(--warn)}.seg.untranslated .ja{color:var(--en)}
 .seg.untranslated .src{display:none}
 body.showsrc .seg.untranslated .src{display:block}
-.seg.code{box-shadow:inset 0 0 0 1px var(--muted)}
+.seg.code{padding-left:8px;border-left:3px solid var(--muted)}
 .seg.code .ja{font-family:"Courier New",ui-monospace,monospace;font-size:13px;color:var(--en);white-space:pre-wrap;word-break:break-all}
 .seg.code .src{display:none!important}
 .sysnote{color:var(--muted);font-size:12px;text-align:center;margin:4px 0 14px}
@@ -2200,6 +2222,7 @@ button:active{border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 background:linear-gradient(90deg,var(--bar1),var(--bar2));color:#fff;font-weight:700}
 #tobottom:active{filter:brightness(.85)}
 header .ver{font-size:11px;font-weight:400;color:rgba(234,255,251,.72);white-space:nowrap}
+header .hlink{color:var(--bar-ink);text-decoration:none;padding:0 8px;background:#131a1f;border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
 /* GPU 行の hstop ボタン (右寄せ・リセットアイコン)。黄 = hstop (裏の作業だけ) / 赤 = hstop --all */
 .sysm .trow .hsbtns{margin-left:auto;display:inline-flex;gap:4px}
 .sysm .trow .hsbtn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:18px;padding:0;
@@ -2232,9 +2255,8 @@ color:#cfe8e4;background:#131a1f;border:2px solid;border-color:var(--sv) var(--h
 #hsdlg .db button{min-width:72px}
 #tobottom.show{display:block}
 /* 推測中のターンの停止ボタン: その推測 (1 回の要求) だけを切る。誤操作よけに 2 回押す (1 回目で赤く点滅 → 3 秒以内にもう一度)。
-   文字の直後や原文の下に置くと、生成される文字に押されて動き回り押せないので、「Thinking (原文)」の見出しの右端に置く。
-   見出しの行はヘッダーの下に貼り付く (sticky) ので、原文が長くてもそのターンが画面にある間は見えている */
-.col .caprow{display:flex;align-items:flex-start;gap:8px;position:sticky;top:var(--hdrh,36px);z-index:3;background:var(--face);margin:-8px 0 0;padding-top:8px}
+   文字に押されて動かないよう、原文の欄の見出し (#morig) と、推測中のターンの見出しの右端に置く */
+.col .caprow{display:flex;align-items:center;gap:8px}
 .tstop{display:inline-flex;align-items:center;gap:4px;margin-left:auto;padding:0 8px;height:20px;font-size:11px;line-height:1;
 white-space:nowrap;background:#4a1714;color:#ffd9d5;border-color:#8f3b33 #230605 #230605 #8f3b33}
 .tstop i{display:inline-block;width:7px;height:7px;background:#f08a82}
@@ -2243,9 +2265,9 @@ white-space:nowrap;background:#4a1714;color:#ffd9d5;border-color:#8f3b33 #230605
 .tstop.arm i{background:#fff}
 .tstop:disabled{cursor:wait;background:#3a2522;color:var(--muted)}
 @keyframes tsarm{50%{background:#7a1a14}}
-/* 黄色のボタンのダイアログを開いている間: 作業ごとの色で、その作業が推測中のターンの原文を塗る */
-.turn.jobhl .think{background:var(--jobc);box-shadow:inset 4px 0 0 var(--jobb)}
-.turn.jobhl.jobfocus .think{background:var(--jobf)}
+/* 黄色のボタンのダイアログを開いている間: 作業ごとの色で、その作業が推測中のターンの見出しを塗る */
+.turn.jobhl h3{background:var(--jobc);box-shadow:inset 5px 0 0 var(--jobb)}
+.turn.jobhl.jobfocus h3{background:var(--jobf)}
 /* 黄色のボタンのダイアログ (Win98 風)。止める前に画面のターンを見比べられるよう、右上に置いてページは暗くしない */
 #jobdlg{position:fixed;top:44px;right:16px;left:auto;bottom:auto;margin:0;z-index:40;padding:0;width:min(600px,calc(100vw - 32px));color:var(--ink);background:var(--face);
 border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow:4px 4px 0 rgba(0,0,0,.45)}
@@ -2276,7 +2298,7 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
    縦: 上に貼り付けた欄 (#mtop: タイトル・ランプ・[…] / コンテキスト / GPU / 原文の最新 3 行) + 残りの高さで和訳が流れる。
    横: 左 30% に #mtop (原文は空いた高さいっぱい)、右 70% で和訳が流れる。どちらもページ全体のスクロールで流す (自動スクロールは PC と共通)。
    和訳の流れは、ターンの枠をやめて細い見出しを挟むだけにし、原文の列と翻訳待ちの文は出さない (「翻訳中… (待ち n)」の 1 行にまとめる) */
-#mtop,#mjcap{display:none}
+#mtop{display:none}
 #tomob{display:none}
 @media (pointer:coarse){html:not(.mob) #tomob{display:inline-block}}
 html:not(.mob) header{padding-top:max(5px,env(safe-area-inset-top))}
@@ -2299,11 +2321,8 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 .mob #mgpu:empty{display:none}
 .mob #mgpu .trow{min-height:30px}
 .mob #mgpu .tsub .trow{margin-left:10px}
-.mob #mgpu .leaf{flex-direction:row;align-items:center;gap:6px;margin:0 0 1px 22px}
-.mob #mgpu .leaf .top{display:contents}
+.mob #mgpu .leaf{margin:0 0 1px 22px}
 .mob #mgpu .leaf .bl{width:44px}
-.mob #mgpu .leaf .bar{flex:1;order:1}
-.mob #mgpu .leaf .bval{order:2;margin-left:0;min-width:56px;text-align:right}
 .mob .sysm .trow .hsbtn{width:42px;height:28px}
 .mob .sysm .trow .hsbtn svg{width:16px;height:16px}
 /* ツリーを閉じた GPU は 1 行の要約 (温度・VRAM・電力) を残す */
@@ -2321,34 +2340,15 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 -webkit-mask-image:linear-gradient(transparent,#000 1.1em);mask-image:linear-gradient(transparent,#000 1.1em)}   /* 上で切れた行は薄く消す */
 #motail{white-space:pre-wrap;word-break:break-word}
 #morig.idle #motext{opacity:.5}
-/* 和訳の流れ: 原文の欄と同じ凹んだ枠 1 つにまとめ、1 文ごとの枠は付けない。ターンの見出しは枠の中の区切り。
-   一番上に「和訳」のタイトル行 (#mjcap) を貼り付け、翻訳待ちの数を出す (縦向きは上の欄のすぐ下 = --mtoph、横向きは右の欄の一番上) */
-.mob main{margin:6px 6px calc(64px + env(safe-area-inset-bottom));padding:0 8px 8px;background:#12181d;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-.mob #mjcap{display:flex;align-items:center;gap:6px;position:sticky;top:var(--mtoph,0px);z-index:4;min-height:28px;margin:0 -8px 8px;padding:2px 8px;
-font-size:11px;color:var(--muted);background:#12181d;border-bottom:1px solid var(--hv)}
-.mob #mjcap .cap{font-size:10px;letter-spacing:.06em;color:var(--muted);background:var(--panel);padding:0 5px;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-#mjturn{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-#mjwait{flex:none;margin-left:auto;white-space:nowrap;color:var(--acc)}
-#mjwait.on{color:var(--warn)}
-#mjwait.on::after{content:"▍";animation:bl 1s steps(2) infinite}
-.mob .turn{margin:0 0 10px;border:none;box-shadow:none;background:none}
-.mob .turn h3{flex-wrap:nowrap;gap:6px;padding:2px 6px;font-size:11px;font-weight:400;border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
-.mob .turn h3>span{flex:none;white-space:nowrap}
-.mob .turn h3 .ctx{flex:1 1 auto}
-.mob .turn h3 .mdl,.mob .turn h3 .ctxm{display:none}
-.mob .cols{display:block}
-.mob .cols>.col:first-child,.mob .col>.cap{display:none}
+/* 和訳の流れ (スマホ): 縦向きのタイトル行は上の欄のすぐ下 (--mtoph)、横向きは右の欄の一番上。見出しの停止ボタンは原文の欄にあるので出さない */
+.mob main{margin:6px 6px calc(64px + env(safe-area-inset-bottom));padding:0 8px 8px}
+.mob #mjcap{top:var(--mtoph,0px);margin:0 -8px 8px;padding:2px 8px}
+.mob .turn{margin:0 0 10px}
+.mob .turn h3{gap:6px;padding:2px 6px;font-size:11px}
+.mob .turn h3 .mdl,.mob .turn h3 .ctxm,.mob .turn h3 .tstop{display:none}
 .mob .col{padding:6px 0 0}
-.mob .col+.col{border:none}
-.mob .segs .seg{margin:0 0 10px;padding:0 2px;background:none;border:none;box-shadow:none}
-.mob .segs .seg.untranslated{padding-left:8px;border-left:3px solid var(--warn)}
-.mob .segs .seg.code{padding-left:8px;border-left:3px solid var(--muted)}
-.mob .seg .ja{font-size:16px;line-height:1.7}
-.mob .seg.pending,.mob .seg.pending~.seg{display:none}
-.mob .segs:has(.seg.pending)~.tools,.mob .segs:has(.seg.pending)~.ans{display:none}
-.mob .tools div{white-space:normal;overflow:visible;overflow-wrap:anywhere}
+.mob .seg .ja{font-size:16px}
 .mob .ans{font-size:15px}
-.mob .ans pre,.mob .ans table{display:block;overflow-x:auto}
 .mob .empty{padding:24px 12px}
 .mob #tobottom{right:calc(12px + env(safe-area-inset-right));bottom:calc(12px + env(safe-area-inset-bottom));padding:10px 16px;font-size:13px}
 @media (orientation:portrait){
@@ -2405,12 +2405,13 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
  <label><input type="checkbox" id="hidetask" checked> 背景タスクを隠す</label>
  <select id="srcsel"><option value="">すべての発信元</option></select>
  <label><button id="clear">画面を消去</button></label>
+ <a class="hlink" id="hdhondana" href="@@HONDANA@@" target="_blank" rel="noopener" title="本棚を新しいタブで開く">📚 本棚</a>
  <button id="tomob" type="button">📱 スマホ表示</button>
 </header>
 <div id="hstip" role="tooltip"></div>
 <dialog id="hsdlg"><div class="dt" id="hsdt"></div><pre id="hsout"></pre><div class="db"><button type="button" id="hsok">OK</button></div></dialog>
 <dialog id="jobdlg"><div class="dt">裏の作業を選んで止める (hstop)</div>
-<div class="jn">止める作業にチェックを付けてください (2 秒ごとに更新)。同じ色で塗った原文が、その作業が推測中のターンです。<br>デスクトップアプリの会話は止まりません。</div>
+<div class="jn">止める作業にチェックを付けてください (2 秒ごとに更新)。同じ色で塗った見出しが、その作業が推測中のターンです。<br>デスクトップアプリの会話は止まりません。</div>
 <div class="jl" id="joblist"></div>
 <div class="db"><button type="button" id="jobgo" disabled>選んだ作業を止める</button><button type="button" id="jobno">閉じる</button></div></dialog>
 <dialog id="msheet"><div class="msh"><div class="dt">メニュー<button type="button" id="mshx">閉じる</button></div>
@@ -2454,7 +2455,7 @@ const main=document.getElementById('main'), empty=document.getElementById('empty
 const turns={};
 // ---- スマホ表示 (html.mob。<head> の先頭で決めている) ----
 // ヘッダーの表示設定と、システムパネルの「接続」「システム (CPU・RAM・ディスク)」は […] のメニューへ、コンテキストメーターは上の欄へ移す。
-// GPU は上の欄に別に描く (renderSysCard)
+// GPU は上の欄に別に描く (renderSysCard)。PC 表示では原文の最新行の欄 (#morig) を左の列の一番下へ移す
 const MOB=document.documentElement.classList.contains('mob');
 const msheet=document.getElementById('msheet');
 let moReq=0, moStop=null, moStopN=null;   // 原文の最新行の欄 (下の「原文の最新行」の節)
@@ -2464,12 +2465,15 @@ if(MOB){
   const why=document.createElement('div');why.className='note';why.id='autowhy';view.querySelector('label').after(why);
   document.getElementById('mctx').appendChild(document.getElementById('ctxg'));
   document.querySelectorAll('#syspanel .sysbox').forEach(b=>{if(b.querySelector('#sysmc,#sdot'))sys.appendChild(b)});
-  document.querySelector('#jobdlg .jn').textContent='cron の定期実行・本棚などのアプリが頼んだ AI の作業です。止める作業にチェックを付けてください (2 秒ごとに更新)。デスクトップアプリの会話は止まりません。';
+  document.querySelector('#jobdlg .jn').textContent='cron の定期実行・本棚などのアプリが頼んだ AI の作業です。止める作業にチェックを付けてください (2 秒ごとに更新)。同じ色で塗った見出しが、その作業が推測中のターンです。デスクトップアプリの会話は止まりません。';
   document.getElementById('mmenu').onclick=()=>{if(!msheet.open)msheet.showModal()};
   document.getElementById('mshx').onclick=()=>msheet.close();
   msheet.addEventListener('click',e=>{if(e.target===msheet)msheet.close()});   // 板の外 (暗い所) を押したら閉じる
   document.getElementById('topc').onclick=e=>{e.preventDefault();try{localStorage.setItem('hh.view','pc')}catch(_){}location.href='/'};
   const hd=document.getElementById('hondana');if(!hd.getAttribute('href'))hd.remove();
+}else{
+  document.getElementById('syspanel').appendChild(document.getElementById('morig'));
+  const hd=document.getElementById('hdhondana');if(!hd.getAttribute('href'))hd.remove();
 }
 document.getElementById('tomob').onclick=()=>{try{localStorage.setItem('hh.view','m')}catch(_){}location.href='/'};
 // 接続と翻訳のランプ (PC はシステムパネル、スマホは上のバーにも同じ色で出す)
@@ -2480,14 +2484,14 @@ const showsrc=document.getElementById('showsrc'), showans=document.getElementByI
 function setHdrH(){document.documentElement.style.setProperty('--hdrh',document.querySelector('header').offsetHeight+'px')}
 setHdrH();window.addEventListener('resize',setHdrH);
 // 自動スクロールの状態 (関数は下の「自動スクロール」の節。表示設定の復元時にも scroll() が呼ばれるので先に宣言する)
-let lagMode=false, lastAutoY=-1, scrollReq=0, pausedByScroll=false, holdUp=false;
+let lastAutoY=-1, scrollReq=0, pausedByScroll=false;
 // 表示設定はブラウザに記憶する
 function pref(key,el,apply){try{const v=localStorage.getItem('hh.'+key);if(v!==null)el.checked=(v==='1')}catch(e){}apply(el.checked);
   el.addEventListener('change',()=>{try{localStorage.setItem('hh.'+key,el.checked?'1':'0')}catch(e){}apply(el.checked)})}
 pref('showsrc',showsrc,v=>{document.body.classList.toggle('showsrc',v);scroll()});
 pref('showans',showans,v=>{document.body.classList.toggle('noans',!v);scroll()});
 pref('newest',newest,v=>{const els=[...main.querySelectorAll('.turn')];els.sort((a,b)=>(Number(a.id.slice(1))-Number(b.id.slice(1)))*(v?-1:1));els.forEach(e=>main.appendChild(e));if(v)window.scrollTo(0,0);updateBtn()});
-pref('auto',auto,v=>{pausedByScroll=false;holdUp=false;updateBtn();if(v)scroll()});
+pref('auto',auto,v=>{pausedByScroll=false;updateBtn();if(v)scroll()});
 const hidetask=document.getElementById('hidetask'), srcsel=document.getElementById('srcsel');
 pref('hidetask',hidetask,v=>applyFilters());
 srcsel.onchange=()=>applyFilters();
@@ -2505,7 +2509,7 @@ if(!('wakeLock' in navigator)){wake.disabled=true;
 else{pref('wake',wake,v=>{if(v)wakeReq();else if(wakeLock){wakeLock.release();wakeLock=null}});document.addEventListener('visibilitychange',wakeReq)}
 function addSource(name){if(!name||[...srcsel.options].some(o=>o.value===name))return;const o=document.createElement('option');o.value=name;o.textContent=name;srcsel.appendChild(o)}
 function clearScreen(){for(const k in turns){turns[k].el.remove();delete turns[k]}
-  [...main.children].forEach(c=>{if(c!==empty&&c.id!=='mjcap')c.remove()});empty.style.display='';lagMode=false;moUpdate();
+  [...main.children].forEach(c=>{if(c!==empty&&c.id!=='mjcap')c.remove()});empty.style.display='';moUpdate();
   const g=document.getElementById('ctxg');g.querySelector('.txt').textContent='ctx -';setFill(g.querySelector('.fill'),0);g.className='ctxg';g.title='最新ターンのコンテキスト使用量'}
 document.getElementById('clear').onclick=clearScreen;
 function sysnote(text){const d=document.createElement('div');d.className='sysnote';d.textContent=text;main.appendChild(d)}
@@ -2516,60 +2520,22 @@ function esc(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;
 function fmt(ts){const d=new Date(ts*1000);return d.toTimeString().slice(0,8)}
 function updateBtn(){tobottom.classList.toggle('show',!newest.checked&&!auto.checked)}
 // ---- 自動スクロール ----
-// 目標: 「右列 (訳文・ツール・回答) の最新の行の下端」が画面の下端に来る位置。左列 (英文の Thinking) は追随対象にしない。
-// 翻訳待ちが 3 行以上たまっている間は「翻訳済みが途切れずに続く最後の行」(最初の翻訳待ちの行の直前) までしか進めず、
-// 待ちが 1 行以下に減るまでその状態を保つ。コマンド / コードの行は翻訳しないので届いた時点で確定し、翻訳の並列で
-// 後ろの行が先に訳し終わることもあるが、それらが最初の翻訳待ちより後ろにあっても、そこまでは飛ばない。
-// 待ちが少ないときも、最初の翻訳待ちの行 (いま翻訳中の所) がヘッダーの下から上に出ていくところまでは進めない
-// (コードの行が長いと、最新の行を追うだけで翻訳中の所が画面の上に消えてしまうため)
-// (2⇔3 行で目標が上下に揺れないようにヒステリシスを持たせる)。
-// ただし、回答ブロックや前のターンの終わりをまたいで下へ進んだ後は、翻訳待ちがたまっても上には戻さず、その位置で待つ
-// (戻すと、翻訳が追いつくたびに回答ブロックをまたいで上下に振られる)。目標がその位置より下になったら、また追随する。
-// 表示されていない要素 (非表示の背景タスク、「回答も表示」オフの回答、注記の行) は座標が取れないので数えない。
+// 目標: 表示されている最後のターンの下端 (訳し終わった所) が画面の下端に来る位置。翻訳待ちの文とその後ろは隠しているので、
+// ターンの下端を追うだけで「訳し終わった最新の所」になる。原文 (左の欄 / スマホは上の欄) は追随対象にしない。
+// 一気に飛ばさず、毎フレーム残りの 1 割弱ずつ動かして流れるように見せる (1 画面より遠いときだけ先に近くまで飛ぶ)。
+// 表示されていない要素 (非表示の背景タスク、「回答も表示」オフの回答) は座標が取れないので数えない。
 const PAD=24;        // 最新の行の下に残す余白 (px)
-const PAUSE_PX=48;   // 目標からこれ以上離れたら (上下どちらでも) ユーザーが読んでいると判断して追随を止める
 const RESUME_PX=48;  // 止まった後、目標またはページ最下部にこの距離まで戻ってきたら追随を再開する
 function shown(el){return !!el&&el.getClientRects().length>0}
 function bottomOf(el){return el.getBoundingClientRect().bottom+window.scrollY}
-function hdrH(){return document.querySelector('header').offsetHeight}
 function maxScroll(){return Math.max(0,document.documentElement.scrollHeight-window.innerHeight)}
 function visibleTurns(){return Object.keys(turns).map(Number).sort((a,b)=>a-b).map(n=>turns[n]).filter(t=>!t.el.classList.contains('hidden'))}
-function segsOf(t){return [...t.segs.children].filter(c=>c.classList.contains('seg'))}
-// スマホ表示: 翻訳待ちの文とその後ろは隠しているので、表示されている最後のターンの下端を追うだけでよい
-function targetYMob(){let best=0;for(const t of visibleTurns())if(shown(t.el))best=Math.max(best,bottomOf(t.el));
+function targetY(){let best=0;for(const t of visibleTurns())if(shown(t.el))best=Math.max(best,bottomOf(t.el));
   if(!best)return maxScroll();
-  return Math.max(0,Math.min(maxScroll(),Math.round(best-window.innerHeight+PAD+20)))}   // +20 = iPhone のホームバーの分
-function targetY(updateLag){
-  if(MOB)return targetYMob();
-  let best=0,pending=0,lastDone=null,firstPending=null;
-  for(const t of visibleTurns()){
-    const segs=segsOf(t);
-    for(const c of segs){if(c.classList.contains('pending')){if(!pending++)firstPending=c}else if(!pending)lastDone=c}
-    const ls=segs[segs.length-1];
-    if(shown(ls))best=Math.max(best,bottomOf(ls));
-    if(t.tools.children.length&&shown(t.tools))best=Math.max(best,bottomOf(t.tools));
-    if(t.ans.textContent.trim()&&shown(t.ans))best=Math.max(best,bottomOf(t.ans));
-  }
-  if(!best)return maxScroll();
-  if(updateLag){if(pending>=3)lagMode=true;else if(pending<=1)lagMode=false}
-  if(lagMode&&shown(lastDone))best=Math.min(best,bottomOf(lastDone));
-  if(shown(firstPending)){const top=firstPending.getBoundingClientRect().top+window.scrollY;
-    best=Math.min(best,Math.max(bottomOf(firstPending),top-hdrH()-PAD+window.innerHeight))}
-  return Math.max(0,Math.min(maxScroll(),Math.round(best-window.innerHeight+PAD)));
-}
-// 上へ from → to に戻すと、画面の下端が回答ブロック (または後ろにターンが続くターンの終わり) をまたぐか
-function crossesUp(from,to){
-  const lo=to+window.innerHeight+1, hi=from+window.innerHeight+1, vt=visibleTurns();
-  return vt.some((t,i)=>{
-    if(t.ans.textContent.trim()&&shown(t.ans)){const b=bottomOf(t.ans);if(b>lo&&b<=hi)return true}
-    if(i<vt.length-1){const b=bottomOf(t.el);if(b>lo&&b<=hi)return true}
-    return false})}
+  return Math.max(0,Math.min(maxScroll(),Math.round(best-window.innerHeight+PAD+(MOB?20:0))))}   // +20 = iPhone のホームバーの分
 // 描画 1 回につき 1 度だけ計算する (思考はトークン単位で届くので、そのたびに全ターンの座標を測ると重い)
-function doScroll(){scrollReq=0;if(newest.checked||!auto.checked)return;let y=targetY(true);const cur=window.scrollY;
-  if(y<cur-1){if(holdUp||crossesUp(cur,y)){holdUp=true;y=cur}}else holdUp=false;
-  if(MOB){if(animReq||Math.abs(cur-y)>=1)animTo(y);else lastAutoY=y;return}
-  lastAutoY=y;if(Math.abs(cur-y)>=1)window.scrollTo(0,y)}
-// スマホ表示は一気に飛ばさず、毎フレーム残りの 1 割弱ずつ動かして流れるように見せる (1 画面より遠いときだけ先に近くまで飛ぶ)。
+function doScroll(){scrollReq=0;if(newest.checked||!auto.checked)return;const y=targetY(),cur=window.scrollY;
+  if(animReq||Math.abs(cur-y)>=1)animTo(y);else lastAutoY=y}
 // 位置は自前で持つ (ブラウザが scrollY を整数に丸めると、少しずつ足しても進まなくなるため)
 let animY=null, animPos=0, animReq=0;
 function animTo(y){if(!animReq)animPos=window.scrollY;animY=y;if(!animReq)animReq=requestAnimationFrame(animStep)}
@@ -2583,24 +2549,23 @@ function animStep(){animReq=0;if(animY===null)return;const d=animY-animPos;
   animReq=requestAnimationFrame(animStep)}
 function scroll(){if(newest.checked||!auto.checked||scrollReq)return;scrollReq=requestAnimationFrame(doScroll)}
 // why = 止めた理由 (スマホ表示のメニューに「最後に止まった理由」として出す。実機でしか起きない止まり方を調べるため)
-function pause(why){if(newest.checked||!auto.checked)return;auto.checked=false;pausedByScroll=true;holdUp=false;if(scrollReq){cancelAnimationFrame(scrollReq);scrollReq=0}animStop();updateBtn();
+function pause(why){if(newest.checked||!auto.checked)return;auto.checked=false;pausedByScroll=true;if(scrollReq){cancelAnimationFrame(scrollReq);scrollReq=0}animStop();updateBtn();
   const w=document.getElementById('autowhy');if(w)w.textContent='最後に止まった理由: '+(why||'-')+' ('+new Date().toTimeString().slice(0,8)+')'}
 function resume(){if(auto.checked)return;auto.checked=true;pausedByScroll=false;updateBtn();scroll()}
-// ユーザーの操作の検出。
-//  ・ホイール上 / PageUp / ↑ / Home / 指で下に引く → その場で止める (scroll イベントを待つと、次の訳文で引き戻されてしまう)
-//  ・スクロールバーを掴んだ (ページ内容の外側で mousedown) → その場で止める
-//  ・scroll イベント → 目標との距離で判断 (予備)。自分で動かした直後の分と、内容が増えて再配置を待っている間の分は無視する
-//    (上の方の行の訳文が届いて高さが変わると、ブラウザが表示位置を保つために scroll イベントを起こすため)
-//  ・再開は「スクロールで止まった」場合のみ。チェックを手で外したときは、ページ末尾に来ても勝手に付け直さない
-//  ・スマホ表示では止めるのは指で下に引いたときだけ。iPhone の Safari は、ページ自身が動かしたスクロールの scroll イベントを遅れて (古い位置のまま) 送ってくるので、
-//    距離で判断すると、流している最中に自分で止まってしまう。スクロールバーも無いので mousedown も見ない (指で押すと mousedown も起きるため)。
-//    メニューの中や、横向きの左の欄 (原文・GPU) を指で動かしたときはページが動かないので止めない
-window.addEventListener('wheel',e=>{if(e.deltaY<0&&window.scrollY>0)pause('ホイールで上へ')},{passive:true});
+// ユーザーの操作の検出。止めるのは、上 (前の訳文) へ戻ろうとする操作をしたときだけ:
+//  ・ホイール上 / PageUp / ↑ / Home / 指で下に引く / スクロールバーを掴んだ (ページ内容の外側で mousedown。スマホには無いので見ない)
+//  scroll イベントの位置では止めない。ブラウザによっては (iPhone の Safari など)、ページ自身が動かしたスクロールの scroll イベントが
+//  遅れて古い位置のまま届くので、距離で判断すると流している最中に自分で止まってしまう。
+//  メニュー・ダイアログの中や、左の欄 (横向きのスマホは #mtop) の中を動かしたときは、ページが動かないので止めない。
+//  再開は「操作で止まった」場合のみで、指 / マウスを離して最新の位置かページの一番下の近くまで戻ってきたとき。
+//  チェックを手で外したときは、ページ末尾に来ても勝手に付け直さない
+let touchY=null, touching=false, mouseHeld=false;
+function ownScroller(el){return !!(el&&el.closest&&(el.closest('dialog')||(!MOB&&el.closest('#syspanel'))||(MOB&&el.closest('#mtop')&&matchMedia('(orientation:landscape)').matches)))}
+window.addEventListener('wheel',e=>{if(e.deltaY<0&&window.scrollY>0&&!ownScroller(e.target))pause('ホイールで上へ')},{passive:true});
 window.addEventListener('keydown',e=>{if(e.target&&/^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(e.target.tagName))return;
   if((e.key==='ArrowUp'||e.key==='PageUp'||e.key==='Home')&&window.scrollY>0)pause('キーで上へ')});
-window.addEventListener('mousedown',e=>{if(MOB)return;if(e.clientX>=document.documentElement.clientWidth||e.clientY>=document.documentElement.clientHeight)pause('スクロールバー')});
-let touchY=null, touching=false;
-function ownScroller(el){return !!(el&&el.closest&&(el.closest('dialog')||(MOB&&el.closest('#mtop')&&matchMedia('(orientation:landscape)').matches)))}
+window.addEventListener('mousedown',e=>{if(MOB)return;mouseHeld=true;if(e.clientX>=document.documentElement.clientWidth||e.clientY>=document.documentElement.clientHeight)pause('スクロールバー')});
+window.addEventListener('mouseup',()=>{mouseHeld=false});
 window.addEventListener('touchstart',e=>{touching=true;touchY=ownScroller(e.target)?null:e.touches[0].clientY},{passive:true});
 window.addEventListener('touchmove',e=>{if(touchY===null)return;if(e.touches[0].clientY-touchY>12&&window.scrollY>0)pause('指で下に引いた')},{passive:true});
 window.addEventListener('touchend',e=>{if(!e.touches.length){touching=false;touchY=null}},{passive:true});
@@ -2608,14 +2573,9 @@ window.addEventListener('touchcancel',()=>{touching=false;touchY=null},{passive:
 window.addEventListener('scroll',()=>{if(newest.checked)return;
   const y=window.scrollY;
   if(Math.abs(y-lastAutoY)<1.5)return;
-  // スマホ表示: 止める判断はしない (上の説明)。指で止めた後、指を離して最新の位置の近くまで戻ってきたら再開する
-  if(MOB){if(!auto.checked&&pausedByScroll&&!touching&&(Math.abs(targetY(false)-y)<=RESUME_PX||maxScroll()-y<=RESUME_PX))resume();return}
-  // 正 = 目標より上を見ている、負 = 目標より下 (左列の英文の続き) を見ている。回答ブロックをまたいで待っている間は、待っている位置が目標
-  const dist=(auto.checked&&holdUp?lastAutoY:targetY(false))-y;
-  if(auto.checked){if(!scrollReq&&Math.abs(dist)>PAUSE_PX)pause('スクロール')}
-  else if(pausedByScroll&&(Math.abs(dist)<=RESUME_PX||maxScroll()-y<=RESUME_PX))resume()},{passive:true});
+  if(!auto.checked&&pausedByScroll&&!touching&&!mouseHeld&&(Math.abs(targetY()-y)<=RESUME_PX||maxScroll()-y<=RESUME_PX))resume()},{passive:true});
 window.addEventListener('resize',()=>scroll());
-tobottom.onclick=()=>{auto.checked=true;pausedByScroll=false;holdUp=false;updateBtn();scroll()};
+tobottom.onclick=()=>{auto.checked=true;pausedByScroll=false;updateBtn();scroll()};
 function turn(n){return turns[n]}
 function onTurnStart(ev){
   empty.style.display='none';
@@ -2625,7 +2585,11 @@ function onTurnStart(ev){
    '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="tools"></div><div class="ans"></div></div></div>';
   if(newest.checked)main.insertBefore(el,main.firstElementChild.nextSibling);else main.appendChild(el);
   turns[ev.turn]={n:ev.turn,el,think:el.querySelector('.think'),ans:el.querySelector('.ans'),tools:el.querySelector('.tools'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{},ansRaw:'',ansTimer:null,job:null,stop:null};
-  turns[ev.turn].stop=stopBtn(ev.turn);el.querySelector('.caprow').appendChild(turns[ev.turn].stop);
+  // 停止ボタンは見出しの右端 (推測中の間だけ。スマホでは原文の欄のものだけ使う)。見出しを押すと、そのターンの原文全体を開く / 閉じる。
+  // 開いたときは読めるように自動スクロールを止める
+  turns[ev.turn].stop=stopBtn(ev.turn);el.querySelector('h3').appendChild(turns[ev.turn].stop);
+  const h3=el.querySelector('h3');h3.title='押すと、このターンの原文 (Thinking) 全体を開く / 閉じる';
+  h3.addEventListener('click',e=>{if(e.target.closest('button,a'))return;if(el.classList.toggle('showthink'))pause('原文を開いた');else scroll()});
   if(ev.task)turns[ev.turn].segs.innerHTML='<div class="note">背景タスク (タイトル生成・タグ生成など) のため翻訳は省略</div>';
   applyFilters();
   // 古いターンは間引く
@@ -2718,7 +2682,7 @@ function onTurnProc(ev){const t=turn(ev.turn);if(!t)return;t.job=ev.kind==='ones
 // 出すのは、表示の絞り込み (背景タスク・発信元) を通ったターンのうち推測中でいちばん新しいもの。推測中が無ければ最後のターンを薄く出す。
 // 推測中なら、そのターンの停止ボタン (2 回押す) を欄の右上に置く。縦向きは欄を押すと 3 行 ⇔ 10 行を切り替える
 const MO_TAIL=4000;   // 欄に渡す末尾の文字数 (横向きで欄が高いときも足りる量。あふれた上の方は隠れる)
-function moUpdate(){if(!MOB||moReq)return;moReq=requestAnimationFrame(moRender)}
+function moUpdate(){if(moReq)return;moReq=requestAnimationFrame(moRender)}
 function moRender(){moReq=0;
   let live=null,last=null;for(const t of visibleTurns()){last=t;if(t.think.classList.contains('live'))live=t}
   mjRender();
@@ -2769,9 +2733,9 @@ function bfmt(v){return v===null?'-':v.toFixed(1)}
 // ツリー表示の折りたたみ状態 (2秒毎の再描画を跨いで保持)
 const sysTree={srv:true,dsk:true,gpu:true};
 const gpuTree={}; // 各 GPU ノード ('gpu0','gpu1',...)
-// スマホ表示では GPU の開閉を覚えておく (縦向きで閉じて和訳を広く見る使い方のため)
-if(MOB)try{const v=JSON.parse(localStorage.getItem('hh.mtree')||'null');if(v){if(typeof v.gpu==='boolean')sysTree.gpu=v.gpu;Object.assign(gpuTree,v.g||{})}}catch(e){}
-function saveTree(){if(MOB)try{localStorage.setItem('hh.mtree',JSON.stringify({gpu:sysTree.gpu,g:gpuTree}))}catch(e){}}
+// GPU の開閉を覚えておく (スマホの縦向きで閉じて和訳を広く見る使い方のため。PC も同じ)
+try{const v=JSON.parse(localStorage.getItem('hh.mtree')||'null');if(v){if(typeof v.gpu==='boolean')sysTree.gpu=v.gpu;Object.assign(gpuTree,v.g||{})}}catch(e){}
+function saveTree(){try{localStorage.setItem('hh.mtree',JSON.stringify({gpu:sysTree.gpu,g:gpuTree}))}catch(e){}}
 let lastSysmon=null, lastGpus=null;
 // ラベル先頭のアイコン (実物風の固定配色: 緑=基板 / 金=端子・ピン / 銀=金属 / 黒=チップ。切欠きは背景色 #131a1f で抜く)
 // ---- CPU: LGA パッケージ (緑基板 + 銀の IHS + 金ピン、IHS は Win98 風ベベル) ----
@@ -2862,10 +2826,10 @@ function gpuNode(g,i){
  const tw=document.createElement('span');tw.className='tw';tw.textContent=gpuTree[key]?'▼':'▶';
  const nm=document.createElement('b');nm.textContent=g.label||g.name;
  el.appendChild(tw);el.appendChild(nm);
- if(MOB&&!gpuTree[key])el.appendChild(gpuSum(g));
+ if(!gpuTree[key])el.appendChild(gpuSum(g));
  el.addEventListener('click',()=>{gpuTree[key]=!gpuTree[key];saveTree();renderSysCard()});
  return el}
-// スマホ表示で閉じた GPU の 1 行要約: 温度・VRAM・電力 (バーと同じ境目で黄 / 赤)
+// 閉じた GPU の 1 行要約: 温度・VRAM・電力 (バーと同じ境目で黄 / 赤)
 function gpuSum(g){
  const sp=document.createElement('span');sp.className='gsum';
  const mp=g.max_power||250;
@@ -3029,7 +2993,7 @@ function hstopBtns(){
  w.appendChild(hstopBtn('jobs'));w.appendChild(hstopBtn('all'));
  return w}
 // GPU の枝 (GPU 行 + 黄・赤のボタン + カードごとの温度・VRAM・電力)。top = スマホ表示の上の欄に単独で置く (字下げを 1 段減らす)。
-// スマホ表示で GPU 行を閉じたときは、カードごとの 1 行要約を残す
+// GPU 行を閉じたときは、カードごとの 1 行要約を残す
 function gpuSection(top){
  if(!Array.isArray(lastGpus)||!lastGpus.length)return null;
  const gw=document.createElement('div');gw.className=top?'':'tsub';
@@ -3046,7 +3010,7 @@ function gpuSection(top){
     const tp=(g.temp/90*100);
     gb.appendChild(sysleaf('🌡️ 温度',g.temp+'℃',tp,75/90*100,85/90*100));
     const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
-    gb.appendChild(sysleaf(MOB?IC_DDR:IC_DDR+' VRAM',mv,g.mem_total?g.mem_used/g.mem_total*100:null,95,null,MOB?'VRAM':''));   // スマホはアイコンだけ (メーターを長く)
+    gb.appendChild(sysleaf(IC_DDR,mv,g.mem_total?g.mem_used/g.mem_total*100:null,95,null,'VRAM'));   // アイコンだけ (メーターを長く)
     const mp=g.max_power||250;
     gb.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
     gwrap.appendChild(gb);
@@ -3054,7 +3018,7 @@ function gpuSection(top){
    body.appendChild(gwrap);
   });
   gw.appendChild(body);
- }else if(MOB){
+ }else{
   lastGpus.forEach(g=>{const l=document.createElement('div');l.className='gline';
    const nm=document.createElement('b');nm.textContent=g.label||g.name;l.append(nm,gpuSum(g));gw.appendChild(l)});
  }
