@@ -47,7 +47,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -136,7 +136,8 @@ class Config:
             "proxy": {"listen_host": "127.0.0.1", "listen_port": "8081",
                       "upstream": "http://127.0.0.1:8080", "timeout": "600"},
             "ui": {"listen_host": "0.0.0.0", "listen_port": "8765",
-                   "replay_turns": "5", "show_answer": "true", "ctx_limit": "200000"},
+                   "replay_turns": "5", "show_answer": "true", "ctx_limit": "200000",
+                   "hondana_url": "http://llmsv/hondana"},
             "translator": {"engine": "openai", "url": "http://192.168.1.8:8082/v1",
                            "model": "honyaku", "api_key": "", "workers": "3",
                            "timeout": "120", "temperature": "0.2",
@@ -2038,8 +2039,22 @@ class ProxyHandler(BaseHTTPRequestHandler):
 # --------------------------------------------------------------------------
 INDEX_HTML = r"""<!doctype html>
 <html lang="ja"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Hermes Honyaku</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Honyaku">
+<meta name="theme-color" content="#0b4f4a">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<script>
+// スマホ表示 (html.mob) にするか。描画前に決めて、PC 表示が一瞬出るのを防ぐ。
+// /m = いつでもスマホ表示。/ = メニューで選んだ表示 (hh.view)、選んでいなければ指で操作する iPhone 程度の画面ならスマホ表示
+(function(){var m=/^\/m\/?$/.test(location.pathname),v=null;try{v=localStorage.getItem('hh.view')}catch(e){}
+if(!m&&v!=='pc'&&(v==='m'||matchMedia('(pointer:coarse) and (max-width:950px) and (max-height:950px)').matches))m=true;
+if(m)document.documentElement.classList.add('mob')})();
+</script>
 <style>
 /* Win98 クラシック風 (ダークモード) */
 :root{
@@ -2257,6 +2272,115 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
 #jobdlg .db{display:flex;justify-content:flex-end;gap:8px;padding:0 10px 10px}
 #jobdlg .db button{min-width:72px}
 #jobdlg .db button:disabled{color:var(--muted);cursor:default}
+/* ===== スマホ表示 (html.mob): iPhone 15 の縦 / 横 =====
+   縦: 上に貼り付けた欄 (#mtop: タイトル・ランプ・[…] / コンテキスト / GPU / 原文の最新 3 行) + 残りの高さで和訳が流れる。
+   横: 左 30% に #mtop (原文は空いた高さいっぱい)、右 70% で和訳が流れる。どちらもページ全体のスクロールで流す (自動スクロールは PC と共通)。
+   和訳の流れは、ターンの枠をやめて細い見出しを挟むだけにし、原文の列と翻訳待ちの文は出さない (「翻訳中… (待ち n)」の 1 行にまとめる) */
+#mtop,.mwait{display:none}
+#tomob{display:none}
+@media (pointer:coarse){html:not(.mob) #tomob{display:inline-block}}
+html:not(.mob) header{padding-top:max(5px,env(safe-area-inset-top))}
+html:not(.mob) body{padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right)}
+.mob body{-webkit-text-size-adjust:100%}
+.mob header,.mob #syspanel{display:none}
+.mob #shell{display:block;padding:0 env(safe-area-inset-right) 0 env(safe-area-inset-left)}
+.mob #mtop{display:flex;flex-direction:column;gap:4px;position:sticky;top:0;z-index:5;padding:calc(env(safe-area-inset-top) + 4px) 6px 5px;
+background:var(--bg);border-bottom:2px solid;border-color:var(--sv)}
+#mbar{display:flex;align-items:center;gap:6px;padding:2px 2px 2px 8px;font-size:11px;color:var(--bar-ink);
+background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
+#mbar b{font-size:13px;color:#fff;white-space:nowrap}
+#mbar .sp{flex:1}
+#mbar .mlamp{display:inline-flex;align-items:center;white-space:nowrap}
+#mbar .mlamp .dot{margin:0 3px 0 6px}
+#mmenu{min-width:48px;height:30px;padding:0 10px;font-size:15px;font-weight:700;line-height:1;letter-spacing:.1em}
+.mob #mctx .ctxg{display:flex;width:100%}
+.mob #mctx .ctxg .bar{flex:1;width:auto}
+.mob #mgpu{padding:3px 6px;flex:none;line-height:1.45}
+.mob #mgpu:empty{display:none}
+.mob #mgpu .trow{min-height:30px}
+.mob #mgpu .tsub .trow{margin-left:10px}
+.mob #mgpu .leaf{flex-direction:row;align-items:center;gap:6px;margin:0 0 1px 22px}
+.mob #mgpu .leaf .top{display:contents}
+.mob #mgpu .leaf .bl{width:62px}
+.mob #mgpu .leaf .bar{flex:1;order:1}
+.mob #mgpu .leaf .bval{order:2;margin-left:0;min-width:74px;text-align:right}
+.mob .sysm .trow .hsbtn{width:42px;height:28px}
+.mob .sysm .trow .hsbtn svg{width:16px;height:16px}
+/* ツリーを閉じた GPU は 1 行の要約 (温度・VRAM・電力) を残す */
+.sysm .gsum{margin-left:auto;display:inline-flex;gap:9px;white-space:nowrap;color:#cfe8e4}
+.sysm .gsum .warn{color:var(--warn)}.sysm .gsum .hot{color:var(--bad)}
+.sysm .gline{display:flex;align-items:center;gap:6px;margin-left:10px;min-height:22px}
+.sysm .gline b{color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 原文の最新行。文字が増えても下揃えで、上にあふれた分は隠す */
+#morig{display:flex;flex-direction:column;min-height:0;padding:2px 6px 4px;background:#12181d;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+#morig .mocap{display:flex;align-items:center;gap:6px;min-height:26px;font-size:11px;color:var(--muted);flex:none}
+#morig .mocap .cap{font-size:10px;letter-spacing:.06em;color:var(--muted);background:var(--panel);padding:0 5px;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+#moturn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#morig .tstop{height:26px;padding:0 10px;font-size:12px}
+#motext{height:calc(3 * 1.45em);font-size:11.5px;line-height:1.45;color:var(--en);overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;
+-webkit-mask-image:linear-gradient(transparent,#000 1.1em);mask-image:linear-gradient(transparent,#000 1.1em)}   /* 上で切れた行は薄く消す */
+#motail{white-space:pre-wrap;word-break:break-word}
+#morig.idle #motext{opacity:.5}
+/* 和訳の流れ */
+.mob main{padding:6px 6px calc(64px + env(safe-area-inset-bottom))}
+.mob .turn{margin:0 0 10px;border:none;box-shadow:none;background:none}
+.mob .turn h3{flex-wrap:nowrap;gap:6px;padding:2px 6px;font-size:11px;font-weight:400;border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
+.mob .turn h3>span{flex:none;white-space:nowrap}
+.mob .turn h3 .ctx{flex:1 1 auto}
+.mob .turn h3 .mdl,.mob .turn h3 .ctxm{display:none}
+.mob .cols{display:block}
+.mob .cols>.col:first-child,.mob .col>.cap{display:none}
+.mob .col{padding:6px 0 0}
+.mob .col+.col{border:none}
+.mob .seg{margin:0 0 6px;padding:5px 8px}
+.mob .seg .ja{font-size:16px;line-height:1.7}
+.mob .seg.pending,.mob .seg.pending~.seg{display:none}
+.mob .segs:has(.seg.pending)~.tools,.mob .segs:has(.seg.pending)~.ans{display:none}
+.mob .mwait.on{display:block;margin:0 0 6px;padding:3px 8px;font-size:12px;color:var(--warn);border-left:3px solid var(--warn)}
+.mob .mwait.on::after{content:"▍";animation:bl 1s steps(2) infinite}
+.mob .tools div{white-space:normal;overflow:visible;overflow-wrap:anywhere}
+.mob .ans{font-size:15px}
+.mob .ans pre,.mob .ans table{display:block;overflow-x:auto}
+.mob .empty{padding:24px 12px}
+.mob #tobottom{right:calc(12px + env(safe-area-inset-right));bottom:calc(12px + env(safe-area-inset-bottom));padding:10px 16px;font-size:13px}
+@media (orientation:portrait){
+ #morig.big #motext{height:calc(10 * 1.45em)}
+}
+@media (orientation:landscape){
+ .mob #shell{display:grid;grid-template-columns:minmax(250px,3fr) minmax(0,7fr)}
+ .mob #mbar .mfull{display:none}
+ .mob #mgpu .tsub .trow{min-height:24px}
+ .mob #mtop{height:100vh;height:100dvh;overflow-y:auto;padding-bottom:max(5px,env(safe-area-inset-bottom));border-bottom:none;border-right:2px solid var(--sv)}
+ .mob #morig{flex:1 1 auto;min-height:96px}
+ .mob #motext{flex:1;height:auto;min-height:0}
+ .mob main{padding-left:8px;padding-right:8px}
+}
+/* […] のメニュー (下からせり上がる板) */
+#msheet{inset:auto 0 0 0;margin:0 auto;padding:0;width:min(640px,100%);max-width:100%;max-height:88vh;max-height:88dvh;color:var(--ink);background:var(--face);
+border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow:0 -4px 0 rgba(0,0,0,.35)}
+#msheet::backdrop{background:rgba(0,0,0,.5)}
+#msheet .msh{display:flex;flex-direction:column;max-height:88vh;max-height:88dvh}
+#msheet .dt{display:flex;align-items:center;padding:3px 4px 3px 10px;font-size:13px;font-weight:700;color:#fff;background:linear-gradient(90deg,var(--bar1),var(--bar2));flex:none}
+#msheet .dt button{margin-left:auto;height:32px;padding:0 14px}
+#msheet .msb{overflow-y:auto;padding:10px 10px calc(12px + env(safe-area-inset-bottom));-webkit-overflow-scrolling:touch}
+#msheet .sysbox .row{white-space:normal}
+#msheet .sysm .trow{min-height:30px}
+.mview label,.mother label{display:flex;align-items:center;gap:10px;min-height:40px;font-size:14px;cursor:pointer}
+.mview input[type=checkbox],.mother input[type=checkbox]{width:20px;height:20px;flex:none}
+.mview select{width:100%;height:38px;margin:4px 0;font-size:14px;background:#131a1f;color:var(--ink);border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.mview button,.mother a{display:flex;align-items:center;min-height:40px;padding:0 12px;font-size:14px}
+.mview label:has(#clear){min-height:0;margin-top:6px}
+.mother a{margin-top:6px;color:var(--ink);text-decoration:none;background:var(--face);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
+.mother a:active{border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.mother .note{font-size:11.5px;color:var(--muted);margin:-4px 0 4px 30px}
+.mver{font-size:11px;color:var(--muted);text-align:right;padding:2px 2px 0}
+/* 黄色のボタンの一覧: スマホでは下からの板にする (塗り分けた原文を見比べる機能は省く) */
+.mob #jobdlg{top:auto;bottom:0;left:0;right:0;width:100%;padding-bottom:env(safe-area-inset-bottom)}
+.mob #jobdlg .jl{max-height:45vh;max-height:45dvh}
+.mob #jobdlg .jr{padding:9px 8px;flex-wrap:wrap}
+.mob #jobdlg .jr input{width:20px;height:20px}
+.mob #jobdlg .db button{min-height:40px;padding:0 12px}
+.mob #hsdlg .db button{min-height:40px}
 ::-webkit-scrollbar{width:14px;height:14px}
 ::-webkit-scrollbar-track{background:repeating-conic-gradient(#2b353d 0% 25%,#1c242b 0% 50%) 0 0/4px 4px}
 ::-webkit-scrollbar-thumb{background:var(--face);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
@@ -2271,6 +2395,7 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
  <label><input type="checkbox" id="hidetask" checked> 背景タスクを隠す</label>
  <select id="srcsel"><option value="">すべての発信元</option></select>
  <label><button id="clear">画面を消去</button></label>
+ <button id="tomob" type="button">📱 スマホ表示</button>
 </header>
 <div id="hstip" role="tooltip"></div>
 <dialog id="hsdlg"><div class="dt" id="hsdt"></div><pre id="hsout"></pre><div class="db"><button type="button" id="hsok">OK</button></div></dialog>
@@ -2278,8 +2403,27 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
 <div class="jn">止める作業にチェックを付けてください (2 秒ごとに更新)。同じ色で塗った原文が、その作業が推測中のターンです。<br>デスクトップアプリの会話は止まりません。</div>
 <div class="jl" id="joblist"></div>
 <div class="db"><button type="button" id="jobgo" disabled>選んだ作業を止める</button><button type="button" id="jobno">閉じる</button></div></dialog>
+<dialog id="msheet"><div class="msh"><div class="dt">メニュー<button type="button" id="mshx">閉じる</button></div>
+<div class="msb">
+ <div id="mshsys"></div>
+ <div class="sysbox"><span class="cap">表示</span><div class="mview" id="mshview"></div></div>
+ <div class="sysbox mother"><span class="cap">その他</span>
+  <label><input type="checkbox" id="wake"> 画面を消さない</label><div class="note" id="wakenote"></div>
+  <a id="hondana" href="@@HONDANA@@" target="_blank" rel="noopener">📚 本棚を開く (新しいタブ)</a>
+  <a id="topc" href="/">🖥️ PC 表示に切り替える</a>
+ </div>
+ <div class="mver" title="@@VER_TITLE@@">@@VER_LABEL@@</div>
+</div></div></dialog>
 <button id="tobottom" type="button">↓ 最新へ (自動スクロール再開)</button>
 <div id="shell">
+<div id="mtop">
+ <div id="mbar"><b><span class="mfull">Hermes </span>Honyaku</b>
+  <span class="mlamp" title="中継サーバーとの接続 / 翻訳サーバーの状態"><span id="msdot" class="dot"></span>中継<span id="mtdot" class="dot"></span>翻訳<span id="mtq"></span></span>
+  <span class="sp"></span><button id="mmenu" type="button" aria-label="メニュー">…</button></div>
+ <div id="mctx"></div>
+ <div id="mgpu" class="sysm"></div>
+ <div id="morig"><div class="mocap"><span class="cap">原文</span><span id="moturn"></span></div><div id="motext"><div id="motail"></div></div></div>
+</div>
 <aside id="syspanel">
  <div class="sysbox"><span class="cap">接続</span>
   <div class="row"><span id="sdot" class="dot"></span><span id="stext">接続中…</span></div>
@@ -2298,6 +2442,27 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
 (function(){
 const main=document.getElementById('main'), empty=document.getElementById('empty');
 const turns={};
+// ---- スマホ表示 (html.mob。<head> の先頭で決めている) ----
+// ヘッダーの表示設定と、システムパネルの「接続」「システム (CPU・RAM・ディスク)」は […] のメニューへ、コンテキストメーターは上の欄へ移す。
+// GPU は上の欄に別に描く (renderSysCard)
+const MOB=document.documentElement.classList.contains('mob');
+const msheet=document.getElementById('msheet');
+let moReq=0, moStop=null, moStopN=null;   // 原文の最新行の欄 (下の「原文の最新行」の節)
+if(MOB){
+  const view=document.getElementById('mshview'), sys=document.getElementById('mshsys');
+  document.querySelectorAll('header label, header select').forEach(e=>view.appendChild(e));
+  document.getElementById('mctx').appendChild(document.getElementById('ctxg'));
+  document.querySelectorAll('#syspanel .sysbox').forEach(b=>{if(b.querySelector('#sysmc,#sdot'))sys.appendChild(b)});
+  document.querySelector('#jobdlg .jn').textContent='cron の定期実行・本棚などのアプリが頼んだ AI の作業です。止める作業にチェックを付けてください (2 秒ごとに更新)。デスクトップアプリの会話は止まりません。';
+  document.getElementById('mmenu').onclick=()=>{if(!msheet.open)msheet.showModal()};
+  document.getElementById('mshx').onclick=()=>msheet.close();
+  msheet.addEventListener('click',e=>{if(e.target===msheet)msheet.close()});   // 板の外 (暗い所) を押したら閉じる
+  document.getElementById('topc').onclick=e=>{e.preventDefault();try{localStorage.setItem('hh.view','pc')}catch(_){}location.href='/'};
+  const hd=document.getElementById('hondana');if(!hd.getAttribute('href'))hd.remove();
+}
+document.getElementById('tomob').onclick=()=>{try{localStorage.setItem('hh.view','m')}catch(_){}location.href='/'};
+// 接続と翻訳のランプ (PC はシステムパネル、スマホは上のバーにも同じ色で出す)
+function lamp(ids,cls){for(const id of ids){const e=document.getElementById(id);if(e)e.className='dot '+cls}}
 const auto=document.getElementById('auto'), newest=document.getElementById('newest'), tobottom=document.getElementById('tobottom');
 const showsrc=document.getElementById('showsrc'), showans=document.getElementById('showans');
 // 見出しの行 (停止ボタン) をヘッダーのすぐ下に貼り付けるため、ヘッダーの高さを CSS に渡す (幅が狭いと 2 段になる)
@@ -2316,10 +2481,20 @@ const hidetask=document.getElementById('hidetask'), srcsel=document.getElementBy
 pref('hidetask',hidetask,v=>applyFilters());
 srcsel.onchange=()=>applyFilters();
 function applyFilters(){for(const k in turns){const el=turns[k].el;
-  el.classList.toggle('hidden',(hidetask.checked&&el.classList.contains('task'))||(srcsel.value&&el.dataset.source!==srcsel.value))}scroll()}
+  el.classList.toggle('hidden',(hidetask.checked&&el.classList.contains('task'))||(srcsel.value&&el.dataset.source!==srcsel.value))}scroll();moUpdate()}
+// 画面を消さない (Screen Wake Lock)。iPhone の Safari では https か localhost で開いたときだけ使える。
+// 画面を切り替えると解除されるので、戻ってきたら取り直す。押した直後でないと断られることがあるので、そのときは次に画面を触ったときに取り直す
+const wake=document.getElementById('wake'), wakenote=document.getElementById('wakenote');
+let wakeLock=null;
+async function wakeReq(){if(!wake.checked||wakeLock||document.visibilityState!=='visible')return;
+  try{wakeLock=await navigator.wakeLock.request('screen');wakenote.textContent='';wakeLock.addEventListener('release',()=>{wakeLock=null})}
+  catch(e){wakenote.textContent='画面を触ると有効になります';document.addEventListener('touchend',wakeReq,{once:true})}}
+if(!('wakeLock' in navigator)){wake.disabled=true;
+  wakenote.textContent=window.isSecureContext?'このブラウザでは使えません':'http:// で開いているため使えません (https で開いたときだけ使えます)。iPhone の「設定 > 画面表示と明るさ > 自動ロック」で代用してください'}
+else{pref('wake',wake,v=>{if(v)wakeReq();else if(wakeLock){wakeLock.release();wakeLock=null}});document.addEventListener('visibilitychange',wakeReq)}
 function addSource(name){if(!name||[...srcsel.options].some(o=>o.value===name))return;const o=document.createElement('option');o.value=name;o.textContent=name;srcsel.appendChild(o)}
 function clearScreen(){for(const k in turns){turns[k].el.remove();delete turns[k]}
-  [...main.children].forEach(c=>{if(c!==empty)c.remove()});empty.style.display='';lagMode=false;
+  [...main.children].forEach(c=>{if(c!==empty)c.remove()});empty.style.display='';lagMode=false;moUpdate();
   const g=document.getElementById('ctxg');g.querySelector('.txt').textContent='ctx -';setFill(g.querySelector('.fill'),0);g.className='ctxg';g.title='最新ターンのコンテキスト使用量'}
 document.getElementById('clear').onclick=clearScreen;
 function sysnote(text){const d=document.createElement('div');d.className='sysnote';d.textContent=text;main.appendChild(d)}
@@ -2349,7 +2524,12 @@ function hdrH(){return document.querySelector('header').offsetHeight}
 function maxScroll(){return Math.max(0,document.documentElement.scrollHeight-window.innerHeight)}
 function visibleTurns(){return Object.keys(turns).map(Number).sort((a,b)=>a-b).map(n=>turns[n]).filter(t=>!t.el.classList.contains('hidden'))}
 function segsOf(t){return [...t.segs.children].filter(c=>c.classList.contains('seg'))}
+// スマホ表示: 翻訳待ちの文とその後ろは隠しているので、表示されている最後のターンの下端を追うだけでよい
+function targetYMob(){let best=0;for(const t of visibleTurns())if(shown(t.el))best=Math.max(best,bottomOf(t.el));
+  if(!best)return maxScroll();
+  return Math.max(0,Math.min(maxScroll(),Math.round(best-window.innerHeight+PAD+20)))}   // +20 = iPhone のホームバーの分
 function targetY(updateLag){
+  if(MOB)return targetYMob();
   let best=0,pending=0,lastDone=null,firstPending=null;
   for(const t of visibleTurns()){
     const segs=segsOf(t);
@@ -2376,9 +2556,22 @@ function crossesUp(from,to){
 // 描画 1 回につき 1 度だけ計算する (思考はトークン単位で届くので、そのたびに全ターンの座標を測ると重い)
 function doScroll(){scrollReq=0;if(newest.checked||!auto.checked)return;let y=targetY(true);const cur=window.scrollY;
   if(y<cur-1){if(holdUp||crossesUp(cur,y)){holdUp=true;y=cur}}else holdUp=false;
+  if(MOB){if(animReq||Math.abs(cur-y)>=1)animTo(y);else lastAutoY=y;return}
   lastAutoY=y;if(Math.abs(cur-y)>=1)window.scrollTo(0,y)}
+// スマホ表示は一気に飛ばさず、毎フレーム残りの 1 割弱ずつ動かして流れるように見せる (1 画面より遠いときだけ先に近くまで飛ぶ)。
+// 位置は自前で持つ (ブラウザが scrollY を整数に丸めると、少しずつ足しても進まなくなるため)
+let animY=null, animPos=0, animReq=0;
+function animTo(y){if(!animReq)animPos=window.scrollY;animY=y;if(!animReq)animReq=requestAnimationFrame(animStep)}
+function animStop(){animY=null;if(animReq){cancelAnimationFrame(animReq);animReq=0}}
+function animStep(){animReq=0;if(animY===null)return;const d=animY-animPos;
+  if(Math.abs(d)<=1)animPos=animY;
+  else if(Math.abs(d)>window.innerHeight)animPos=animY-Math.sign(d)*window.innerHeight*0.3;
+  else animPos+=Math.sign(d)*Math.max(1,Math.abs(d)*0.08);
+  const y=Math.round(animPos);lastAutoY=y;window.scrollTo(0,y);
+  if(animPos===animY){animY=null;return}
+  animReq=requestAnimationFrame(animStep)}
 function scroll(){if(newest.checked||!auto.checked||scrollReq)return;scrollReq=requestAnimationFrame(doScroll)}
-function pause(){if(newest.checked||!auto.checked)return;auto.checked=false;pausedByScroll=true;holdUp=false;if(scrollReq){cancelAnimationFrame(scrollReq);scrollReq=0}updateBtn()}
+function pause(){if(newest.checked||!auto.checked)return;auto.checked=false;pausedByScroll=true;holdUp=false;if(scrollReq){cancelAnimationFrame(scrollReq);scrollReq=0}animStop();updateBtn()}
 function resume(){if(auto.checked)return;auto.checked=true;pausedByScroll=false;updateBtn();scroll()}
 // ユーザーの操作の検出。
 //  ・ホイール上 / PageUp / ↑ / Home / 指で下に引く → その場で止める (scroll イベントを待つと、次の訳文で引き戻されてしまう)
@@ -2406,21 +2599,21 @@ function turn(n){return turns[n]}
 function onTurnStart(ev){
   empty.style.display='none';
   const el=document.createElement('section');el.className='turn'+(ev.task?' task':'');el.id='t'+ev.turn;el.dataset.source=ev.source||'';addSource(ev.source);
-  el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span>'+fmt(ev.ts)+'</span>'+(ev.source?'<span class="src">'+esc(ev.source)+'</span>':'')+(ev.task?'<span class="tk" title="最後のメッセージが ### Task: で始まる要求 (タイトル生成・タグ生成など)">背景タスク</span>':'')+'<span>'+esc(ev.model||'')+'</span><span class="ctxm"></span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
+  el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span class="tm">'+fmt(ev.ts)+'</span>'+(ev.source?'<span class="src">'+esc(ev.source)+'</span>':'')+(ev.task?'<span class="tk" title="最後のメッセージが ### Task: で始まる要求 (タイトル生成・タグ生成など)">背景タスク</span>':'')+'<span class="mdl">'+esc(ev.model||'')+'</span><span class="ctxm"></span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
    '<div class="cols"><div class="col"><div class="caprow"><div class="cap">Thinking (原文)</div></div><div class="think live"></div></div>'+
-   '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="tools"></div><div class="ans"></div></div></div>';
+   '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="mwait"></div><div class="tools"></div><div class="ans"></div></div></div>';
   if(newest.checked)main.insertBefore(el,main.firstElementChild.nextSibling);else main.appendChild(el);
-  turns[ev.turn]={el,think:el.querySelector('.think'),ans:el.querySelector('.ans'),tools:el.querySelector('.tools'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{},ansRaw:'',ansTimer:null,job:null,stop:null};
+  turns[ev.turn]={n:ev.turn,mw:el.querySelector('.mwait'),el,think:el.querySelector('.think'),ans:el.querySelector('.ans'),tools:el.querySelector('.tools'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{},ansRaw:'',ansTimer:null,job:null,stop:null};
   turns[ev.turn].stop=stopBtn(ev.turn);el.querySelector('.caprow').appendChild(turns[ev.turn].stop);
   if(ev.task)turns[ev.turn].segs.innerHTML='<div class="note">背景タスク (タイトル生成・タグ生成など) のため翻訳は省略</div>';
   applyFilters();
   // 古いターンは間引く
   const keys=Object.keys(turns).map(Number).sort((a,b)=>a-b);
   while(keys.length>40){const k=keys.shift();turns[k].el.remove();delete turns[k]}
-  scroll();
+  scroll();moUpdate();
 }
 function onThink(ev){const t=turn(ev.turn);if(!t)return;const l=t.think.lastChild;
-  if(l&&l.nodeType===3)l.appendData(ev.text);else t.think.appendChild(document.createTextNode(ev.text));scroll()}
+  if(l&&l.nodeType===3)l.appendData(ev.text);else t.think.appendChild(document.createTextNode(ev.text));scroll();moUpdate()}
 function onTurnCtx(ev){const t=turn(ev.turn);if(!t)return;const el=t.el.querySelector('.ctxm');if(!el)return;
   const lim=ev.ctx_limit||0;const k=v=>v>=1000?(v/1000).toFixed(1).replace(/\.0$/,'')+'k':v;
   el.textContent='ctx '+k(ev.tokens)+(lim?'/'+k(lim):'')+(ev.exact?'':'~')+' · max_out '+k(ev.max_tokens||0);
@@ -2472,7 +2665,10 @@ function onSeg(ev){const t=turn(ev.turn);if(!t)return;
     let after=null;for(const c of t.segs.children){if(Number(c.dataset.seg)<ev.seg)after=c}
     if(after)after.after(s);else t.segs.prepend(s);
     t.segEls[ev.seg]=s;}
-  s.querySelector('.src').textContent=ev.src;scroll()}
+  s.querySelector('.src').textContent=ev.src;mwUpdate(t);scroll()}
+// スマホ表示: 翻訳待ちの文は隠して「翻訳中… (待ち n)」の 1 行にまとめる
+function mwUpdate(t){if(!MOB)return;const n=t.segs.querySelectorAll('.seg.pending').length;
+  t.mw.classList.toggle('on',n>0);t.mw.textContent=n?'翻訳中… (待ち '+n+')':''}
 function onJa(ev){const t=turn(ev.turn);if(!t)return;let s=t.segEls[ev.seg];if(!s){onSeg({turn:ev.turn,seg:ev.seg,src:''});s=t.segEls[ev.seg]}
   // 翻訳モデルが英語で返した (how='en') / 次のターンが始まって中断した (how='interrupted') ときは原文をそのまま黄色で表示する
   const untr=ev.how==='en'||ev.how==='interrupted';
@@ -2483,13 +2679,14 @@ function onJa(ev){const t=turn(ev.turn);if(!t)return;let s=t.segEls[ev.seg];if(!
   else if(ev.how==='suspect')s.title='訳文が原文より極端に長いため、翻訳モデルが作文している可能性があります (原文を併記)';
   else if(ev.how==='en')s.title='翻訳失敗 (翻訳モデルが英語で返したため原文を表示)';
   else if(ev.how==='interrupted')s.title='次のターンが始まったため翻訳を中断 (原文を表示)';
-  scroll()}
+  mwUpdate(t);scroll()}
 function onTurnEnd(ev){const t=turn(ev.turn);if(!t)return;t.think.classList.remove('live');
   if(t.stop){clearTimeout(t.stop._arm);t.stop.remove();t.stop=null}
   t.st.textContent=(ev.reason==='stop'||ev.reason==='tool_calls'||ev.reason==='length'?'完了':ev.reason==='aborted'?'停止ボタンで中断':ev.reason)+' · '+ev.elapsed+'s · '+ev.think_chars+'字 · '+ev.segments+'文';
   if(!t.think.textContent.trim())t.think.textContent='(思考なし)';if(t.ansTimer){clearTimeout(t.ansTimer);renderAns(t)}
   if(ev.task&&!t.el.classList.contains('task')){t.el.classList.add('task');const h=t.el.querySelector('h3 .src')||t.el.querySelector('h3 .n');h.insertAdjacentHTML('afterend','<span class="tk">背景タスク</span>');applyFilters()}
-  if(jobOpen){jobHighlight();renderJobs()}}
+  if(jobOpen){jobHighlight();renderJobs()}
+  moUpdate()}
 // どのプロセスからの要求か (中継サーバーが /proc で調べる)。job = hermes … --oneshot の PID (裏の作業のとき)
 // 見出しに札を付ける: デスクトップ (Hermes の本体) / 裏の作業を頼んだもの (hondana・cron など) / Hermes のその他のコマンド
 function onTurnProc(ev){const t=turn(ev.turn);if(!t)return;t.job=ev.kind==='oneshot'?ev.job:null;t.kind=ev.kind||null;t.label=ev.label||'';
@@ -2497,7 +2694,26 @@ function onTurnProc(ev){const t=turn(ev.turn);if(!t)return;t.job=ev.kind==='ones
   if(t.label){if(!w){w=document.createElement('span');const h=t.el.querySelector('h3 .src')||t.el.querySelector('h3 .n');h.after(w)}
    w.className='who'+(ev.kind==='oneshot'?' oneshot':'');w.textContent=t.label;
    w.title=(ev.kind==='dashboard'?'デスクトップアプリの会話 (Hermes の本体)':ev.kind==='oneshot'?'裏の作業 (hermes … --oneshot) を頼んだもの':'Hermes のプロセス')+' · PID '+(ev.job||ev.pid)}
-  if(jobOpen){jobHighlight();renderJobs()}}
+  if(jobOpen){jobHighlight();renderJobs()}
+  moUpdate()}
+// ---- 原文の最新行 (スマホ表示の上 / 左の欄) ----
+// 出すのは、表示の絞り込み (背景タスク・発信元) を通ったターンのうち推測中でいちばん新しいもの。推測中が無ければ最後のターンを薄く出す。
+// 推測中なら、そのターンの停止ボタン (2 回押す) を欄の右上に置く。縦向きは欄を押すと 3 行 ⇔ 10 行を切り替える
+const MO_TAIL=4000;   // 欄に渡す末尾の文字数 (横向きで欄が高いときも足りる量。あふれた上の方は隠れる)
+function moUpdate(){if(!MOB||moReq)return;moReq=requestAnimationFrame(moRender)}
+function moRender(){moReq=0;
+  let live=null,last=null;for(const t of visibleTurns()){last=t;if(t.think.classList.contains('live'))live=t}
+  const t=live||last, tail=document.getElementById('motail'), lab=document.getElementById('moturn');
+  document.getElementById('morig').classList.toggle('idle',!live);
+  if(!t){tail.textContent='';lab.textContent='';setMoStop(null);return}
+  const txt=t.think.textContent;tail.textContent=txt.length>MO_TAIL?txt.slice(-MO_TAIL):txt;
+  const who=t.el.querySelector('h3 .who');
+  lab.textContent='#'+t.n+' '+(who?who.textContent:t.el.dataset.source||'')+(live?' · 推測中':' · 終了');
+  setMoStop(live?t.n:null)}
+function setMoStop(n){if(n===moStopN)return;
+  if(moStop){clearTimeout(moStop._arm);moStop.remove();moStop=null}
+  moStopN=n;if(n!==null){moStop=stopBtn(n);document.querySelector('#morig .mocap').appendChild(moStop)}}
+document.getElementById('morig').addEventListener('click',e=>{if(!e.target.closest('button'))document.getElementById('morig').classList.toggle('big')});
 // ---- 原文の最先端の停止ボタン: その推測 (1 回の要求) だけを切る。1 回目で赤く点滅し、3 秒以内にもう一度押すと止める ----
 function stopBtn(n){
  const b=document.createElement('button');b.type='button';b.className='tstop';b.innerHTML='<i></i><span>停止</span>';
@@ -2514,7 +2730,8 @@ function stopBtn(n){
   }catch(err){msg='中継サーバーにつながりませんでした: '+err}
   if(msg&&b.isConnected){b.disabled=false;label('停止');hstopResult(false,'#'+n+' を止められませんでした',msg)}});
  return b}
-function onStatus(ev){const d=document.getElementById('tdot');d.className='dot '+(ev.translator==='ok'?(ev.queue>0?'busy':'ok'):ev.translator==='error'?'error':'');
+function onStatus(ev){lamp(['tdot','mtdot'],ev.translator==='ok'?(ev.queue>0?'busy':'ok'):ev.translator==='error'?'error':'');
+  document.getElementById('mtq').textContent=ev.queue>0?' 待'+ev.queue:'';
   document.getElementById('ttext').textContent=ev.engine+(ev.translator==='error'?' エラー: '+ev.error:'');
   document.getElementById('tq').textContent=ev.queue>0?'(待ち '+ev.queue+')':'';
   if(ev.gpus!==undefined)renderGpu(ev.gpus);
@@ -2524,6 +2741,9 @@ function bfmt(v){return v===null?'-':v.toFixed(1)}
 // ツリー表示の折りたたみ状態 (2秒毎の再描画を跨いで保持)
 const sysTree={srv:true,dsk:true,gpu:true};
 const gpuTree={}; // 各 GPU ノード ('gpu0','gpu1',...)
+// スマホ表示では GPU の開閉を覚えておく (縦向きで閉じて和訳を広く見る使い方のため)
+if(MOB)try{const v=JSON.parse(localStorage.getItem('hh.mtree')||'null');if(v){if(typeof v.gpu==='boolean')sysTree.gpu=v.gpu;Object.assign(gpuTree,v.g||{})}}catch(e){}
+function saveTree(){if(MOB)try{localStorage.setItem('hh.mtree',JSON.stringify({gpu:sysTree.gpu,g:gpuTree}))}catch(e){}}
 let lastSysmon=null, lastGpus=null;
 // ラベル先頭のアイコン (実物風の固定配色: 緑=基板 / 金=端子・ピン / 銀=金属 / 黒=チップ。切欠きは背景色 #131a1f で抜く)
 // ---- CPU: LGA パッケージ (緑基板 + 銀の IHS + 金ピン、IHS は Win98 風ベベル) ----
@@ -2605,7 +2825,7 @@ function sysnode(name,key){
  const tw=document.createElement('span');tw.className='tw';tw.textContent=sysTree[key]?'▼':'▶';
  const nm=document.createElement('b');nm.innerHTML=name;
  el.appendChild(tw);el.appendChild(nm);
- el.addEventListener('click',()=>{sysTree[key]=!sysTree[key];renderSysCard()});
+ el.addEventListener('click',()=>{sysTree[key]=!sysTree[key];saveTree();renderSysCard()});
  return el}
 function gpuNode(g,i){
  const key='gpu'+i;
@@ -2614,8 +2834,19 @@ function gpuNode(g,i){
  const tw=document.createElement('span');tw.className='tw';tw.textContent=gpuTree[key]?'▼':'▶';
  const nm=document.createElement('b');nm.textContent=g.label||g.name;
  el.appendChild(tw);el.appendChild(nm);
- el.addEventListener('click',()=>{gpuTree[key]=!gpuTree[key];renderSysCard()});
+ if(MOB&&!gpuTree[key])el.appendChild(gpuSum(g));
+ el.addEventListener('click',()=>{gpuTree[key]=!gpuTree[key];saveTree();renderSysCard()});
  return el}
+// スマホ表示で閉じた GPU の 1 行要約: 温度・VRAM・電力 (バーと同じ境目で黄 / 赤)
+function gpuSum(g){
+ const sp=document.createElement('span');sp.className='gsum';
+ const mp=g.max_power||250;
+ const part=(text,pct,warn,hot)=>{const e=document.createElement('span');e.textContent=text;
+  if(pct!==null&&hot!==null&&pct>=hot)e.className='hot';else if(pct!==null&&warn!==null&&pct>=warn)e.className='warn';sp.appendChild(e)};
+ part(g.temp+'℃',g.temp/90*100,75/90*100,85/90*100);
+ part((g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G',g.mem_total?g.mem_used/g.mem_total*100:null,95,null);
+ part(g.power.toFixed(0)+'W',mp?g.power/mp*100:null,null,null);
+ return sp}
 // ---- hstop ボタン: GPU 行の右端。黄 = hstop (裏の作業だけ) / 赤 = hstop --all (本体も起動し直す) ----
 const IC_RESET='<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">'
 +'<path d="M13.2 9.2A5.4 5.4 0 1 1 11.6 4" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="square"/>'
@@ -2637,6 +2868,7 @@ let hstipKey=null, hstipEl=null;
 function hstipHtml(key){
  return HSTOP[key].tip+(hstopBusy?'<br><span class="busy">'+HSTOP[hstopBusy].args+' を実行中…</span>':'')}
 function hstipShow(key,btn){
+ if(MOB)return;   // 指で押すとマウスが乗った扱いにもなるので出さない (説明は確認の画面・一覧の画面に書いてある)
  const t=document.getElementById('hstip');hstipKey=key;hstipEl=btn;
  t.innerHTML=hstipHtml(key);t.style.display='block';
  const r=btn.getBoundingClientRect(),w=t.offsetWidth,h=t.offsetHeight;
@@ -2768,7 +3000,40 @@ function hstopBtns(){
  const w=document.createElement('span');w.className='hsbtns';
  w.appendChild(hstopBtn('jobs'));w.appendChild(hstopBtn('all'));
  return w}
-function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c.innerHTML='';
+// GPU の枝 (GPU 行 + 黄・赤のボタン + カードごとの温度・VRAM・電力)。top = スマホ表示の上の欄に単独で置く (字下げを 1 段減らす)。
+// スマホ表示で GPU 行を閉じたときは、カードごとの 1 行要約を残す
+function gpuSection(top){
+ if(!Array.isArray(lastGpus)||!lastGpus.length)return null;
+ const gw=document.createElement('div');gw.className=top?'':'tsub';
+ const gn=sysnode(IC_GPU+' GPU','gpu');gn.appendChild(hstopBtns());
+ gw.appendChild(gn);
+ if(sysTree.gpu){
+  const body=document.createElement('div');body.className='tsub';
+  lastGpus.forEach((g,i)=>{
+   const gwrap=document.createElement('div');gwrap.className='tsub';
+   gwrap.appendChild(gpuNode(g,i));
+   if(gpuTree['gpu'+i]){
+    const gb=document.createElement('div');gb.className='tsub';
+    // バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、VRAM 使用率 (warn 95%)、電力 max_power 満杯 
+    const tp=(g.temp/90*100);
+    gb.appendChild(sysleaf('🌡️ 温度',g.temp+'℃',tp,75/90*100,85/90*100));
+    const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
+    gb.appendChild(sysleaf(IC_DDR+' VRAM',mv,g.mem_total?g.mem_used/g.mem_total*100:null,95));
+    const mp=g.max_power||250;
+    gb.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
+    gwrap.appendChild(gb);
+   }
+   body.appendChild(gwrap);
+  });
+  gw.appendChild(body);
+ }else if(MOB){
+  lastGpus.forEach(g=>{const l=document.createElement('div');l.className='gline';
+   const nm=document.createElement('b');nm.textContent=g.label||g.name;l.append(nm,gpuSum(g));gw.appendChild(l)});
+ }
+ return gw}
+function renderSysCard(){
+ if(MOB){const m=document.getElementById('mgpu'),gw=gpuSection(true);m.innerHTML='';if(gw)m.appendChild(gw)}
+ const c=document.getElementById('sysmc');if(!c)return;c.innerHTML='';
  const card=document.createElement('div');card.className='sysm';
  card.title='サーバの GPU・CPU・RAM・各 SSD 使用量 (/proc・statvfs・nvidia-smi、2秒更新)';
  const s=lastSysmon;
@@ -2779,33 +3044,9 @@ function renderSysCard(){const c=document.getElementById('sysmc');if(!c)return;c
   const memPct=(s.mem_total)?s.mem_used/s.mem_total*100:null;
   card.appendChild(sysnode('🖥️ サーバ','srv'));
   if(sysTree.srv){
-   // 表示順: GPU → CPU → RAM → ディスク
-   if(Array.isArray(lastGpus)&&lastGpus.length){
-    const gw=document.createElement('div');gw.className='tsub';
-    const gn=sysnode(IC_GPU+' GPU','gpu');gn.appendChild(hstopBtns());
-    gw.appendChild(gn);
-    if(sysTree.gpu){
-     const body=document.createElement('div');body.className='tsub';
-     lastGpus.forEach((g,i)=>{
-      const gwrap=document.createElement('div');gwrap.className='tsub';
-      gwrap.appendChild(gpuNode(g,i));
-      if(gpuTree['gpu'+i]){
-       const gb=document.createElement('div');gb.className='tsub';
-       // バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、VRAM 使用率 (warn 95%)、電力 max_power 満杯 
-       const tp=(g.temp/90*100);
-       gb.appendChild(sysleaf('🌡️ 温度',g.temp+'℃',tp,75/90*100,85/90*100));
-       const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
-       gb.appendChild(sysleaf(IC_DDR+' VRAM',mv,g.mem_total?g.mem_used/g.mem_total*100:null,95));
-       const mp=g.max_power||250;
-       gb.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
-       gwrap.appendChild(gb);
-      }
-      body.appendChild(gwrap);
-     });
-     gw.appendChild(body);
-    }
-    card.appendChild(gw);
-   }
+   // 表示順: GPU → CPU → RAM → ディスク (スマホ表示の GPU は上の欄に別に描く)
+   const gw=MOB?null:gpuSection(false);
+   if(gw)card.appendChild(gw);
    card.appendChild(sysleaf(IC_CPU+' CPU',cpuV,cpu,90));
    card.appendChild(sysleaf(IC_DDR+' RAM',memV,memPct,95));
    const dskWrap=document.createElement('div');dskWrap.className='tsub';
@@ -2840,8 +3081,8 @@ function onError(ev){const d=document.createElement('div');d.className='seg bad'
 const H={turn_proc:onTurnProc,turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError,turn_ctx:onTurnCtx,gpu:onGpu,sysmon:onSysmon};
 function connect(){
   const es=new EventSource('/events');
-  es.onopen=()=>{document.getElementById('sdot').className='dot ok';document.getElementById('stext').textContent='接続中'};
-  es.onerror=()=>{document.getElementById('sdot').className='dot error';document.getElementById('stext').textContent='再接続待ち…'};
+  es.onopen=()=>{lamp(['sdot','msdot'],'ok');document.getElementById('stext').textContent='接続中'};
+  es.onerror=()=>{lamp(['sdot','msdot'],'error');document.getElementById('stext').textContent='再接続待ち…'};
   es.onmessage=e=>{try{const ev=JSON.parse(e.data);checkBoot(ev);const h=H[ev.type];if(h)h(ev)}catch(err){console.error(err)}};
 }
 document.getElementById('hsok').addEventListener('click',()=>document.getElementById('hsdlg').close());
@@ -2851,11 +3092,59 @@ connect();
 """
 
 
-def build_index_html(ver):
-    """画面の HTML にバージョン表示を差し込む"""
+def build_index_html(ver, hondana_url=""):
+    """画面の HTML にバージョン表示と本棚へのリンク (スマホ表示のメニュー) を差し込む"""
     def esc(t):
         return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-    return INDEX_HTML.replace("@@VER_TITLE@@", esc(ver["title"])).replace("@@VER_LABEL@@", esc(ver["label"]))
+    return (INDEX_HTML.replace("@@VER_TITLE@@", esc(ver["title"])).replace("@@VER_LABEL@@", esc(ver["label"]))
+            .replace("@@HONDANA@@", esc(hondana_url)))
+
+
+def make_icon_png(size=180):
+    """ホーム画面に追加したときのアイコン (PNG)。標準ライブラリだけで描く。
+    Win98 風の枠 + ティールのタイトルバー + 左に細い原文の行・右に太い訳文の行 (画面の縮図)"""
+    bg, face, hv, sv = (0x0f, 0x14, 0x18), (0x23, 0x2c, 0x33), (0x4a, 0x57, 0x62), (0x07, 0x0a, 0x0d)
+    b1, b2 = (0x0b, 0x4f, 0x4a), (0x11, 0x89, 0x7e)
+    en, ja, acc = (0x5d, 0x6e, 0x7a), (0xf2, 0xf6, 0xf8), (0x4f, 0xc3, 0xb8)
+    u = size / 180
+    px = [[face] * size for _ in range(size)]
+
+    def rect(x0, y0, x1, y1, c):
+        for y in range(max(0, int(y0 * u)), min(size, int(y1 * u))):
+            row = px[y]
+            for x in range(max(0, int(x0 * u)), min(size, int(x1 * u))):
+                row[x] = c
+    rect(0, 0, 180, 180, bg)
+    rect(10, 10, 170, 170, face)
+    rect(10, 10, 170, 14, hv); rect(10, 10, 14, 170, hv)      # 上左ハイライト
+    rect(10, 166, 170, 170, sv); rect(166, 10, 170, 170, sv)  # 下右シャドウ
+    for x in range(int(14 * u), int(166 * u)):                  # タイトルバー (横グラデーション)
+        t = (x - 14 * u) / (152 * u)
+        c = tuple(round(b1[i] + (b2[i] - b1[i]) * t) for i in range(3))
+        for y in range(int(14 * u), int(42 * u)):
+            px[y][x] = c
+    rect(22, 24, 34, 32, ja)
+    rect(22, 54, 60, 158, bg)                                   # 原文の欄
+    for i, w in enumerate((30, 24, 32, 18, 28, 22, 30, 26)):
+        rect(26, 60 + i * 12, 26 + w, 65 + i * 12, en)
+    for i, (w, c) in enumerate(((92, ja), (78, ja), (98, ja), (60, acc), (88, ja), (72, ja))):
+        rect(68, 58 + i * 17, 68 + w, 67 + i * 17, c)          # 訳文の行 (1 本はアクセント色)
+    raw = b"".join(b"\x00" + bytes(v for p in row for v in p) for row in px)
+
+    def chunk(kind, data):
+        return (len(data).to_bytes(4, "big") + kind + data
+                + (zlib.crc32(kind + data) & 0xffffffff).to_bytes(4, "big"))
+    ihdr = size.to_bytes(4, "big") * 2 + bytes((8, 2, 0, 0, 0))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw, 9))
+            + chunk(b"IEND", b""))
+
+
+# ホーム画面に追加したときの名前・表示のしかた (Android / デスクトップの Chrome 用。iPhone は <head> の meta を見る)
+MANIFEST = json.dumps({
+    "name": "Hermes Honyaku", "short_name": "Honyaku", "start_url": "/", "scope": "/",
+    "display": "standalone", "background_color": "#0f1418", "theme_color": "#0b4f4a",
+    "icons": [{"src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png"}],
+}, ensure_ascii=False).encode("utf-8")
 
 
 def find_hstop(cfg):
@@ -2874,6 +3163,7 @@ class UIHandler(BaseHTTPRequestHandler):
     gpu_monitor = None
     sysmon_monitor = None
     index_html = INDEX_HTML
+    icon_png = b""
     hstop_lock = threading.Lock()
 
     def log_message(self, fmt, *args):
@@ -2889,8 +3179,15 @@ class UIHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
-        if path in ("/", "/index.html"):
+        # /m = いつでもスマホ表示 (/ は端末に合わせて自動で切り替える。切り替えは画面の JS が行う)
+        if path in ("/", "/index.html", "/m", "/m/"):
             return self._send(200, "text/html; charset=utf-8", self.index_html.encode("utf-8"))
+        if path in ("/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
+            if not UIHandler.icon_png:
+                UIHandler.icon_png = make_icon_png()
+            return self._send(200, "image/png", UIHandler.icon_png)
+        if path == "/manifest.webmanifest":
+            return self._send(200, "application/manifest+json", MANIFEST)
         if path == "/events":
             return self._events()
         if path == "/api/status":
@@ -3126,7 +3423,7 @@ def main():
     except Exception:
         log.exception("token meter init failed (context meter will use estimates)")
     UIHandler.cfg = cfg
-    UIHandler.index_html = build_index_html(ver)
+    UIHandler.index_html = build_index_html(ver, cfg.get("ui", "hondana_url"))
     UIHandler.translator = translator
     UIHandler.gpu_monitor = GpuMonitor(interval=cfg.getfloat("gpu", "interval"),
                                        power_max=cfg.getfloat("gpu", "power_max"))
