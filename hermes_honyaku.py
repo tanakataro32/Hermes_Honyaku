@@ -2126,17 +2126,18 @@ color:#cfe8e4;background:#131a1f;border:2px solid;border-color:var(--sv) var(--h
 #hsdlg .db{display:flex;justify-content:flex-end;padding:0 10px 10px}
 #hsdlg .db button{min-width:72px}
 #tobottom.show{display:block}
-/* 原文の最先端の停止ボタン: その推測 (1 回の要求) だけを切る。誤操作よけに 2 回押す (1 回目で赤く点滅 → 3 秒以内にもう一度)。
-   原文の列は訳文より先に伸びて画面の下にはみ出すので、最先端が画面外のときは画面の下端に貼り付ける (sticky) */
-.think .tstop{position:sticky;bottom:8px;z-index:2;box-shadow:2px 2px 0 rgba(0,0,0,.5);display:inline-flex;align-items:center;gap:4px;margin-left:6px;padding:0 6px;height:18px;font-size:11px;line-height:1;vertical-align:text-bottom;
+/* 推測中のターンの停止ボタン: その推測 (1 回の要求) だけを切る。誤操作よけに 2 回押す (1 回目で赤く点滅 → 3 秒以内にもう一度)。
+   文字の直後や原文の下に置くと、生成される文字に押されて動き回り押せないので、「Thinking (原文)」の見出しの右端に置く。
+   見出しの行はヘッダーの下に貼り付く (sticky) ので、原文が長くてもそのターンが画面にある間は見えている */
+.col .caprow{display:flex;align-items:flex-start;gap:8px;position:sticky;top:var(--hdrh,36px);z-index:3;background:var(--face);margin:-8px 0 0;padding-top:8px}
+.tstop{display:inline-flex;align-items:center;gap:4px;margin-left:auto;padding:0 8px;height:20px;font-size:11px;line-height:1;
 white-space:nowrap;background:#4a1714;color:#ffd9d5;border-color:#8f3b33 #230605 #230605 #8f3b33}
-.think .tstop i{display:inline-block;width:7px;height:7px;background:#f08a82}
-.think .tstop:hover{background:#6a211c}
-.think .tstop.arm{background:#b3261e;color:#fff;animation:tsarm .6s steps(2) infinite}
-.think .tstop.arm i{background:#fff}
-.think .tstop:disabled{cursor:wait;background:#3a2522;color:var(--muted)}
+.tstop i{display:inline-block;width:7px;height:7px;background:#f08a82}
+.tstop:hover{background:#6a211c}
+.tstop.arm{background:#b3261e;color:#fff;animation:tsarm .6s steps(2) infinite}
+.tstop.arm i{background:#fff}
+.tstop:disabled{cursor:wait;background:#3a2522;color:var(--muted)}
 @keyframes tsarm{50%{background:#7a1a14}}
-.think.live:has(>.tstop)::after{content:none}
 /* 黄色のボタンのダイアログを開いている間: 作業ごとの色で、その作業が推測中のターンの原文を塗る */
 .turn.jobhl .think{background:var(--jobc);box-shadow:inset 4px 0 0 var(--jobb)}
 .turn.jobhl.jobfocus .think{background:var(--jobf)}
@@ -2204,6 +2205,9 @@ const main=document.getElementById('main'), empty=document.getElementById('empty
 const turns={};
 const auto=document.getElementById('auto'), newest=document.getElementById('newest'), tobottom=document.getElementById('tobottom');
 const showsrc=document.getElementById('showsrc'), showans=document.getElementById('showans');
+// 見出しの行 (停止ボタン) をヘッダーのすぐ下に貼り付けるため、ヘッダーの高さを CSS に渡す (幅が狭いと 2 段になる)
+function setHdrH(){document.documentElement.style.setProperty('--hdrh',document.querySelector('header').offsetHeight+'px')}
+setHdrH();window.addEventListener('resize',setHdrH);
 // 自動スクロールの状態 (関数は下の「自動スクロール」の節。表示設定の復元時にも scroll() が呼ばれるので先に宣言する)
 let lagMode=false, lastAutoY=-1, scrollReq=0, pausedByScroll=false, holdUp=false;
 // 表示設定はブラウザに記憶する
@@ -2301,11 +2305,11 @@ function onTurnStart(ev){
   empty.style.display='none';
   const el=document.createElement('section');el.className='turn'+(ev.task?' task':'');el.id='t'+ev.turn;el.dataset.source=ev.source||'';addSource(ev.source);
   el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span>'+fmt(ev.ts)+'</span>'+(ev.source?'<span class="src">'+esc(ev.source)+'</span>':'')+(ev.task?'<span class="tk" title="最後のメッセージが ### Task: で始まる要求 (タイトル生成・タグ生成など)">背景タスク</span>':'')+'<span>'+esc(ev.model||'')+'</span><span class="ctxm"></span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
-   '<div class="cols"><div class="col"><div class="cap">Thinking (原文)</div><div class="think live"></div></div>'+
+   '<div class="cols"><div class="col"><div class="caprow"><div class="cap">Thinking (原文)</div></div><div class="think live"></div></div>'+
    '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="tools"></div><div class="ans"></div></div></div>';
   if(newest.checked)main.insertBefore(el,main.firstElementChild.nextSibling);else main.appendChild(el);
   turns[ev.turn]={el,think:el.querySelector('.think'),ans:el.querySelector('.ans'),tools:el.querySelector('.tools'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{},ansRaw:'',ansTimer:null,job:null,stop:null};
-  turns[ev.turn].stop=stopBtn(ev.turn);turns[ev.turn].think.appendChild(turns[ev.turn].stop);
+  turns[ev.turn].stop=stopBtn(ev.turn);el.querySelector('.caprow').appendChild(turns[ev.turn].stop);
   if(ev.task)turns[ev.turn].segs.innerHTML='<div class="note">背景タスク (タイトル生成・タグ生成など) のため翻訳は省略</div>';
   applyFilters();
   // 古いターンは間引く
@@ -2313,9 +2317,8 @@ function onTurnStart(ev){
   while(keys.length>40){const k=keys.shift();turns[k].el.remove();delete turns[k]}
   scroll();
 }
-// 思考の文字は停止ボタンの手前に足していく (ボタンが常に原文の最先端に来る)
-function onThink(ev){const t=turn(ev.turn);if(!t)return;const b=t.stop,l=b?b.previousSibling:t.think.lastChild;
-  if(l&&l.nodeType===3)l.appendData(ev.text);else t.think.insertBefore(document.createTextNode(ev.text),b);scroll()}
+function onThink(ev){const t=turn(ev.turn);if(!t)return;const l=t.think.lastChild;
+  if(l&&l.nodeType===3)l.appendData(ev.text);else t.think.appendChild(document.createTextNode(ev.text));scroll()}
 function onTurnCtx(ev){const t=turn(ev.turn);if(!t)return;const el=t.el.querySelector('.ctxm');if(!el)return;
   const lim=ev.ctx_limit||0;const k=v=>v>=1000?(v/1000).toFixed(1).replace(/\.0$/,'')+'k':v;
   el.textContent='ctx '+k(ev.tokens)+(lim?'/'+k(lim):'')+(ev.exact?'':'~')+' · max_out '+k(ev.max_tokens||0);
