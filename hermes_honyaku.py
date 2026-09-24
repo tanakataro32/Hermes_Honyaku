@@ -212,7 +212,7 @@ class EventBus:
         t = ev.get("type")
         n = ev.get("turn")
         if t == "turn_start":
-            self.turns[n] = {"start": ev, "think": [], "answer": [], "segs": {}, "tools": None, "end": None, "ctx": None}
+            self.turns[n] = {"start": ev, "think": [], "answer": [], "segs": {}, "tools": None, "end": None, "ctx": None, "proc": None}
             while len(self.turns) > self.keep_turns:
                 self.turns.popitem(last=False)
             return
@@ -221,6 +221,8 @@ class EventBus:
             return
         if t == "turn_ctx":
             info["ctx"] = ev
+        if t == "turn_proc":
+            info["proc"] = ev
         if t == "think":
             info["think"].append(ev["text"])
         elif t == "answer":
@@ -290,6 +292,8 @@ class EventBus:
             out.append(dict(info["start"], id=cur))
             if info.get("ctx"):
                 out.append(dict(info["ctx"], id=cur))
+            if info.get("proc"):
+                out.append(dict(info["proc"], id=cur))
             think = "".join(info["think"])
             if think:
                 out.append({"type": "think", "turn": tn, "text": think, "id": cur, "ts": info["start"]["ts"]})
@@ -663,6 +667,7 @@ class Turn:
         self.task = task
         self.answer_buf = []
         self.answer_len = 0
+        self.abort = None  # 画面の停止ボタン: この要求だけを切る (ProxyHandler._chat が設定する)
         with Turn.active_lock:
             Turn.active[self.n] = self
         ev = {"type": "turn_start", "turn": self.n, "model": model, "context": context,
@@ -1528,6 +1533,85 @@ def is_task_request(req):
     return False
 
 
+def _hermes_rest(argv):
+    """argv が hermes (または hermes を動かす python) なら hermes の後ろの引数、違えば None (server-deploy の hstop と同じ判定)"""
+    if not argv:
+        return None
+    names = [os.path.basename(a) for a in argv[:2]]
+    if names[0] == "hermes":
+        return argv[1:]
+    if len(names) > 1 and names[0].startswith("python") and names[1] == "hermes":
+        return argv[2:]
+    return None
+
+
+def client_process(peer, local):
+    """ローカルの TCP 接続 (peer = 呼び出し元のアドレス, local = 中継サーバー側のアドレス) を開いているプロセスの PID。
+    /proc/net/tcp で接続のソケット番号を探し、同じユーザーのプロセスの fd から持ち主を探す。分からなければ None"""
+    inode = None
+    for f in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(f) as fh:
+                lines = fh.read().splitlines()[1:]
+        except OSError:
+            continue
+        for ln in lines:
+            p = ln.split()
+            try:
+                if (len(p) >= 10 and p[3] == "01" and int(p[1].rsplit(":", 1)[1], 16) == peer[1]
+                        and int(p[2].rsplit(":", 1)[1], 16) == local[1]):
+                    inode = p[9]
+                    break
+            except (ValueError, IndexError):
+                continue
+        if inode:
+            break
+    if not inode or inode == "0":
+        return None
+    target, uid = f"socket:[{inode}]", os.getuid()
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) == os.getpid():
+            continue
+        try:
+            if os.stat("/proc/" + d).st_uid != uid:
+                continue
+            for fd in os.listdir(f"/proc/{d}/fd"):
+                try:
+                    if os.readlink(f"/proc/{d}/fd/{fd}") == target:
+                        return int(d)
+                except OSError:
+                    pass
+        except OSError:
+            continue
+    return None
+
+
+def hermes_job(pid):
+    """pid から親をたどって Hermes のプロセスを探す。
+    ("oneshot", PID) = hermes … --oneshot (cron・本棚などの裏の作業。hstop --pid で止められる) /
+    ("dashboard", PID) = Hermes の本体 (デスクトップアプリの会話) / ("hermes", PID) = その他の hermes / (None, None)"""
+    for _ in range(12):
+        if not pid or pid <= 1:
+            break
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+            with open(f"/proc/{pid}/stat") as f:
+                st = f.read()
+            ppid = int(st[st.rindex(")") + 2:].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+        rest = _hermes_rest(argv)
+        if rest is not None:
+            if "--oneshot" in rest:
+                return "oneshot", pid
+            if rest[:1] == ["dashboard"]:
+                return "dashboard", pid
+            return "hermes", pid
+        pid = ppid
+    return None, None
+
+
 class ClientGone(Exception):
     """中継中に Hermes 側が接続を切った"""
 
@@ -1730,7 +1814,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         conn = None
         turn = None
-        gone, stop = threading.Event(), threading.Event()
+        gone, stop, aborted = threading.Event(), threading.Event(), threading.Event()
+
+        def abort():
+            """画面の停止ボタン: この要求だけを切る。上流 (llama-server) との接続を切って生成を止め、
+            Hermes 側の接続も切る (Hermes からは通信エラーに見える)"""
+            aborted.set()
+            for sock in (conn.sock if conn is not None else None, self.connection):
+                try:
+                    if sock is not None:
+                        sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
         try:
             conn = self._connect()
             conn.request("POST", self.path, body=body, headers=self._upstream_headers(len(body)))
@@ -1748,6 +1843,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
             turn = Turn(req.get("model") or "", summarize_context(req), self.cfg, self.translator,
                         source=self._source(), task=is_task_request(req))
+            turn.abort = abort
+            if self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1") and os.path.isdir("/proc/self/fd"):
+                # どのプロセスからの要求か (黄色のボタンのダイアログで、作業と画面のターンを結び付ける)。/proc を探すので別スレッドで
+                peer, local, tn = self.client_address, self.connection.getsockname(), turn.n
+                def _proc():
+                    try:
+                        pid = client_process(peer, local)
+                        kind, job = hermes_job(pid)
+                    except Exception:
+                        log.debug("turn_proc failed", exc_info=True)
+                        return
+                    if pid:
+                        BUS.publish({"type": "turn_proc", "turn": tn, "pid": pid, "kind": kind, "job": job})
+                threading.Thread(target=_proc, name="turn-proc", daemon=True).start()
             if self.token_meter is not None:
                 # 画面用のコンテキストメータ。/tokenize が (並列 1 の) 生成と干渉して遅くなる可能性があるため、
                 # 本線のスレッドで待たず別スレッドで数える (遅くても turn_ctx が後から届くだけで、応答は止まらない)
@@ -1770,7 +1879,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             finish = "stop"
             while True:
                 line = resp.readline()
-                if gone.is_set():
+                if gone.is_set() or aborted.is_set():
                     raise ClientGone()
                 if not line:
                     break
@@ -1811,14 +1920,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self._begin(200, [("Content-Type", "application/json")], False, len(data))
                 self._write(data)
         except (BrokenPipeError, ConnectionResetError, ClientGone):
-            log.info("client disconnected (chat)%s", ": 上流の生成を打ち切りました" if gone.is_set() else "")
+            if aborted.is_set():
+                log.info("chat: 画面の停止ボタンで要求を切りました")
+            else:
+                log.info("client disconnected (chat)%s", ": 上流の生成を打ち切りました" if gone.is_set() else "")
             if turn:
-                turn.finish("client_disconnected")
+                turn.finish("aborted" if aborted.is_set() else "client_disconnected")
         except Exception as e:
-            if gone.is_set():  # 見張りが上流を切ったせいで getresponse / readline が失敗した
-                log.info("client disconnected (chat): 上流の生成を打ち切りました")
+            if gone.is_set() or aborted.is_set():  # 見張り (または停止ボタン) が上流を切ったせいで getresponse / readline が失敗した
+                log.info("chat: %s", "画面の停止ボタンで要求を切りました" if aborted.is_set() else "client disconnected: 上流の生成を打ち切りました")
                 if turn:
-                    turn.finish("client_disconnected")
+                    turn.finish("aborted" if aborted.is_set() else "client_disconnected")
                 return
             log.exception("chat proxy error")
             if turn:
@@ -2014,6 +2126,41 @@ color:#cfe8e4;background:#131a1f;border:2px solid;border-color:var(--sv) var(--h
 #hsdlg .db{display:flex;justify-content:flex-end;padding:0 10px 10px}
 #hsdlg .db button{min-width:72px}
 #tobottom.show{display:block}
+/* 原文の最先端の停止ボタン: その推測 (1 回の要求) だけを切る。誤操作よけに 2 回押す (1 回目で赤く点滅 → 3 秒以内にもう一度)。
+   原文の列は訳文より先に伸びて画面の下にはみ出すので、最先端が画面外のときは画面の下端に貼り付ける (sticky) */
+.think .tstop{position:sticky;bottom:8px;z-index:2;box-shadow:2px 2px 0 rgba(0,0,0,.5);display:inline-flex;align-items:center;gap:4px;margin-left:6px;padding:0 6px;height:18px;font-size:11px;line-height:1;vertical-align:text-bottom;
+white-space:nowrap;background:#4a1714;color:#ffd9d5;border-color:#8f3b33 #230605 #230605 #8f3b33}
+.think .tstop i{display:inline-block;width:7px;height:7px;background:#f08a82}
+.think .tstop:hover{background:#6a211c}
+.think .tstop.arm{background:#b3261e;color:#fff;animation:tsarm .6s steps(2) infinite}
+.think .tstop.arm i{background:#fff}
+.think .tstop:disabled{cursor:wait;background:#3a2522;color:var(--muted)}
+@keyframes tsarm{50%{background:#7a1a14}}
+.think.live:has(>.tstop)::after{content:none}
+/* 黄色のボタンのダイアログを開いている間: 作業ごとの色で、その作業が推測中のターンの原文を塗る */
+.turn.jobhl .think{background:var(--jobc);box-shadow:inset 4px 0 0 var(--jobb)}
+.turn.jobhl.jobfocus .think{background:var(--jobf)}
+/* 黄色のボタンのダイアログ (Win98 風)。止める前に画面のターンを見比べられるよう、右上に置いてページは暗くしない */
+#jobdlg{position:fixed;top:44px;right:16px;left:auto;bottom:auto;margin:0;z-index:40;padding:0;width:min(600px,calc(100vw - 32px));color:var(--ink);background:var(--face);
+border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow:4px 4px 0 rgba(0,0,0,.45)}
+#jobdlg .dt{padding:3px 8px;font-size:12px;font-weight:700;color:#2a1a00;background:linear-gradient(90deg,#f7c21a,#e09b00)}
+#jobdlg .jn{padding:8px 10px 0;font-size:12px;line-height:1.6;color:var(--muted)}
+#jobdlg .jl{margin:8px 10px;max-height:50vh;overflow:auto;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+#jobdlg .jl .msg{padding:10px;font-size:12px;color:var(--muted);white-space:pre-wrap}
+#jobdlg .jl .msg.bad{color:var(--bad)}
+#jobdlg .jr{display:flex;align-items:center;gap:7px;padding:4px 8px;font-size:12px;cursor:pointer;border-bottom:1px solid #1f282f}
+#jobdlg .jr:hover{background:#1c252c}
+#jobdlg .jr .sw{width:12px;height:12px;flex:none;border:1px solid #000}
+#jobdlg .jr .cl{flex:none;font-weight:700;color:#fff}
+#jobdlg .jr .el{flex:none;font-family:"Courier New",ui-monospace,monospace;color:var(--muted)}
+#jobdlg .jr .rq{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--en)}
+#jobdlg .jr .tn{flex:none;font-family:"Courier New",ui-monospace,monospace}
+#jobdlg .jr .tn a{color:var(--acc);margin-left:4px}
+#jobdlg .jr .tn .lv{color:var(--warn)}
+#jobdlg .jr .nw{flex:none;color:var(--warn)}
+#jobdlg .db{display:flex;justify-content:flex-end;gap:8px;padding:0 10px 10px}
+#jobdlg .db button{min-width:72px}
+#jobdlg .db button:disabled{color:var(--muted);cursor:default}
 ::-webkit-scrollbar{width:14px;height:14px}
 ::-webkit-scrollbar-track{background:repeating-conic-gradient(#2b353d 0% 25%,#1c242b 0% 50%) 0 0/4px 4px}
 ::-webkit-scrollbar-thumb{background:var(--face);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
@@ -2031,6 +2178,10 @@ color:#cfe8e4;background:#131a1f;border:2px solid;border-color:var(--sv) var(--h
 </header>
 <div id="hstip" role="tooltip"></div>
 <dialog id="hsdlg"><div class="dt" id="hsdt"></div><pre id="hsout"></pre><div class="db"><button type="button" id="hsok">OK</button></div></dialog>
+<dialog id="jobdlg"><div class="dt">裏の作業を選んで止める (hstop)</div>
+<div class="jn">止める作業にチェックを付けてください (2 秒ごとに更新)。同じ色で塗った原文が、その作業が推測中のターンです。<br>デスクトップアプリの会話は止まりません。</div>
+<div class="jl" id="joblist"></div>
+<div class="db"><button type="button" id="jobgo" disabled>選んだ作業を止める</button><button type="button" id="jobno">閉じる</button></div></dialog>
 <button id="tobottom" type="button">↓ 最新へ (自動スクロール再開)</button>
 <div id="shell">
 <aside id="syspanel">
@@ -2153,7 +2304,8 @@ function onTurnStart(ev){
    '<div class="cols"><div class="col"><div class="cap">Thinking (原文)</div><div class="think live"></div></div>'+
    '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="tools"></div><div class="ans"></div></div></div>';
   if(newest.checked)main.insertBefore(el,main.firstElementChild.nextSibling);else main.appendChild(el);
-  turns[ev.turn]={el,think:el.querySelector('.think'),ans:el.querySelector('.ans'),tools:el.querySelector('.tools'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{},ansRaw:'',ansTimer:null};
+  turns[ev.turn]={el,think:el.querySelector('.think'),ans:el.querySelector('.ans'),tools:el.querySelector('.tools'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{},ansRaw:'',ansTimer:null,job:null,stop:null};
+  turns[ev.turn].stop=stopBtn(ev.turn);turns[ev.turn].think.appendChild(turns[ev.turn].stop);
   if(ev.task)turns[ev.turn].segs.innerHTML='<div class="note">背景タスク (タイトル生成・タグ生成など) のため翻訳は省略</div>';
   applyFilters();
   // 古いターンは間引く
@@ -2161,8 +2313,9 @@ function onTurnStart(ev){
   while(keys.length>40){const k=keys.shift();turns[k].el.remove();delete turns[k]}
   scroll();
 }
-function onThink(ev){const t=turn(ev.turn);if(!t)return;const l=t.think.lastChild;
-  if(l&&l.nodeType===3)l.appendData(ev.text);else t.think.appendChild(document.createTextNode(ev.text));scroll()}
+// 思考の文字は停止ボタンの手前に足していく (ボタンが常に原文の最先端に来る)
+function onThink(ev){const t=turn(ev.turn);if(!t)return;const b=t.stop,l=b?b.previousSibling:t.think.lastChild;
+  if(l&&l.nodeType===3)l.appendData(ev.text);else t.think.insertBefore(document.createTextNode(ev.text),b);scroll()}
 function onTurnCtx(ev){const t=turn(ev.turn);if(!t)return;const el=t.el.querySelector('.ctxm');if(!el)return;
   const lim=ev.ctx_limit||0;const k=v=>v>=1000?(v/1000).toFixed(1).replace(/\.0$/,'')+'k':v;
   el.textContent='ctx '+k(ev.tokens)+(lim?'/'+k(lim):'')+(ev.exact?'':'~')+' · max_out '+k(ev.max_tokens||0);
@@ -2227,9 +2380,29 @@ function onJa(ev){const t=turn(ev.turn);if(!t)return;let s=t.segEls[ev.seg];if(!
   else if(ev.how==='interrupted')s.title='次のターンが始まったため翻訳を中断 (原文を表示)';
   scroll()}
 function onTurnEnd(ev){const t=turn(ev.turn);if(!t)return;t.think.classList.remove('live');
-  t.st.textContent=(ev.reason==='stop'||ev.reason==='tool_calls'||ev.reason==='length'?'完了':ev.reason)+' · '+ev.elapsed+'s · '+ev.think_chars+'字 · '+ev.segments+'文';
+  if(t.stop){clearTimeout(t.stop._arm);t.stop.remove();t.stop=null}
+  t.st.textContent=(ev.reason==='stop'||ev.reason==='tool_calls'||ev.reason==='length'?'完了':ev.reason==='aborted'?'停止ボタンで中断':ev.reason)+' · '+ev.elapsed+'s · '+ev.think_chars+'字 · '+ev.segments+'文';
   if(!t.think.textContent.trim())t.think.textContent='(思考なし)';if(t.ansTimer){clearTimeout(t.ansTimer);renderAns(t)}
-  if(ev.task&&!t.el.classList.contains('task')){t.el.classList.add('task');const h=t.el.querySelector('h3 .src')||t.el.querySelector('h3 .n');h.insertAdjacentHTML('afterend','<span class="tk">背景タスク</span>');applyFilters()}}
+  if(ev.task&&!t.el.classList.contains('task')){t.el.classList.add('task');const h=t.el.querySelector('h3 .src')||t.el.querySelector('h3 .n');h.insertAdjacentHTML('afterend','<span class="tk">背景タスク</span>');applyFilters()}
+  if(jobOpen){jobHighlight();renderJobs()}}
+// どのプロセスからの要求か (中継サーバーが /proc で調べる)。job = hermes … --oneshot の PID (裏の作業のとき)
+function onTurnProc(ev){const t=turn(ev.turn);if(!t)return;t.job=ev.kind==='oneshot'?ev.job:null;if(jobOpen){jobHighlight();renderJobs()}}
+// ---- 原文の最先端の停止ボタン: その推測 (1 回の要求) だけを切る。1 回目で赤く点滅し、3 秒以内にもう一度押すと止める ----
+function stopBtn(n){
+ const b=document.createElement('button');b.type='button';b.className='tstop';b.innerHTML='<i></i><span>停止</span>';
+ b.title='この推測だけを止める (2 回押す)\n中継サーバーが llama-server と Hermes との接続を切る。\nHermes からは通信エラーに見えるので、やり直したり次の手順に進んだりすることがある';
+ const label=x=>{b.lastChild.textContent=x};
+ b.addEventListener('click',async e=>{e.stopPropagation();
+  if(b.disabled)return;
+  if(!b.classList.contains('arm')){b.classList.add('arm');label('もう一度押すと停止');b._arm=setTimeout(()=>{b.classList.remove('arm');label('停止')},3000);return}
+  clearTimeout(b._arm);b.classList.remove('arm');b.disabled=true;label('停止中…');
+  let msg='';
+  try{const r=await fetch('/api/abort',{method:'POST',headers:{'X-Honyaku':'1','Content-Type':'application/json'},body:JSON.stringify({turn:n})});
+   let j=null;try{j=await r.json()}catch(err){}
+   if(!j)msg='HTTP '+r.status;else if(!j.ok)msg=j.output||'';
+  }catch(err){msg='中継サーバーにつながりませんでした: '+err}
+  if(msg&&b.isConnected){b.disabled=false;label('停止');hstopResult(false,'#'+n+' を止められませんでした',msg)}});
+ return b}
 function onStatus(ev){const d=document.getElementById('tdot');d.className='dot '+(ev.translator==='ok'?(ev.queue>0?'busy':'ok'):ev.translator==='error'?'error':'');
   document.getElementById('ttext').textContent=ev.engine+(ev.translator==='error'?' エラー: '+ev.error:'');
   document.getElementById('tq').textContent=ev.queue>0?'(待ち '+ev.queue+')':'';
@@ -2343,10 +2516,9 @@ const IC_RESET_Y='<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="t
 +'<path d="M13.2 9.2A5.4 5.4 0 1 1 11.6 4" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="square"/>'
 +'<path d="M9 1.6h5.4V7z" fill="#fff"/></svg>';
 const HSTOP={
- jobs:{args:'hstop',icon:IC_RESET_Y,all:false,
-  tip:'<b class="jobs">裏の作業を止める (hstop)</b>cron の定期実行・本棚などのアプリが頼んだ<br>AI の作業を止める。<br>デスクトップアプリの会話は止まらない',
-  ask:'Hermes の裏の作業を止めます (hstop)。\ncron の定期実行・本棚などのアプリが頼んだ AI の作業を止めます。\nデスクトップアプリの会話は止まりません。\n\n続けますか？'},
- all:{args:'hstop --all',icon:IC_RESET,all:true,
+ jobs:{args:'hstop',icon:IC_RESET_Y,
+  tip:'<b class="jobs">裏の作業を選んで止める (hstop)</b>cron の定期実行・本棚などのアプリが頼んだ<br>AI の作業の一覧から、止めるものを選ぶ。<br>デスクトップアプリの会話は止まらない'},
+ all:{args:'hstop --all',icon:IC_RESET,
   tip:'<b class="all">Hermes を全部止める (hstop --all)</b>裏の作業に加え、Hermes の本体を起動し直す。<br>デスクトップアプリの会話も止まる (自動で再開しない)。<br>終わったらデスクトップアプリからつなぎ直す',
   ask:'Hermes を全部止めます (hstop --all)。\nデスクトップアプリの会話も止まり、Hermes の本体を起動し直します。\n\n続けますか？'}};
 let hstopBusy=null; // 実行中のボタン ('jobs' / 'all')。サーバー側も 1 つずつしか実行しない
@@ -2371,14 +2543,19 @@ function hstopResult(ok,title,text){
  document.getElementById('hsout').textContent=text||'(出力なし)';
  if(d.open)d.close();
  d.showModal()}
-async function runHstop(key){
- const m=HSTOP[key];
+function runHstop(key){
  if(hstopBusy)return;
  hstipHide();
- if(!confirm(m.ask))return;
+ if(key==='jobs'){openJobs();return}
+ if(!confirm(HSTOP.all.ask))return;
+ execHstop('all','hstop --all',{all:true})}
+// key = 回すボタン、args = 結果ダイアログの題名、body = /api/hstop に送る内容
+async function execHstop(key,args,body){
+ const m={args};
+ if(hstopBusy)return;
  hstopBusy=key;renderSysCard();
  try{
-  const r=await fetch('/api/hstop',{method:'POST',headers:{'X-Honyaku':'1','Content-Type':'application/json'},body:JSON.stringify({all:m.all})});
+  const r=await fetch('/api/hstop',{method:'POST',headers:{'X-Honyaku':'1','Content-Type':'application/json'},body:JSON.stringify(body)});
   let j=null;try{j=await r.json()}catch(e){}
   if(!j)hstopResult(false,m.args+' 失敗 (HTTP '+r.status+')','');
   else if(j.ok)hstopResult(true,m.args+' 完了',j.output);
@@ -2395,6 +2572,68 @@ function hstopBtn(key){
  // 再描画でマウスの下に作り直されたボタンは mouseenter が来ないので、表示中なら新しいボタンに付け替える
  if(hstipKey===key){hstipEl=b;document.getElementById('hstip').innerHTML=hstipHtml(key)}
  return b}
+// ---- 黄色のボタンのダイアログ: 動いている裏の作業 (hstop --list) から止めるものを選ぶ ----
+// 開いたときにあった作業は最初からチェック済み。開いている間に増えた作業はチェックなし (「新」) で、勝手に止めない
+const JOBC=['#e5a33b','#4fc3b8','#c586e8','#6fa8ff','#f08a82','#9bd46a','#ffd24a','#5fd3f3'];
+let jobOpen=false, jobTimer=null, jobList=null, jobErr='', jobSel={}, jobNew={}, jobColor={}, jobNext=0, jobFocus=null;
+const jobdlg=document.getElementById('jobdlg'), joblist=document.getElementById('joblist'), jobgo=document.getElementById('jobgo');
+function openJobs(){
+ jobList=null;jobErr='';jobSel={};jobNew={};jobColor={};jobNext=0;jobFocus=null;
+ jobOpen=true;renderJobs();if(!jobdlg.open)jobdlg.show();
+ loadJobs();clearInterval(jobTimer);jobTimer=setInterval(loadJobs,2000)}
+function closeJobs(){jobOpen=false;clearInterval(jobTimer);jobTimer=null;if(jobdlg.open)jobdlg.close();jobHighlight()}
+async function loadJobs(){
+ let j=null,err='';
+ try{const r=await fetch('/api/jobs',{headers:{'X-Honyaku':'1'}});try{j=await r.json()}catch(e){err='HTTP '+r.status}}
+ catch(e){err='中継サーバーにつながりませんでした: '+e}
+ if(!jobOpen)return;
+ if(j&&j.ok){
+  const first=jobList===null;jobErr='';jobList=j.jobs||[];
+  for(const x of jobList){if(!(x.pid in jobSel)){jobSel[x.pid]=first;jobNew[x.pid]=!first}
+   if(!(x.pid in jobColor))jobColor[x.pid]=JOBC[jobNext++%JOBC.length]}
+ }else jobErr=err||(j&&j.output)||'一覧を取得できませんでした';
+ renderJobs();jobHighlight()}
+function jobTurns(pid){return Object.keys(turns).map(Number).sort((a,b)=>a-b).filter(n=>turns[n].job===pid)}
+function fmtElapsed(e){return e>=3600?Math.floor(e/3600)+'時間'+Math.floor(e%3600/60)+'分':e>=60?Math.floor(e/60)+'分'+(e%60)+'秒':e+'秒'}
+function renderJobs(){
+ joblist.innerHTML='';
+ const msg=(text,bad)=>{const d=document.createElement('div');d.className='msg'+(bad?' bad':'');d.textContent=text;joblist.appendChild(d)};
+ if(jobErr)msg(jobErr,true);
+ else if(jobList===null)msg('読み込み中…');
+ else if(!jobList.length)msg('いま動いている裏の作業はありません');
+ for(const x of (jobErr?[]:jobList||[])){
+  const row=document.createElement('label');row.className='jr';
+  const cb=document.createElement('input');cb.type='checkbox';cb.checked=!!jobSel[x.pid];
+  cb.addEventListener('change',()=>{jobSel[x.pid]=cb.checked;updateJobGo()});
+  const sw=document.createElement('span');sw.className='sw';sw.style.background=jobColor[x.pid];
+  const cl=document.createElement('span');cl.className='cl';cl.textContent=x.caller||'不明';
+  const el=document.createElement('span');el.className='el';el.textContent=fmtElapsed(x.elapsed||0);
+  const rq=document.createElement('span');rq.className='rq';rq.textContent=x.request?'「'+x.request+'」':'';rq.title=(x.request||'')+'\n(PID '+x.pid+')';
+  const tn=document.createElement('span');tn.className='tn';
+  const ns=jobTurns(x.pid),live=ns.filter(n=>turns[n].think.classList.contains('live'));
+  for(const n of (live.length?live:ns.slice(-1))){
+   const a=document.createElement('a');a.href='#t'+n;a.textContent='#'+n;
+   a.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();pause();turns[n]&&turns[n].el.scrollIntoView({block:'center'})});
+   tn.appendChild(a)}
+  if(live.length)tn.insertAdjacentHTML('beforeend','<span class="lv"> 推測中</span>');
+  row.append(cb,sw,cl,el,rq,tn);
+  if(jobNew[x.pid])row.insertAdjacentHTML('beforeend','<span class="nw">新</span>');
+  row.addEventListener('mouseenter',()=>{jobFocus=x.pid;jobHighlight()});
+  row.addEventListener('mouseleave',()=>{if(jobFocus===x.pid){jobFocus=null;jobHighlight()}});
+  joblist.appendChild(row)}
+ updateJobGo()}
+function jobPicked(){return (jobErr||!jobList)?[]:jobList.filter(x=>jobSel[x.pid]).map(x=>x.pid)}
+function updateJobGo(){const n=jobPicked().length;jobgo.disabled=!n||!!hstopBusy;jobgo.textContent='選んだ作業を止める'+(n?' ('+n+' 件)':'')}
+// 推測中のターンの原文を、その作業の色で塗る (ダイアログを開いている間だけ)
+function jobHighlight(){
+ const on=jobOpen&&!jobErr&&jobList?new Set(jobList.map(x=>x.pid)):new Set();
+ for(const n in turns){const t=turns[n],c=t.job&&on.has(t.job)&&t.think.classList.contains('live')?jobColor[t.job]:null;
+  t.el.classList.toggle('jobhl',!!c);t.el.classList.toggle('jobfocus',!!c&&t.job===jobFocus);
+  if(c){t.el.style.setProperty('--jobc',c+'2e');t.el.style.setProperty('--jobf',c+'5c');t.el.style.setProperty('--jobb',c)}}}
+jobgo.addEventListener('click',()=>{const pids=jobPicked();if(!pids.length||hstopBusy)return;closeJobs();
+ execHstop('jobs','hstop '+pids.map(p=>'--pid '+p).join(' '),{all:false,pids})});
+document.getElementById('jobno').addEventListener('click',closeJobs);
+jobdlg.addEventListener('cancel',e=>{e.preventDefault();closeJobs()});
 function hstopBtns(){
  const w=document.createElement('span');w.className='hsbtns';
  w.appendChild(hstopBtn('jobs'));w.appendChild(hstopBtn('all'));
@@ -2468,7 +2707,7 @@ function renderSys(s){lastSysmon=s;renderSysCard()}
 function renderGpu(gpus){lastGpus=gpus;renderSysCard()}
 function onSysmon(ev){renderSys(ev)}
 function onError(ev){const d=document.createElement('div');d.className='seg bad';d.innerHTML='<div class="ja"></div>';d.querySelector('.ja').textContent=ev.text;main.appendChild(d)}
-const H={turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError,turn_ctx:onTurnCtx,gpu:onGpu,sysmon:onSysmon};
+const H={turn_proc:onTurnProc,turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError,turn_ctx:onTurnCtx,gpu:onGpu,sysmon:onSysmon};
 function connect(){
   const es=new EventSource('/events');
   es.onopen=()=>{document.getElementById('sdot').className='dot ok';document.getElementById('stext').textContent='接続中'};
@@ -2540,6 +2779,8 @@ class UIHandler(BaseHTTPRequestHandler):
             return self._send(200, "application/json; charset=utf-8", json.dumps(evs, ensure_ascii=False).encode())
         if path == "/health":
             return self._send(200, "text/plain", b"ok")
+        if path == "/api/jobs":
+            return self._jobs()
         return self._send(404, "text/plain", b"not found")
 
     def do_POST(self):
@@ -2551,14 +2792,64 @@ class UIHandler(BaseHTTPRequestHandler):
                 req = json.loads(body.decode("utf-8")) if body else {}
             except ValueError:
                 req = {}
+            if not isinstance(req, dict):
+                req = {}
             # {"all": false} = hstop (裏の作業だけ) / それ以外 = hstop --all (本文なしも --all: 以前の画面との互換)
-            return self._hstop(bool(req.get("all", True)) if isinstance(req, dict) else True)
+            # {"all": false, "pids": [...]} = hstop --pid … (黄色のボタンのダイアログで選んだ作業だけ)
+            pids = req.get("pids")
+            if pids is not None and not (isinstance(pids, list) and pids
+                                         and all(isinstance(p, int) and not isinstance(p, bool) and p > 1 for p in pids)):
+                return self._json(400, {"ok": False, "code": None, "output": "止める作業が選ばれていません"})
+            return self._hstop(bool(req.get("all", True)), pids)
+        if path == "/api/abort":
+            return self._abort(body)
         return self._send(404, "text/plain", b"not found")
+
+    def _abort(self, body):
+        """原文の最先端の停止ボタン: そのターンの要求だけを切る"""
+        if self.headers.get("X-Honyaku") != "1":
+            return self._json(403, {"ok": False, "output": "forbidden"})
+        try:
+            n = int(json.loads(body.decode("utf-8")).get("turn"))
+        except (ValueError, TypeError, AttributeError):
+            return self._json(400, {"ok": False, "output": "turn の指定が正しくありません"})
+        with Turn.active_lock:
+            t = Turn.active.get(n)
+        if t is None or t.abort is None:
+            return self._json(200, {"ok": False, "output": f"#{n} はもう終わっています"})
+        log.info("abort #%d from %s", n, self.client_address[0])
+        t.abort()
+        return self._json(200, {"ok": True, "output": ""})
+
+    def _jobs(self):
+        """黄色のボタンのダイアログ: 動いている裏の作業の一覧 (hstop --list --json)"""
+        if self.headers.get("X-Honyaku") != "1":
+            return self._json(403, {"ok": False, "output": "forbidden"})
+        exe = find_hstop(self.cfg)
+        if not os.path.isfile(exe) or not os.access(exe, os.X_OK):
+            return self._json(200, {"ok": False, "output": f"hstop が見つかりません ({exe})"})
+        try:
+            r = subprocess.run([exe, "--list", "--json"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, errors="replace", timeout=15)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return self._json(200, {"ok": False, "output": f"hstop --list を実行できません: {e}"})
+        if r.returncode != 0:
+            return self._json(200, {"ok": False, "output": (r.stdout + r.stderr).strip() +
+                                    "\n(hstop が古い可能性があります。llmsv で deploy --self-update を実行してください)"})
+        jobs = []
+        for ln in r.stdout.splitlines():
+            try:
+                j = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(j, dict) and isinstance(j.get("pid"), int):
+                jobs.append(j)
+        return self._json(200, {"ok": True, "jobs": jobs})
 
     def _json(self, status, body):
         return self._send(status, "application/json; charset=utf-8", json.dumps(body, ensure_ascii=False).encode())
 
-    def _hstop(self, all_=True):
+    def _hstop(self, all_=True, pids=None):
         """画面の GPU 行のボタン: hstop (黄) / hstop --all (赤) を実行して出力を返す (server-deploy の hstop)。
         独自ヘッダー必須 = 他のサイトのページからは送れない (CORS のプリフライトで止まる)"""
         if self.headers.get("X-Honyaku") != "1":
@@ -2572,7 +2863,7 @@ class UIHandler(BaseHTTPRequestHandler):
                        "server-deploy の install.sh で ~/.local/bin/hstop を作るか、config の [hstop] path に場所を書いてください")
                 log.warning("hstop: not found: %s", exe)
                 return self._json(200, {"ok": False, "code": None, "output": msg})
-            args = ["--all"] if all_ else []
+            args = ["--all"] if all_ else [a for p in (pids or []) for a in ("--pid", str(p))]
             name = " ".join(["hstop"] + args)
             log.info("%s: run from %s (%s)", name, self.client_address[0], exe)
             try:
