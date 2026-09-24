@@ -1586,30 +1586,77 @@ def client_process(peer, local):
     return None
 
 
+def _proc_info(pid):
+    """(argv, comm, 親の PID, 作業フォルダ)。読めなければ None"""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+        with open(f"/proc/{pid}/stat") as f:
+            st = f.read()
+        comm = st[st.index("(") + 1:st.rindex(")")]
+        ppid = int(st[st.rindex(")") + 2:].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    try:
+        cwd = os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        cwd = ""
+    return argv, comm, ppid, cwd
+
+
+_WRAPPERS = {"bash", "sh", "dash", "zsh", "env", "timeout", "nohup", "setsid", "flock", "nice", "ionice",
+             "sudo", "su", "runuser", "uv", "script"}
+_HTDOCS_RE = re.compile(r"/htdocs/([^/\s]+)")
+
+
+def _oneshot_caller(pid):
+    """裏の作業 (hermes … --oneshot) を頼んだもの。server-deploy の hstop --list の「頼んだもの」と同じ判定:
+    htdocs/<アプリ> (作業フォルダかコマンド) → アプリ名 / cron → cron / Hermes → Hermes <コマンド> / それ以外 → 親の名前"""
+    chain = []
+    for _ in range(12):
+        info = _proc_info(pid)
+        if info is None:
+            break
+        chain.append(info)
+        if info[2] <= 1:
+            break
+        pid = info[2]
+    for argv, comm, _, cwd in chain:
+        m = _HTDOCS_RE.search(" ".join(argv) + " " + cwd)
+        if m:
+            return m.group(1)
+    for argv, comm, _, _ in chain[1:]:
+        if comm in ("cron", "crond", "anacron"):
+            return "cron"
+    for argv, comm, _, _ in chain[1:]:
+        rest = _hermes_rest(argv)
+        if rest is not None:
+            return "Hermes " + (rest[0] if rest and not rest[0].startswith("-") else "")
+    for argv, comm, _, _ in chain[1:]:
+        if comm not in _WRAPPERS and not comm.startswith("python"):
+            return comm
+    return chain[1][1] if len(chain) > 1 else "不明"
+
+
 def hermes_job(pid):
-    """pid から親をたどって Hermes のプロセスを探す。
-    ("oneshot", PID) = hermes … --oneshot (cron・本棚などの裏の作業。hstop --pid で止められる) /
-    ("dashboard", PID) = Hermes の本体 (デスクトップアプリの会話) / ("hermes", PID) = その他の hermes / (None, None)"""
+    """pid から親をたどって Hermes のプロセスを探す。(種類, PID, 画面の札) を返す。
+    "oneshot" = hermes … --oneshot (cron・本棚などの裏の作業。hstop --pid で止められる。札は頼んだもの) /
+    "dashboard" = Hermes の本体 (デスクトップアプリの会話) / "hermes" = その他の hermes / 見つからなければ (None, None, "")"""
     for _ in range(12):
         if not pid or pid <= 1:
             break
-        try:
-            with open(f"/proc/{pid}/cmdline", "rb") as f:
-                argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
-            with open(f"/proc/{pid}/stat") as f:
-                st = f.read()
-            ppid = int(st[st.rindex(")") + 2:].split()[1])
-        except (OSError, ValueError, IndexError):
+        info = _proc_info(pid)
+        if info is None:
             break
-        rest = _hermes_rest(argv)
+        rest = _hermes_rest(info[0])
         if rest is not None:
             if "--oneshot" in rest:
-                return "oneshot", pid
+                return "oneshot", pid, _oneshot_caller(pid)
             if rest[:1] == ["dashboard"]:
-                return "dashboard", pid
-            return "hermes", pid
-        pid = ppid
-    return None, None
+                return "dashboard", pid, "デスクトップ"
+            return "hermes", pid, "Hermes " + (rest[0] if rest and not rest[0].startswith("-") else "")
+        pid = info[2]
+    return None, None, ""
 
 
 class ClientGone(Exception):
@@ -1622,6 +1669,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
     translator = None
     upstream = None  # (scheme, host, port)
     token_meter = None
+    # 停止ボタンで止めた要求: (接続元 IP, 要求の中身のハッシュ) → (期限, 止めたターン番号)。
+    # Hermes は通信エラーだと同じ要求をやり直すので、期限内に同じ要求が来たら 400 で断る (断るたびに期限を延ばす)
+    refused = {}
+    refused_lock = threading.Lock()
+    REFUSE_SEC = 120
 
     def log_message(self, fmt, *args):
         log.debug("proxy %s - " + fmt, self.client_address[0], *args)
@@ -1802,7 +1854,40 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if conn:
                 conn.close()
 
+    def _refuse_key(self, req):
+        """やり直しの判定に使う「同じ要求」の鍵。モデルと会話 (messages) が同じなら同じ要求"""
+        try:
+            data = json.dumps([req.get("model"), req.get("messages")], ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return None
+        return self.client_address[0], hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+    def _refused_turn(self, key):
+        """停止ボタンで止めた要求のやり直しなら、止めたターン番号 (期限を延ばす)。違えば None"""
+        if key is None:
+            return None
+        now = time.time()
+        with self.refused_lock:
+            for k in [k for k, (exp, _) in self.refused.items() if exp < now]:
+                del self.refused[k]
+            hit = self.refused.get(key)
+            if hit is None:
+                return None
+            self.refused[key] = (now + self.REFUSE_SEC, hit[1])
+            return hit[1]
+
     def _chat(self, req):
+        key = self._refuse_key(req)
+        n = self._refused_turn(key)
+        if n is not None:
+            msg = f"Hermes Honyaku の停止ボタンで止めた要求です (#{n})。やり直しを断りました"
+            log.info("chat: 停止ボタンで止めた要求 (#%d) のやり直しを 400 で断りました", n)
+            BUS.publish({"type": "error", "text": f"#{n} を停止ボタンで止めたので、同じ要求のやり直しを断りました ({self._source() or self.client_address[0]})"})
+            body = json.dumps({"error": {"message": msg, "type": "invalid_request_error", "code": "stopped_by_user"}},
+                              ensure_ascii=False).encode("utf-8")
+            self._begin(400, [("Content-Type", "application/json")], False, len(body))
+            self._write(body)
+            return
         client_stream = bool(req.get("stream"))
         up_req = dict(req)
         up_req["stream"] = True
@@ -1820,6 +1905,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             """画面の停止ボタン: この要求だけを切る。上流 (llama-server) との接続を切って生成を止め、
             Hermes 側の接続も切る (Hermes からは通信エラーに見える)"""
             aborted.set()
+            if key is not None and turn is not None:
+                with self.refused_lock:
+                    self.refused[key] = (time.time() + self.REFUSE_SEC, turn.n)
             for sock in (conn.sock if conn is not None else None, self.connection):
                 try:
                     if sock is not None:
@@ -1850,12 +1938,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 def _proc():
                     try:
                         pid = client_process(peer, local)
-                        kind, job = hermes_job(pid)
+                        kind, job, label = hermes_job(pid)
                     except Exception:
                         log.debug("turn_proc failed", exc_info=True)
                         return
                     if pid:
-                        BUS.publish({"type": "turn_proc", "turn": tn, "pid": pid, "kind": kind, "job": job})
+                        BUS.publish({"type": "turn_proc", "turn": tn, "pid": pid, "kind": kind, "job": job, "label": label})
                 threading.Thread(target=_proc, name="turn-proc", daemon=True).start()
             if self.token_meter is not None:
                 # 画面用のコンテキストメータ。/tokenize が (並列 1 の) 生成と干渉して遅くなる可能性があるため、
@@ -1993,6 +2081,8 @@ background:linear-gradient(90deg,#333e46,#242d34);border-bottom:2px solid;border
 .turn h3 .ctx{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--en)}
 .turn h3 .st{font-family:"Courier New",ui-monospace,monospace}
 .turn h3 .src{background:var(--acc);color:#0b1013;padding:0 6px;font-weight:700;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.turn h3 .who{padding:0 6px;font-weight:700;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);background:#2b3a55;color:#cfe0ff}
+.turn h3 .who.oneshot{background:#5a4200;color:#ffe08a}
 .turn h3 .tk{background:var(--face);color:var(--muted);padding:0 6px;border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
 .turn h3 .ctxm{font-family:"Courier New",ui-monospace,monospace;color:var(--muted)}
 .turn h3 .ctxm.hot{color:var(--warn)}
@@ -2159,6 +2249,11 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
 #jobdlg .jr .tn a{color:var(--acc);margin-left:4px}
 #jobdlg .jr .tn .lv{color:var(--warn)}
 #jobdlg .jr .nw{flex:none;color:var(--warn)}
+#jobdlg .jr.info{cursor:default;color:var(--muted)}
+#jobdlg .jr.info:hover{background:none}
+#jobdlg .jr.info .ic{flex:none;width:13px;text-align:center;color:#6fa8ff;font-weight:700}
+#jobdlg .jr.info .hint{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#jobdlg .jh{padding:6px 8px 2px;font-size:11px;color:var(--muted);border-top:1px solid #2b353d}
 #jobdlg .db{display:flex;justify-content:flex-end;gap:8px;padding:0 10px 10px}
 #jobdlg .db button{min-width:72px}
 #jobdlg .db button:disabled{color:var(--muted);cursor:default}
@@ -2389,7 +2484,13 @@ function onTurnEnd(ev){const t=turn(ev.turn);if(!t)return;t.think.classList.remo
   if(ev.task&&!t.el.classList.contains('task')){t.el.classList.add('task');const h=t.el.querySelector('h3 .src')||t.el.querySelector('h3 .n');h.insertAdjacentHTML('afterend','<span class="tk">背景タスク</span>');applyFilters()}
   if(jobOpen){jobHighlight();renderJobs()}}
 // どのプロセスからの要求か (中継サーバーが /proc で調べる)。job = hermes … --oneshot の PID (裏の作業のとき)
-function onTurnProc(ev){const t=turn(ev.turn);if(!t)return;t.job=ev.kind==='oneshot'?ev.job:null;if(jobOpen){jobHighlight();renderJobs()}}
+// 見出しに札を付ける: デスクトップ (Hermes の本体) / 裏の作業を頼んだもの (hondana・cron など) / Hermes のその他のコマンド
+function onTurnProc(ev){const t=turn(ev.turn);if(!t)return;t.job=ev.kind==='oneshot'?ev.job:null;t.kind=ev.kind||null;t.label=ev.label||'';
+  let w=t.el.querySelector('h3 .who');
+  if(t.label){if(!w){w=document.createElement('span');const h=t.el.querySelector('h3 .src')||t.el.querySelector('h3 .n');h.after(w)}
+   w.className='who'+(ev.kind==='oneshot'?' oneshot':'');w.textContent=t.label;
+   w.title=(ev.kind==='dashboard'?'デスクトップアプリの会話 (Hermes の本体)':ev.kind==='oneshot'?'裏の作業 (hermes … --oneshot) を頼んだもの':'Hermes のプロセス')+' · PID '+(ev.job||ev.pid)}
+  if(jobOpen){jobHighlight();renderJobs()}}
 // ---- 原文の最先端の停止ボタン: その推測 (1 回の要求) だけを切る。1 回目で赤く点滅し、3 秒以内にもう一度押すと止める ----
 function stopBtn(n){
  const b=document.createElement('button');b.type='button';b.className='tstop';b.innerHTML='<i></i><span>停止</span>';
@@ -2624,6 +2725,25 @@ function renderJobs(){
   row.addEventListener('mouseenter',()=>{jobFocus=x.pid;jobHighlight()});
   row.addEventListener('mouseleave',()=>{if(jobFocus===x.pid){jobFocus=null;jobHighlight()}});
   joblist.appendChild(row)}
+ // 参考: 一覧の作業以外で推測中のターン (デスクトップアプリの会話、Open WebUI など)。ここでは止められないので止め方を案内する
+ const listed=new Set((jobErr?[]:jobList||[]).map(x=>x.pid)), others={};
+ for(const n of Object.keys(turns).map(Number).sort((a,b)=>a-b)){const t=turns[n];
+  if(!t.think.classList.contains('live')||(t.job&&listed.has(t.job)))continue;
+  const name=t.kind==='dashboard'?'デスクトップアプリの会話':t.kind==='oneshot'?'裏の作業 ('+(t.label||'不明')+')':t.label||t.el.dataset.source||'発信元不明';
+  const hint=t.kind==='dashboard'?'止めるには原文の停止ボタン (その推測だけ) / 赤のボタン (会話ごと)':'止めるには原文の停止ボタン (その推測だけ)';
+  (others[name]=others[name]||{hint,ns:[]}).ns.push(n)}
+ if(Object.keys(others).length){
+  joblist.insertAdjacentHTML('beforeend','<div class="jh">参考: ほかに推測中のもの (ここでは止められません)</div>');
+  for(const name in others){const o=others[name];
+   const row=document.createElement('div');row.className='jr info';
+   const ic=document.createElement('span');ic.className='ic';ic.textContent='i';
+   const cl=document.createElement('span');cl.className='cl';cl.textContent=name;
+   const tn=document.createElement('span');tn.className='tn';
+   for(const n of o.ns){const a=document.createElement('a');a.href='#t'+n;a.textContent='#'+n;
+    a.addEventListener('click',e=>{e.preventDefault();pause();turns[n]&&turns[n].el.scrollIntoView({block:'center'})});tn.appendChild(a)}
+   tn.insertAdjacentHTML('beforeend','<span class="lv"> 推測中</span>');
+   const hi=document.createElement('span');hi.className='hint';hi.textContent=o.hint;hi.title=o.hint;
+   row.append(ic,cl,tn,hi);joblist.appendChild(row)}}
  updateJobGo()}
 function jobPicked(){return (jobErr||!jobList)?[]:jobList.filter(x=>jobSel[x.pid]).map(x=>x.pid)}
 function updateJobGo(){const n=jobPicked().length;jobgo.disabled=!n||!!hstopBusy;jobgo.textContent='選んだ作業を止める'+(n?' ('+n+' 件)':'')}
