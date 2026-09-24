@@ -47,7 +47,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -2276,7 +2276,7 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
    縦: 上に貼り付けた欄 (#mtop: タイトル・ランプ・[…] / コンテキスト / GPU / 原文の最新 3 行) + 残りの高さで和訳が流れる。
    横: 左 30% に #mtop (原文は空いた高さいっぱい)、右 70% で和訳が流れる。どちらもページ全体のスクロールで流す (自動スクロールは PC と共通)。
    和訳の流れは、ターンの枠をやめて細い見出しを挟むだけにし、原文の列と翻訳待ちの文は出さない (「翻訳中… (待ち n)」の 1 行にまとめる) */
-#mtop,.mwait{display:none}
+#mtop,#mjcap{display:none}
 #tomob{display:none}
 @media (pointer:coarse){html:not(.mob) #tomob{display:inline-block}}
 html:not(.mob) header{padding-top:max(5px,env(safe-area-inset-top))}
@@ -2301,9 +2301,9 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 .mob #mgpu .tsub .trow{margin-left:10px}
 .mob #mgpu .leaf{flex-direction:row;align-items:center;gap:6px;margin:0 0 1px 22px}
 .mob #mgpu .leaf .top{display:contents}
-.mob #mgpu .leaf .bl{width:62px}
+.mob #mgpu .leaf .bl{width:44px}
 .mob #mgpu .leaf .bar{flex:1;order:1}
-.mob #mgpu .leaf .bval{order:2;margin-left:0;min-width:74px;text-align:right}
+.mob #mgpu .leaf .bval{order:2;margin-left:0;min-width:56px;text-align:right}
 .mob .sysm .trow .hsbtn{width:42px;height:28px}
 .mob .sysm .trow .hsbtn svg{width:16px;height:16px}
 /* ツリーを閉じた GPU は 1 行の要約 (温度・VRAM・電力) を残す */
@@ -2321,8 +2321,16 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 -webkit-mask-image:linear-gradient(transparent,#000 1.1em);mask-image:linear-gradient(transparent,#000 1.1em)}   /* 上で切れた行は薄く消す */
 #motail{white-space:pre-wrap;word-break:break-word}
 #morig.idle #motext{opacity:.5}
-/* 和訳の流れ */
-.mob main{padding:6px 6px calc(64px + env(safe-area-inset-bottom))}
+/* 和訳の流れ: 原文の欄と同じ凹んだ枠 1 つにまとめ、1 文ごとの枠は付けない。ターンの見出しは枠の中の区切り。
+   一番上に「和訳」のタイトル行 (#mjcap) を貼り付け、翻訳待ちの数を出す (縦向きは上の欄のすぐ下 = --mtoph、横向きは右の欄の一番上) */
+.mob main{margin:6px 6px calc(64px + env(safe-area-inset-bottom));padding:0 8px 8px;background:#12181d;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.mob #mjcap{display:flex;align-items:center;gap:6px;position:sticky;top:var(--mtoph,0px);z-index:4;min-height:28px;margin:0 -8px 8px;padding:2px 8px;
+font-size:11px;color:var(--muted);background:#12181d;border-bottom:1px solid var(--hv)}
+.mob #mjcap .cap{font-size:10px;letter-spacing:.06em;color:var(--muted);background:var(--panel);padding:0 5px;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+#mjturn{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+#mjwait{flex:none;margin-left:auto;white-space:nowrap;color:var(--acc)}
+#mjwait.on{color:var(--warn)}
+#mjwait.on::after{content:"▍";animation:bl 1s steps(2) infinite}
 .mob .turn{margin:0 0 10px;border:none;box-shadow:none;background:none}
 .mob .turn h3{flex-wrap:nowrap;gap:6px;padding:2px 6px;font-size:11px;font-weight:400;border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
 .mob .turn h3>span{flex:none;white-space:nowrap}
@@ -2332,12 +2340,12 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 .mob .cols>.col:first-child,.mob .col>.cap{display:none}
 .mob .col{padding:6px 0 0}
 .mob .col+.col{border:none}
-.mob .seg{margin:0 0 6px;padding:5px 8px}
+.mob .segs .seg{margin:0 0 10px;padding:0 2px;background:none;border:none;box-shadow:none}
+.mob .segs .seg.untranslated{padding-left:8px;border-left:3px solid var(--warn)}
+.mob .segs .seg.code{padding-left:8px;border-left:3px solid var(--muted)}
 .mob .seg .ja{font-size:16px;line-height:1.7}
 .mob .seg.pending,.mob .seg.pending~.seg{display:none}
 .mob .segs:has(.seg.pending)~.tools,.mob .segs:has(.seg.pending)~.ans{display:none}
-.mob .mwait.on{display:block;margin:0 0 6px;padding:3px 8px;font-size:12px;color:var(--warn);border-left:3px solid var(--warn)}
-.mob .mwait.on::after{content:"▍";animation:bl 1s steps(2) infinite}
 .mob .tools div{white-space:normal;overflow:visible;overflow-wrap:anywhere}
 .mob .ans{font-size:15px}
 .mob .ans pre,.mob .ans table{display:block;overflow-x:auto}
@@ -2353,7 +2361,8 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
  .mob #mtop{height:100vh;height:100dvh;overflow-y:auto;padding-bottom:max(5px,env(safe-area-inset-bottom));border-bottom:none;border-right:2px solid var(--sv)}
  .mob #morig{flex:1 1 auto;min-height:96px}
  .mob #motext{flex:1;height:auto;min-height:0}
- .mob main{padding-left:8px;padding-right:8px}
+ .mob main{margin-left:8px;margin-right:8px}
+ .mob #mjcap{top:0}
 }
 /* […] のメニュー (下からせり上がる板) */
 #msheet{inset:auto 0 0 0;margin:0 auto;padding:0;width:min(640px,100%);max-width:100%;max-height:88vh;max-height:88dvh;color:var(--ink);background:var(--face);
@@ -2437,7 +2446,7 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
   <div id="sysmc"></div>
  </div>
 </aside>
-<main id="main"><div class="empty" id="empty">Hermes Agent からの要求を待っています。<br>~/.hermes/config.yaml の model.base_url を中継サーバーに向けてください。</div></main>
+<main id="main"><div id="mjcap"><span class="cap">和訳</span><span id="mjturn"></span><span id="mjwait"></span></div><div class="empty" id="empty">Hermes Agent からの要求を待っています。<br>~/.hermes/config.yaml の model.base_url を中継サーバーに向けてください。</div></main>
 </div>
 <script>
 (function(){
@@ -2496,7 +2505,7 @@ if(!('wakeLock' in navigator)){wake.disabled=true;
 else{pref('wake',wake,v=>{if(v)wakeReq();else if(wakeLock){wakeLock.release();wakeLock=null}});document.addEventListener('visibilitychange',wakeReq)}
 function addSource(name){if(!name||[...srcsel.options].some(o=>o.value===name))return;const o=document.createElement('option');o.value=name;o.textContent=name;srcsel.appendChild(o)}
 function clearScreen(){for(const k in turns){turns[k].el.remove();delete turns[k]}
-  [...main.children].forEach(c=>{if(c!==empty)c.remove()});empty.style.display='';lagMode=false;moUpdate();
+  [...main.children].forEach(c=>{if(c!==empty&&c.id!=='mjcap')c.remove()});empty.style.display='';lagMode=false;moUpdate();
   const g=document.getElementById('ctxg');g.querySelector('.txt').textContent='ctx -';setFill(g.querySelector('.fill'),0);g.className='ctxg';g.title='最新ターンのコンテキスト使用量'}
 document.getElementById('clear').onclick=clearScreen;
 function sysnote(text){const d=document.createElement('div');d.className='sysnote';d.textContent=text;main.appendChild(d)}
@@ -2613,9 +2622,9 @@ function onTurnStart(ev){
   const el=document.createElement('section');el.className='turn'+(ev.task?' task':'');el.id='t'+ev.turn;el.dataset.source=ev.source||'';addSource(ev.source);
   el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span class="tm">'+fmt(ev.ts)+'</span>'+(ev.source?'<span class="src">'+esc(ev.source)+'</span>':'')+(ev.task?'<span class="tk" title="最後のメッセージが ### Task: で始まる要求 (タイトル生成・タグ生成など)">背景タスク</span>':'')+'<span class="mdl">'+esc(ev.model||'')+'</span><span class="ctxm"></span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
    '<div class="cols"><div class="col"><div class="caprow"><div class="cap">Thinking (原文)</div></div><div class="think live"></div></div>'+
-   '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="mwait"></div><div class="tools"></div><div class="ans"></div></div></div>';
+   '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="tools"></div><div class="ans"></div></div></div>';
   if(newest.checked)main.insertBefore(el,main.firstElementChild.nextSibling);else main.appendChild(el);
-  turns[ev.turn]={n:ev.turn,mw:el.querySelector('.mwait'),el,think:el.querySelector('.think'),ans:el.querySelector('.ans'),tools:el.querySelector('.tools'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{},ansRaw:'',ansTimer:null,job:null,stop:null};
+  turns[ev.turn]={n:ev.turn,el,think:el.querySelector('.think'),ans:el.querySelector('.ans'),tools:el.querySelector('.tools'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{},ansRaw:'',ansTimer:null,job:null,stop:null};
   turns[ev.turn].stop=stopBtn(ev.turn);el.querySelector('.caprow').appendChild(turns[ev.turn].stop);
   if(ev.task)turns[ev.turn].segs.innerHTML='<div class="note">背景タスク (タイトル生成・タグ生成など) のため翻訳は省略</div>';
   applyFilters();
@@ -2677,10 +2686,7 @@ function onSeg(ev){const t=turn(ev.turn);if(!t)return;
     let after=null;for(const c of t.segs.children){if(Number(c.dataset.seg)<ev.seg)after=c}
     if(after)after.after(s);else t.segs.prepend(s);
     t.segEls[ev.seg]=s;}
-  s.querySelector('.src').textContent=ev.src;mwUpdate(t);scroll()}
-// スマホ表示: 翻訳待ちの文は隠して「翻訳中… (待ち n)」の 1 行にまとめる
-function mwUpdate(t){if(!MOB)return;const n=t.segs.querySelectorAll('.seg.pending').length;
-  t.mw.classList.toggle('on',n>0);t.mw.textContent=n?'翻訳中… (待ち '+n+')':''}
+  s.querySelector('.src').textContent=ev.src;moUpdate();scroll()}
 function onJa(ev){const t=turn(ev.turn);if(!t)return;let s=t.segEls[ev.seg];if(!s){onSeg({turn:ev.turn,seg:ev.seg,src:''});s=t.segEls[ev.seg]}
   // 翻訳モデルが英語で返した (how='en') / 次のターンが始まって中断した (how='interrupted') ときは原文をそのまま黄色で表示する
   const untr=ev.how==='en'||ev.how==='interrupted';
@@ -2691,7 +2697,7 @@ function onJa(ev){const t=turn(ev.turn);if(!t)return;let s=t.segEls[ev.seg];if(!
   else if(ev.how==='suspect')s.title='訳文が原文より極端に長いため、翻訳モデルが作文している可能性があります (原文を併記)';
   else if(ev.how==='en')s.title='翻訳失敗 (翻訳モデルが英語で返したため原文を表示)';
   else if(ev.how==='interrupted')s.title='次のターンが始まったため翻訳を中断 (原文を表示)';
-  mwUpdate(t);scroll()}
+  moUpdate();scroll()}
 function onTurnEnd(ev){const t=turn(ev.turn);if(!t)return;t.think.classList.remove('live');
   if(t.stop){clearTimeout(t.stop._arm);t.stop.remove();t.stop=null}
   t.st.textContent=(ev.reason==='stop'||ev.reason==='tool_calls'||ev.reason==='length'?'完了':ev.reason==='aborted'?'停止ボタンで中断':ev.reason)+' · '+ev.elapsed+'s · '+ev.think_chars+'字 · '+ev.segments+'文';
@@ -2715,16 +2721,26 @@ const MO_TAIL=4000;   // 欄に渡す末尾の文字数 (横向きで欄が高�
 function moUpdate(){if(!MOB||moReq)return;moReq=requestAnimationFrame(moRender)}
 function moRender(){moReq=0;
   let live=null,last=null;for(const t of visibleTurns()){last=t;if(t.think.classList.contains('live'))live=t}
+  mjRender();
   const t=live||last, tail=document.getElementById('motail'), lab=document.getElementById('moturn');
   document.getElementById('morig').classList.toggle('idle',!live);
   if(!t){tail.textContent='';lab.textContent='';setMoStop(null);return}
   const txt=t.think.textContent;tail.textContent=txt.length>MO_TAIL?txt.slice(-MO_TAIL):txt;
-  const who=t.el.querySelector('h3 .who');
-  lab.textContent='#'+t.n+' '+(who?who.textContent:t.el.dataset.source||'')+(live?' · 推測中':' · 終了');
+  lab.textContent='#'+t.n+' '+whoOf(t)+(live?' · 推測中':' · 終了');
   setMoStop(live?t.n:null)}
+// 和訳のタイトル行: 翻訳待ちがあれば最初に待っているターンと待ちの合計、無ければ最後のターンと「追いついています」
+// (待ちの文とその後ろは流れに出していないので、流れの下端はそのターンの訳し終わった所)
+function whoOf(t){const w=t.el.querySelector('h3 .who');return w?w.textContent:t.el.dataset.source||''}
+function mjRender(){let n=0,first=null,last=null;
+  for(const t of visibleTurns()){last=t;const k=t.segs.querySelectorAll('.seg.pending').length;if(k&&!first)first=t;n+=k}
+  const t=first||last, w=document.getElementById('mjwait');
+  document.getElementById('mjturn').textContent=t?'#'+t.n+' '+whoOf(t):'';
+  w.classList.toggle('on',n>0);w.textContent=n?'翻訳中… (待ち '+n+')':t?'追いついています':''}
 function setMoStop(n){if(n===moStopN)return;
   if(moStop){clearTimeout(moStop._arm);moStop.remove();moStop=null}
   moStopN=n;if(n!==null){moStop=stopBtn(n);document.querySelector('#morig .mocap').appendChild(moStop)}}
+// 縦向きで和訳のタイトル行を上の欄のすぐ下に貼り付けるため、上の欄の高さ (GPU の開閉・回転で変わる) を CSS に渡す
+if(MOB&&window.ResizeObserver)new ResizeObserver(()=>document.documentElement.style.setProperty('--mtoph',document.getElementById('mtop').offsetHeight+'px')).observe(document.getElementById('mtop'));
 document.getElementById('morig').addEventListener('click',e=>{if(!e.target.closest('button'))document.getElementById('morig').classList.toggle('big')});
 // ---- 原文の最先端の停止ボタン: その推測 (1 回の要求) だけを切る。1 回目で赤く点滅し、3 秒以内にもう一度押すと止める ----
 function stopBtn(n){
@@ -3030,7 +3046,7 @@ function gpuSection(top){
     const tp=(g.temp/90*100);
     gb.appendChild(sysleaf('🌡️ 温度',g.temp+'℃',tp,75/90*100,85/90*100));
     const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
-    gb.appendChild(sysleaf(IC_DDR+' VRAM',mv,g.mem_total?g.mem_used/g.mem_total*100:null,95));
+    gb.appendChild(sysleaf(MOB?IC_DDR:IC_DDR+' VRAM',mv,g.mem_total?g.mem_used/g.mem_total*100:null,95,null,MOB?'VRAM':''));   // スマホはアイコンだけ (メーターを長く)
     const mp=g.max_power||250;
     gb.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
     gwrap.appendChild(gb);
