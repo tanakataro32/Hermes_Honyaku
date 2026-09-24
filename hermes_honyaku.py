@@ -2054,14 +2054,14 @@ const turns={};
 const auto=document.getElementById('auto'), newest=document.getElementById('newest'), tobottom=document.getElementById('tobottom');
 const showsrc=document.getElementById('showsrc'), showans=document.getElementById('showans');
 // 自動スクロールの状態 (関数は下の「自動スクロール」の節。表示設定の復元時にも scroll() が呼ばれるので先に宣言する)
-let lagMode=false, lastAutoY=-1, scrollReq=0, pausedByScroll=false;
+let lagMode=false, lastAutoY=-1, scrollReq=0, pausedByScroll=false, holdUp=false;
 // 表示設定はブラウザに記憶する
 function pref(key,el,apply){try{const v=localStorage.getItem('hh.'+key);if(v!==null)el.checked=(v==='1')}catch(e){}apply(el.checked);
   el.addEventListener('change',()=>{try{localStorage.setItem('hh.'+key,el.checked?'1':'0')}catch(e){}apply(el.checked)})}
 pref('showsrc',showsrc,v=>{document.body.classList.toggle('showsrc',v);scroll()});
 pref('showans',showans,v=>{document.body.classList.toggle('noans',!v);scroll()});
 pref('newest',newest,v=>{const els=[...main.querySelectorAll('.turn')];els.sort((a,b)=>(Number(a.id.slice(1))-Number(b.id.slice(1)))*(v?-1:1));els.forEach(e=>main.appendChild(e));if(v)window.scrollTo(0,0);updateBtn()});
-pref('auto',auto,v=>{pausedByScroll=false;updateBtn();if(v)scroll()});
+pref('auto',auto,v=>{pausedByScroll=false;holdUp=false;updateBtn();if(v)scroll()});
 const hidetask=document.getElementById('hidetask'), srcsel=document.getElementById('srcsel');
 pref('hidetask',hidetask,v=>applyFilters());
 srcsel.onchange=()=>applyFilters();
@@ -2083,6 +2083,8 @@ function updateBtn(){tobottom.classList.toggle('show',!newest.checked&&!auto.che
 // 目標: 「右列 (訳文・ツール・回答) の最新の行の下端」が画面の下端に来る位置。左列 (英文の Thinking) は追随対象にしない。
 // 翻訳待ちが 3 行以上たまっている間は最後に翻訳済みの行までしか進めず、待ちが 1 行以下に減るまでその状態を保つ
 // (2⇔3 行で目標が上下に揺れないようにヒステリシスを持たせる)。
+// ただし、回答ブロックや前のターンの終わりをまたいで下へ進んだ後は、翻訳待ちがたまっても上には戻さず、その位置で待つ
+// (戻すと、翻訳が追いつくたびに回答ブロックをまたいで上下に振られる)。目標がその位置より下になったら、また追随する。
 // 表示されていない要素 (非表示の背景タスク、「回答も表示」オフの回答、注記の行) は座標が取れないので数えない。
 const PAD=24;        // 最新の行の下に残す余白 (px)
 const PAUSE_PX=48;   // 目標からこれ以上離れたら (上下どちらでも) ユーザーが読んでいると判断して追随を止める
@@ -2107,10 +2109,19 @@ function targetY(updateLag){
   if(lagMode&&shown(lastDone))best=Math.min(best,bottomOf(lastDone));
   return Math.max(0,Math.min(maxScroll(),Math.round(best-window.innerHeight+PAD)));
 }
+// 上へ from → to に戻すと、画面の下端が回答ブロック (または後ろにターンが続くターンの終わり) をまたぐか
+function crossesUp(from,to){
+  const lo=to+window.innerHeight+1, hi=from+window.innerHeight+1, vt=visibleTurns();
+  return vt.some((t,i)=>{
+    if(t.ans.textContent.trim()&&shown(t.ans)){const b=bottomOf(t.ans);if(b>lo&&b<=hi)return true}
+    if(i<vt.length-1){const b=bottomOf(t.el);if(b>lo&&b<=hi)return true}
+    return false})}
 // 描画 1 回につき 1 度だけ計算する (思考はトークン単位で届くので、そのたびに全ターンの座標を測ると重い)
-function doScroll(){scrollReq=0;if(newest.checked||!auto.checked)return;const y=targetY(true);lastAutoY=y;if(Math.abs(window.scrollY-y)>=1)window.scrollTo(0,y)}
+function doScroll(){scrollReq=0;if(newest.checked||!auto.checked)return;let y=targetY(true);const cur=window.scrollY;
+  if(y<cur-1){if(holdUp||crossesUp(cur,y)){holdUp=true;y=cur}}else holdUp=false;
+  lastAutoY=y;if(Math.abs(cur-y)>=1)window.scrollTo(0,y)}
 function scroll(){if(newest.checked||!auto.checked||scrollReq)return;scrollReq=requestAnimationFrame(doScroll)}
-function pause(){if(newest.checked||!auto.checked)return;auto.checked=false;pausedByScroll=true;if(scrollReq){cancelAnimationFrame(scrollReq);scrollReq=0}updateBtn()}
+function pause(){if(newest.checked||!auto.checked)return;auto.checked=false;pausedByScroll=true;holdUp=false;if(scrollReq){cancelAnimationFrame(scrollReq);scrollReq=0}updateBtn()}
 function resume(){if(auto.checked)return;auto.checked=true;pausedByScroll=false;updateBtn();scroll()}
 // ユーザーの操作の検出。
 //  ・ホイール上 / PageUp / ↑ / Home / 指で下に引く → その場で止める (scroll イベントを待つと、次の訳文で引き戻されてしまう)
@@ -2128,11 +2139,12 @@ window.addEventListener('touchmove',e=>{if(touchY===null)return;if(e.touches[0].
 window.addEventListener('scroll',()=>{if(newest.checked)return;
   const y=window.scrollY;
   if(Math.abs(y-lastAutoY)<1.5)return;
-  const dist=targetY(false)-y; // 正 = 目標より上を見ている、負 = 目標より下 (左列の英文の続き) を見ている
+  // 正 = 目標より上を見ている、負 = 目標より下 (左列の英文の続き) を見ている。回答ブロックをまたいで待っている間は、待っている位置が目標
+  const dist=(auto.checked&&holdUp?lastAutoY:targetY(false))-y;
   if(auto.checked){if(!scrollReq&&Math.abs(dist)>PAUSE_PX)pause()}
   else if(pausedByScroll&&(Math.abs(dist)<=RESUME_PX||maxScroll()-y<=RESUME_PX))resume()},{passive:true});
 window.addEventListener('resize',()=>scroll());
-tobottom.onclick=()=>{auto.checked=true;pausedByScroll=false;updateBtn();scroll()};
+tobottom.onclick=()=>{auto.checked=true;pausedByScroll=false;holdUp=false;updateBtn();scroll()};
 function turn(n){return turns[n]}
 function onTurnStart(ev){
   empty.style.display='none';
