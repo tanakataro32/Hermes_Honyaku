@@ -2331,7 +2331,11 @@ function fmt(ts){const d=new Date(ts*1000);return d.toTimeString().slice(0,8)}
 function updateBtn(){tobottom.classList.toggle('show',!newest.checked&&!auto.checked)}
 // ---- 自動スクロール ----
 // 目標: 「右列 (訳文・ツール・回答) の最新の行の下端」が画面の下端に来る位置。左列 (英文の Thinking) は追随対象にしない。
-// 翻訳待ちが 3 行以上たまっている間は最後に翻訳済みの行までしか進めず、待ちが 1 行以下に減るまでその状態を保つ
+// 翻訳待ちが 3 行以上たまっている間は「翻訳済みが途切れずに続く最後の行」(最初の翻訳待ちの行の直前) までしか進めず、
+// 待ちが 1 行以下に減るまでその状態を保つ。コマンド / コードの行は翻訳しないので届いた時点で確定し、翻訳の並列で
+// 後ろの行が先に訳し終わることもあるが、それらが最初の翻訳待ちより後ろにあっても、そこまでは飛ばない。
+// 待ちが少ないときも、最初の翻訳待ちの行 (いま翻訳中の所) がヘッダーの下から上に出ていくところまでは進めない
+// (コードの行が長いと、最新の行を追うだけで翻訳中の所が画面の上に消えてしまうため)
 // (2⇔3 行で目標が上下に揺れないようにヒステリシスを持たせる)。
 // ただし、回答ブロックや前のターンの終わりをまたいで下へ進んだ後は、翻訳待ちがたまっても上には戻さず、その位置で待つ
 // (戻すと、翻訳が追いつくたびに回答ブロックをまたいで上下に振られる)。目標がその位置より下になったら、また追随する。
@@ -2341,14 +2345,15 @@ const PAUSE_PX=48;   // 目標からこれ以上離れたら (上下どちらで
 const RESUME_PX=48;  // 止まった後、目標またはページ最下部にこの距離まで戻ってきたら追随を再開する
 function shown(el){return !!el&&el.getClientRects().length>0}
 function bottomOf(el){return el.getBoundingClientRect().bottom+window.scrollY}
+function hdrH(){return document.querySelector('header').offsetHeight}
 function maxScroll(){return Math.max(0,document.documentElement.scrollHeight-window.innerHeight)}
 function visibleTurns(){return Object.keys(turns).map(Number).sort((a,b)=>a-b).map(n=>turns[n]).filter(t=>!t.el.classList.contains('hidden'))}
 function segsOf(t){return [...t.segs.children].filter(c=>c.classList.contains('seg'))}
 function targetY(updateLag){
-  let best=0,pending=0,lastDone=null;
+  let best=0,pending=0,lastDone=null,firstPending=null;
   for(const t of visibleTurns()){
     const segs=segsOf(t);
-    for(const c of segs){if(c.classList.contains('pending'))pending++;else lastDone=c}
+    for(const c of segs){if(c.classList.contains('pending')){if(!pending++)firstPending=c}else if(!pending)lastDone=c}
     const ls=segs[segs.length-1];
     if(shown(ls))best=Math.max(best,bottomOf(ls));
     if(t.tools.children.length&&shown(t.tools))best=Math.max(best,bottomOf(t.tools));
@@ -2357,6 +2362,8 @@ function targetY(updateLag){
   if(!best)return maxScroll();
   if(updateLag){if(pending>=3)lagMode=true;else if(pending<=1)lagMode=false}
   if(lagMode&&shown(lastDone))best=Math.min(best,bottomOf(lastDone));
+  if(shown(firstPending)){const top=firstPending.getBoundingClientRect().top+window.scrollY;
+    best=Math.min(best,Math.max(bottomOf(firstPending),top-hdrH()-PAD+window.innerHeight))}
   return Math.max(0,Math.min(maxScroll(),Math.round(best-window.innerHeight+PAD)));
 }
 // 上へ from → to に戻すと、画面の下端が回答ブロック (または後ろにターンが続くターンの終わり) をまたぐか
