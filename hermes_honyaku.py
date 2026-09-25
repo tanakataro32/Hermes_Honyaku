@@ -50,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -2121,8 +2121,8 @@ if(m)document.documentElement.classList.add('mob')})();
 --en:#a9bac6;
 --ja:#f2f6f8;
 --acc:#4fc3b8;
---warn:#e5a33b;
---bad:#f08a82;
+--warn:#ffb300;
+--bad:#ff4136;
 /* Win98 風ビベール: 上左=ハイライト / 下右=シャドウ */
 --hv:#4a5762;
 --sv:#070a0d;
@@ -2171,7 +2171,7 @@ background:linear-gradient(90deg,#333e46,#242d34);border:1px solid;border-color:
 .ctxg .bar{width:90px;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 /* プログレスバーは全て 3 段階カラー: 0-50% 緑 / 50-80% 黄 / 80-100% 赤 (境界に 1px の仕切り)。
    グラデーションはバー全幅に固定し (JS で background-size を 100/幅 倍にする)、fill が伸びた分だけ色が現れる */
-.ctxg .fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#46b35e 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat;transition:width .25s,background-size .25s}
+.ctxg .fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#35e05a 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat;transition:width .25s,background-size .25s}
 .ctxg.warn{color:var(--warn)}
 .ctxg.hot .txt,.ctxg.hot{color:var(--bad)}
 .sysm{display:flex;flex-direction:column;font-family:"Courier New",ui-monospace,monospace;font-size:11px;line-height:1.45;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
@@ -2190,7 +2190,7 @@ background:linear-gradient(90deg,#333e46,#242d34);border:1px solid;border-color:
 .sysm .leaf .bar{flex:1;order:1;min-width:30px}
 .sysm .leaf .bval{order:2;color:#cfe8e4;white-space:nowrap;min-width:56px;text-align:right}
 .sysm .bar{height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
-.sysm .bar .fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#46b35e 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat;transition:width .25s,background-size .25s} /* 3 段階カラー (.ctxg .fill と同じ) */
+.sysm .bar .fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#35e05a 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat;transition:width .25s,background-size .25s} /* 3 段階カラー (.ctxg .fill と同じ) */
 .sysm .leaf.warn .bval{color:var(--warn)}
 .sysm .leaf.hot .bval{color:var(--bad)}
 /* システム情報パネル (左列。スクロールしても固定) */
