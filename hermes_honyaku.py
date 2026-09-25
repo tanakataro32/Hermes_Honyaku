@@ -11,9 +11,12 @@ Hermes Agent と llama-server の間に挟む中継サーバー。
 - 起動:  python3 hermes_honyaku.py [config.ini のパス]
 - 画面:  http://<このマシン>:8765/
 - Hermes 側の設定:  ~/.hermes/config.yaml の model.base_url を http://127.0.0.1:8081/v1 に変更
+- OpenCode 側:  provider の baseURL を http://127.0.0.1:8081/v1 に変えれば同じ画面に出る
+  (User-Agent: opencode/... で検出し、発信元ラベルは "OpenCode")
 
 構成:
   Hermes Agent --> [proxy :8081] --> llama-server :8080 (本体モデル)
+  OpenCode     --> (同上)
                         |
                         +--> 翻訳サーバー (Windows 機の llama-server :8082 など)
                         +--> ブラウザ表示 :8765 (Server-Sent Events)
@@ -47,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -648,7 +651,7 @@ class Turn:
     active = {}
     active_lock = threading.Lock()
 
-    def __init__(self, model, context, cfg, translator, source="", task=False):
+    def __init__(self, model, context, cfg, translator, source="", task=False, who="", who_tip=""):
         with Turn.counter_lock:
             Turn.counter += 1
             self.n = Turn.counter
@@ -666,13 +669,15 @@ class Turn:
         self.tool_calls = {}
         self.source = source
         self.task = task
+        self.who = who
+        self.who_tip = who_tip
         self.answer_buf = []
         self.answer_len = 0
         self.abort = None  # 画面の停止ボタン: この要求だけを切る (ProxyHandler._chat が設定する)
         with Turn.active_lock:
             Turn.active[self.n] = self
         ev = {"type": "turn_start", "turn": self.n, "model": model, "context": context,
-              "source": source, "task": task, "boot": BOOT_ID}
+              "source": source, "task": task, "boot": BOOT_ID, "who": who, "who_tip": who_tip}
         BUS.publish(ev)
         self.translator.jlog.write(ev)
         # 前のターンの翻訳待ちを中断して新しいターンの翻訳を優先。
@@ -1510,24 +1515,31 @@ def summarize_context(req):
         return ""
 
 
-TASK_MARKERS = ("### Task:", "Your task is to reflect the speaker's likely facial expression")
+TASK_MARKERS = (
+    "### Task:",
+    "Your task is to reflect the speaker's likely facial expression",
+    "You are a title generator",  # OpenCode のタイトル生成 (指示文は system メッセージに入る)
+)
 
 
 def is_task_request(req):
-    """Open WebUI などがバックグラウンドで送る要求 (タイトル生成・タグ生成・フォローアップ提案) か。
-    背景タスクは「最後の user メッセージ」に指示文が入っているので、それだけを見る
-    (ツール結果や会話履歴の本文は見ない。検索結果などに同じ文字列が含まれても誤判定しないため)"""
+    """Open WebUI / OpenCode などがバックグラウンドで送る要求 (タイトル生成・タグ生成・フォローアップ提案) か。
+    背景タスクの指示文は「最後の user メッセージ」(Open WebUI) か「最初の system メッセージ」(OpenCode) に入る。
+    それだけを見る (ツール結果や会話履歴の本文は見ない。検索結果などに同じ文字列が含まれても誤判定しないため)"""
     try:
         msgs = req.get("messages") or []
         if not msgs:
             return False
-        m = msgs[-1]
-        if m.get("role") != "user":
-            return False
-        c = m.get("content")
-        if isinstance(c, list):
-            c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
-        if isinstance(c, str) and any(mk in c[:400] for mk in TASK_MARKERS):
+
+        def text(m):
+            c = m.get("content")
+            if isinstance(c, list):
+                c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+            return c if isinstance(c, str) else ""
+
+        if msgs[-1].get("role") == "user" and any(mk in text(msgs[-1])[:400] for mk in TASK_MARKERS):
+            return True
+        if msgs[0].get("role") == "system" and any(mk in text(msgs[0])[:400] for mk in TASK_MARKERS):
             return True
     except Exception:
         pass
@@ -1675,6 +1687,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
     refused = {}
     refused_lock = threading.Lock()
     REFUSE_SEC = 120
+    # OpenCode のセッション ID (x-session-id ヘッダー) → 会話タイトル。
+    # タイトル生成の背景タスクが返した内容から覚え、並行するセッションのターン見出しの札に使う
+    session_titles = {}
+    session_titles_lock = threading.Lock()
 
     def log_message(self, fmt, *args):
         log.debug("proxy %s - " + fmt, self.client_address[0], *args)
@@ -1791,10 +1807,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._write(body)
 
     def _source(self):
-        """ターンの発信元ラベル。ヘッダー → 接続元 IP の前方一致 (config.ini [sources]) → IP"""
+        """ターンの発信元ラベル。ヘッダー (Open WebUI / OpenCode) → 接続元 IP の前方一致 (config.ini [sources]) → IP。
+        OpenCode は User-Agent が "opencode/" で始まるのでヘッダーで判定する (同じマシンの Hermes と IP では区別できないため)"""
         for k in self.headers.keys():
             if k.lower().startswith("x-openwebui-"):
                 return "Open WebUI"
+        if (self.headers.get("User-Agent") or "").lower().startswith("opencode/"):
+            return "OpenCode"
         ip = self.client_address[0]
         default = ""
         for prefix, label in sorted(self.cfg.cp.items("sources"), key=lambda kv: -len(kv[0])):
@@ -1804,6 +1823,34 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if ip.startswith(prefix.strip()):
                 return label.strip()
         return default or ip
+
+    def _session_id(self):
+        """OpenCode が送る x-session-id ヘッダー。無ければ """""
+        for k, v in self.headers.items():
+            if k.lower() == "x-session-id":
+                return (v or "").strip()
+        return ""
+
+    def _session_who(self, sid):
+        """OpenCode のターン見出しの札 (並行セッションの区別用)。
+        会話タイトルを覚えていればそれを、無ければセッション ID の先頭部分"""
+        if not sid:
+            return ""
+        with self.session_titles_lock:
+            title = self.session_titles.get(sid)
+        if title:
+            return title if len(title) <= 40 else title[:40] + "…"
+        return (sid[4:] if sid.startswith("ses_") else sid)[:8]
+
+    def _remember_session_title(self, sid, text):
+        """OpenCode のタイトル生成が返した内容 (会話タイトル) を覚える"""
+        text = re.sub(r"\s+", " ", text or "").strip().strip("\"'「」")
+        if not text or len(text) > 120:
+            return
+        with self.session_titles_lock:
+            self.session_titles[sid] = text
+            while len(self.session_titles) > 128:
+                self.session_titles.pop(next(iter(self.session_titles)))
 
     # ---- 振り分け ----
     def _proxy(self):
@@ -1930,9 +1977,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     BUS.publish({"type": "error", "text": f"上流 {resp.status}: {data[:300].decode('utf-8', 'replace')}"})
                 return
 
+            sid = self._session_id()
+            source = self._source()
             turn = Turn(req.get("model") or "", summarize_context(req), self.cfg, self.translator,
-                        source=self._source(), task=is_task_request(req))
+                        source=source, task=is_task_request(req),
+                        who=self._session_who(sid), who_tip=f"OpenCode セッション {sid}" if sid else "")
             turn.abort = abort
+            turn.session_id = sid  # タイトル生成の応答をセッションに結びつける
             if self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1") and os.path.isdir("/proc/self/fd"):
                 # どのプロセスからの要求か (黄色のボタンのダイアログで、作業と画面のターンを結び付ける)。/proc を探すので別スレッドで
                 peer, local, tn = self.client_address, self.connection.getsockname(), turn.n
@@ -2000,6 +2051,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     if ch.get("finish_reason"):
                         finish = ch["finish_reason"]
             turn.finish(finish)
+            if turn.session_id and turn.task:
+                # タイトル生成の応答 = 会話タイトル。以降の同じセッションのターン見出しの札に使う
+                self._remember_session_title(turn.session_id, "".join(turn.answer_buf))
             turn = None
 
             if client_stream:
@@ -2580,9 +2634,13 @@ function turn(n){return turns[n]}
 function onTurnStart(ev){
   empty.style.display='none';
   const el=document.createElement('section');el.className='turn'+(ev.task?' task':'');el.id='t'+ev.turn;el.dataset.source=ev.source||'';addSource(ev.source);
-  el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span class="tm">'+fmt(ev.ts)+'</span>'+(ev.source?'<span class="src">'+esc(ev.source)+'</span>':'')+(ev.task?'<span class="tk" title="最後のメッセージが ### Task: で始まる要求 (タイトル生成・タグ生成など)">背景タスク</span>':'')+'<span class="mdl">'+esc(ev.model||'')+'</span><span class="ctxm"></span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
-   '<div class="cols"><div class="col"><div class="caprow"><div class="cap">Thinking (原文)</div></div><div class="think live"></div></div>'+
-   '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="tools"></div><div class="ans"></div></div></div>';
+  el.innerHTML='<h3><span class="n">#'+ev.turn+'</span><span class="tm">'+fmt(ev.ts)+'</span>'+(ev.source?'<span class="src">'+esc(ev.source)+'</span>':'')+(ev.task?'<span class="tk" title="背景タスクの要求 (タイトル生成・タグ生成など)">背景タスク</span>':'')+'<span class="mdl">'+esc(ev.model||'')+'</span><span class="ctxm"></span><span class="ctx">'+esc(ev.context||'')+'</span><span class="st">思考中…</span></h3>'+
+    '<div class="cols"><div class="col"><div class="caprow"><div class="cap">Thinking (原文)</div></div><div class="think live"></div></div>'+
+    '<div class="col"><div class="cap">日本語</div><div class="segs"></div><div class="tools"></div><div class="ans"></div></div></div>';
+  // OpenCode のセッション札 (並行セッションの区別用)。/proc から調べる Hermes の札 (onTurnProc) とは別に、
+  // x-session-id ヘッダーから決まるので turn_start 時点で付ける
+  if(ev.who){const w=document.createElement('span');w.className='who';w.textContent=ev.who;w.title=ev.who_tip||'';
+    (el.querySelector('h3 .src')||el.querySelector('h3 .n')).after(w)}
   if(newest.checked)main.insertBefore(el,main.firstElementChild.nextSibling);else main.appendChild(el);
   turns[ev.turn]={n:ev.turn,el,think:el.querySelector('.think'),ans:el.querySelector('.ans'),tools:el.querySelector('.tools'),segs:el.querySelector('.segs'),st:el.querySelector('.st'),segEls:{},ansRaw:'',ansTimer:null,job:null,stop:null};
   // 停止ボタンは見出しの右端 (推測中の間だけ。スマホでは原文の欄のものだけ使う)。見出しを押すと、そのターンの原文全体を開く / 閉じる。
@@ -2959,8 +3017,9 @@ function renderJobs(){
  // 参考: 一覧の作業以外で推測中のターン (デスクトップアプリの会話、Open WebUI など)。ここでは止められないので止め方を案内する
  const listed=new Set((jobErr?[]:jobList||[]).map(x=>x.pid)), others={};
  for(const n of Object.keys(turns).map(Number).sort((a,b)=>a-b)){const t=turns[n];
-  if(!t.think.classList.contains('live')||(t.job&&listed.has(t.job)))continue;
-  const name=t.kind==='dashboard'?'デスクトップアプリの会話':t.kind==='oneshot'?'裏の作業 ('+(t.label||'不明')+')':t.label||t.el.dataset.source||'発信元不明';
+   if(!t.think.classList.contains('live')||(t.job&&listed.has(t.job)))continue;
+   const who=t.el.querySelector('h3 .who');
+   const name=t.kind==='dashboard'?'デスクトップアプリの会話':t.kind==='oneshot'?'裏の作業 ('+(t.label||'不明')+')':(t.label||(who?who.textContent:''))||t.el.dataset.source||'発信元不明';
   const hint=t.kind==='dashboard'?'止めるには原文の停止ボタン (その推測だけ) / 赤のボタン (会話ごと)':'止めるには原文の停止ボタン (その推測だけ)';
   (others[name]=others[name]||{hint,ns:[]}).ns.push(n)}
  if(Object.keys(others).length){

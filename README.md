@@ -6,12 +6,14 @@ Hermes Agent がローカル LLM (llama-server) で考えている内容 (reason
 ```
 [llmsv: Ubuntu 24.04 / V100]
   Hermes Agent ──> hermes_honyaku.py (中継 :8081) ──> llama-server (:8080, 本体モデル)
-                          │
-                          ├─ 思考を文単位で切り出し ──(LAN)──> [Windows 機] llama-server Vulkan (:8082, RX 560, 翻訳専用)
-                          └─ ブラウザ表示 (:8765)   ← Windows 機のブラウザで http://192.168.1.50:8765/ を開く
+  OpenCode     ──> (同上)
+                           │
+                           ├─ 思考を文単位で切り出し ──(LAN)──> [Windows 機] llama-server Vulkan (:8082, RX 560, 翻訳専用)
+                           └─ ブラウザ表示 (:8765)   ← Windows 機のブラウザで http://192.168.1.50:8765/ を開く
 ```
 
 - 中継サーバーは llama-server が返す `reasoning_content` (および本文中の `<think>` タグ) をストリーミングのまま横取りします。Hermes には何も手を加えず、接続先 URL を変えるだけです。
+- OpenCode も provider の `baseURL` を中継に向ければ同じ画面で思考が見えます (「4c. OpenCode も同じ画面で見る」)。
 - 本体モデルの llama-server は router モード・API キー・モデル名などそのままで動きます (中継はヘッダーと `model` をそのまま素通しします)。
 - 翻訳は V100 に触らず、Windows 機の RX 560 (2GB) に載せた小型モデル (Qwen3-1.7B) で行います。
 - Python 3.10 以上の標準ライブラリだけで動き、pip は不要です。
@@ -218,6 +220,8 @@ model:
 - **ターンの札** (見出しの発信元の隣): どこからの推測かを表示します。`デスクトップ` = デスクトップアプリの会話 (Hermes の本体)、
   `hondana` や `cron` = 裏の作業を頼んだもの (hstop --list と同じ判定)、`Hermes gateway` など = そのほかの Hermes。
   中継サーバーが接続元のプロセスを調べられたときだけ付きます (Open WebUI などほかのマシンからの要求には付きません)。
+  OpenCode は `x-session-id` ヘッダーからセッションの札を付けます (会話タイトルを覚えていればそれを、それまではセッション ID の先頭部分。
+  ヘッダーで判定するので別マシンからでも付きます)。
   常駐化しているときは、下の `hermes-honyaku.service` (`KillMode=process` 入り) を入れ直してください。
   入れ直さないと、ボタンで起動し直した本体が中継サーバーの再起動で一緒に止まります。
 - **バージョン** (タイトルの横): `v1.0.0 · 4d23053 · 09/23` のように、バージョン・コミットの短縮 ID・コミット日を表示します
@@ -310,6 +314,32 @@ Hermes が会話タイトルを付けるための要求も同じ扱いです。
 
 元に戻すときは Open WebUI の URL を 8080 に戻すだけです。
 
+## 4c. OpenCode も同じ画面で見る
+
+OpenCode (CLI) のモデル接続先も中継サーバーに向ければ、その思考も同じ画面に流れます (ターン見出しに「OpenCode」のラベルが付きます)。停止ボタン・コンテキストメータなども同じように動きます。
+
+1. OpenCode の設定 (`~/.config/opencode/opencode.json` かプロジェクトフォルダの `opencode.json`) で、provider の `baseURL` を中継に変更します:
+
+   ```json
+   "provider": {
+     "llamacpp": {
+       "options": {
+         "baseURL": "http://127.0.0.1:8081/v1"
+       }
+     }
+   }
+   ```
+
+   API キーとモデル名はそのままです。OpenCode を再起動すると反映されます。
+
+2. OpenCode で会話をすると、「OpenCode」ラベル付きのターンが画面に流れます。
+
+発信元の判定は OpenCode が送る `User-Agent: opencode/...` ヘッダーで行うので、別マシンからでも同じようにラベルが付きます。
+OpenCode は新しいセッションのたびに会話タイトルを生成する小さな要求も送りますが、これは「背景タスク」として検出し既定では隠しています (ヘッダーの「背景タスクを隠す」で切り替え)。
+この要求の応答 (会話タイトル) を中継サーバーが覚えて、同じセッションのターンの見出しに**セッションの札**を付けます (並行する CLI と Web のセッションを区別するため。タイトルがまだ無いときはセッション ID の先頭部分が出ます。`x-session-id` ヘッダーからなので別マシンからでも付きます)。
+
+元に戻すときは `baseURL` を `http://127.0.0.1:8080/v1` に戻すだけです。
+
 ## 5. 設定 (config.ini)
 
 | セクション | 項目 | 意味 |
@@ -361,6 +391,7 @@ sudo systemctl restart hermes-honyaku
 | 症状 | 見るところ |
 |---|---|
 | 画面に何も出ない | Hermes の `base_url` が 8081 になっているか。`journalctl -u hermes-honyaku` に `POST /v1/chat/completions` が出ているか |
+| OpenCode の思考が出ない | opencode.json の `baseURL` が 8081 になっているか。OpenCode を再起動したか。「OpenCode」ラベルのターンが画面に出るか (出なければ中継のログに要求が来ているか) |
 | 思考が出ず回答だけ出る | 本体 llama-server が `--reasoning-format none` になっていないか (既定 auto のままなら `reasoning_content` で届く)。Hermes 側で思考を切っていないか |
 | 翻訳ランプが赤 | Windows 機で start_translator.bat が動いているか、firewall_allow.bat を実行したか、IP が 192.168.1.8 か。llmsv から `curl http://192.168.1.8:8082/health` で疎通確認 |
 | 訳文が遅れて溜まる | `workers` と翻訳側 `--parallel` を増やす。またはモデルを Qwen3-0.6B に落とす (`-hf unsloth/Qwen3-0.6B-GGUF:Q4_K_M`) |
