@@ -50,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -2215,6 +2215,13 @@ background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--
 .sysbox .row{display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden}
 .sysbox .row+.row{margin-top:5px}
 #syspanel .ctxg{width:100%}
+/* 「コンテキスト」の見出しの行の右端に使用率 (メーターと同じ 50% で黄・80% で赤) */
+.sysbox .caprow{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.sysbox .caprow .cap{margin-bottom:0}
+#ctxpct{font-family:"Courier New",ui-monospace,monospace;font-size:12px;color:#cfe8e4;white-space:nowrap}
+#ctxpct b{font-size:14px;color:#fff}
+#ctxpct.warn,#ctxpct.warn b{color:var(--warn)}
+#ctxpct.hot,#ctxpct.hot b{color:var(--bad)}
 #syspanel .ctxg .bar{flex:1;width:auto}
 #syspanel .sysm{width:100%}
 .turn.hidden{display:none}
@@ -2501,7 +2508,7 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
   <div class="row"><span id="sdot" class="dot"></span><span id="stext">接続中…</span></div>
   <div class="row" title="翻訳サーバーの状態"><span id="tdot" class="dot"></span>翻訳: <span id="ttext">-</span> <span id="tq"></span></div>
  </div>
- <div class="sysbox"><span class="cap">コンテキスト</span>
+ <div class="sysbox"><div class="caprow"><span class="cap">コンテキスト</span><span id="ctxpct" title="最新ターンのコンテキスト使用率 (上限に対する割合)"></span></div>
   <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="dlt" title="10 秒以上止まっていた後の増減"></span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
  </div>
  <div class="sysbox"><span class="cap">システム</span>
@@ -2571,7 +2578,7 @@ else{pref('wake',wake,v=>{if(v)wakeReq();else if(wakeLock){wakeLock.release();wa
 function addSource(name){if(!name||[...srcsel.options].some(o=>o.value===name))return;const o=document.createElement('option');o.value=name;o.textContent=name;srcsel.appendChild(o)}
 function clearScreen(){for(const k in turns){turns[k].el.remove();delete turns[k]}
   [...main.children].forEach(c=>{if(c!==empty&&c.id!=='mjcap')c.remove()});empty.style.display='';moUpdate();
-  const g=document.getElementById('ctxg');g.querySelector('.txt').textContent='ctx -';setFill(g.querySelector('.fill'),0);g.className='ctxg';g.title='最新ターンのコンテキスト使用量';ctxLast=null;clearTimeout(ctxBumpT)}
+  const g=document.getElementById('ctxg');g.querySelector('.txt').textContent='ctx -';setFill(g.querySelector('.fill'),0);g.className='ctxg';g.title='最新ターンのコンテキスト使用量';ctxPct(0,0,true);ctxLast=null;clearTimeout(ctxBumpT)}
 document.getElementById('clear').onclick=clearScreen;
 function sysnote(text){const d=document.createElement('div');d.className='sysnote';d.textContent=text;main.appendChild(d)}
 // 中継サーバーの起動 id。変わっていたら再起動された = ターン番号が 1 から振り直されるので、古い表示を片付ける
@@ -2674,6 +2681,7 @@ function onTurnCtx(ev){const t=turn(ev.turn);if(!t)return;const el=t.el.querySel
   g.querySelector('.txt').textContent='ctx '+k(ev.tokens)+(lim?'/'+k(lim):'')+(ev.exact?'':'~');
   setFill(g.querySelector('.fill'),lim?Math.min(100,ev.tokens/lim*100):0);
   const r=lim?ev.tokens/lim:0;g.classList.toggle('hot',r>=0.8);g.classList.toggle('warn',r>=0.5&&r<0.8);
+  ctxPct(r,lim,ev.exact);
   g.title='最新ターンのコンテキスト使用量'+(ev.exact?' (llama-server の /tokenize)':' (推定値)')+(ev.max_tokens?' · max_out '+k(ev.max_tokens):'');
   if(ev.tokens!==ctxLast){const now=Date.now();
     if(ctxLast!==null&&now-ctxAt>=CTX_IDLE_MS)ctxBump(g,ev.tokens-ctxLast,k);
@@ -2681,6 +2689,10 @@ function onTurnCtx(ev){const t=turn(ev.turn);if(!t)return;const el=t.el.querySel
   scroll()}
 // 10 秒以上値が変わらなかったメーターが動いたら、枠を光らせて増減を 6 秒出す。
 // 時刻は画面側で測る: ページを開いた直後の再生 (過去ターンがまとめて届く) や「画面を消去」直後の 1 回目は基準にするだけで光らせない
+// 「コンテキスト」の見出しの行の使用率 (上限が分からないときは出さない。推定値は ~ 付き)
+function ctxPct(r,lim,exact){const e=document.getElementById('ctxpct');
+  e.innerHTML=lim?'使用 <b>'+(r*100).toFixed(1)+'%</b>'+(exact?'':'~'):'';
+  e.className=r>=0.8?'hot':r>=0.5?'warn':''}
 const CTX_IDLE_MS=10000;let ctxLast=null, ctxAt=0, ctxBumpT=null;
 function ctxBump(g,d,k){const b=g.querySelector('.dlt');
   b.textContent=(d>0?'+':'−')+k(Math.abs(d));b.classList.toggle('down',d<0);
