@@ -50,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -216,7 +216,7 @@ class EventBus:
         t = ev.get("type")
         n = ev.get("turn")
         if t == "turn_start":
-            self.turns[n] = {"start": ev, "think": [], "answer": [], "segs": {}, "tools": None, "end": None, "ctx": None, "proc": None}
+            self.turns[n] = {"start": ev, "think": [], "answer": [], "segs": {}, "tools": None, "end": None, "ctx": None, "proc": None, "mood": None}
             while len(self.turns) > self.keep_turns:
                 self.turns.popitem(last=False)
             return
@@ -227,6 +227,8 @@ class EventBus:
             info["ctx"] = ev
         if t == "turn_proc":
             info["proc"] = ev
+        if t == "mood":
+            info["mood"] = ev
         if t == "think":
             info["think"].append(ev["text"])
         elif t == "answer":
@@ -298,6 +300,8 @@ class EventBus:
                 out.append(dict(info["ctx"], id=cur))
             if info.get("proc"):
                 out.append(dict(info["proc"], id=cur))
+            if info.get("mood"):
+                out.append(dict(info["mood"], id=cur))
             think = "".join(info["think"])
             if think:
                 out.append({"type": "think", "turn": tn, "text": think, "id": cur, "ts": info["start"]["ts"]})
@@ -321,7 +325,7 @@ BUS = EventBus()
 
 
 # --------------------------------------------------------------------------
-# JSONL ログ (思考の原文セグメントと訳文だけを残す)
+# JSONL ログ (思考の原文セグメントと訳文、コンテキスト量・テンションを残す)
 # --------------------------------------------------------------------------
 class JsonlLogger:
     def __init__(self, directory):
@@ -333,7 +337,7 @@ class JsonlLogger:
     def write(self, ev):
         if not self.dir:
             return
-        if ev.get("type") not in ("turn_start", "seg", "ja", "tools", "turn_end"):
+        if ev.get("type") not in ("turn_start", "seg", "ja", "tools", "turn_end", "turn_ctx", "mood"):
             return
         name = datetime.date.today().strftime("%Y%m%d") + ".jsonl"
         line = json.dumps(ev, ensure_ascii=False)
@@ -674,6 +678,7 @@ class Turn:
         self.answer_buf = []
         self.answer_len = 0
         self.abort = None  # 画面の停止ボタン: この要求だけを切る (ProxyHandler._chat が設定する)
+        self.mood_key = None  # テンションを測る会話 (ProxyHandler._chat が設定する。背景タスクは None)
         with Turn.active_lock:
             Turn.active[self.n] = self
         ev = {"type": "turn_start", "turn": self.n, "model": model, "context": context,
@@ -751,6 +756,10 @@ class Turn:
             self._submit(s, kind)
 
     def _submit(self, text, kind="text"):
+        if self.mood_key and kind == "text":
+            m = MOOD.on_think(self.mood_key, text)
+            if m:
+                self.publish_mood(m)
         if self.task:
             # 背景タスク (タイトル生成・タグ生成など) は翻訳キューに入れない
             return
@@ -758,6 +767,11 @@ class Turn:
             self.seg_count += 1
             seg_id = self.seg_count
         self.translator.submit(self.n, seg_id, text, kind)
+
+    def publish_mood(self, m):
+        ev = dict(m, type="mood", turn=self.n, source=self.source, who=self.who)
+        BUS.publish(ev)
+        self.translator.jlog.write(ev)
 
     def finish(self, reason="stop"):
         for kind, part in self.tags.flush():
@@ -1546,6 +1560,208 @@ def is_task_request(req):
     return False
 
 
+# --------------------------------------------------------------------------
+# テンション (調子) メーター: ツールの結果と思考の言葉から、AI の「調子」を 0-100 で推し量る
+# --------------------------------------------------------------------------
+# ツールの結果が失敗に見えるか。先頭と末尾だけを見る (長い出力の途中のログ行などで誤判定しないため)
+MOOD_FAIL_RES = [(re.compile(p, f), label) for p, f, label in (
+    (r"Traceback \(most recent call last\)", 0, "Traceback"),
+    (r"\bExited with code [1-9]\d*|\bexit(?:[ _]code|[ _]status)?\s*[=:]\s*[1-9]\d*\b|\bexit status [1-9]\d*", re.I, "終了コード"),
+    (r"^(?:PHP )?(?:Fatal error|Parse error)\b|\b[A-Z][A-Za-z]*(?:Error|Exception): ", re.M, "エラー"),
+    (r"command not found|No such file or directory|Permission denied|cannot access|is not recognized as", 0, "見つからない"),
+    (r"No (?:search )?results found", re.I, "結果なし"),
+    (r"\bhttp[=: ]+[45]\d\d\b|\b[45]\d\d (?:Not Found|Forbidden|Bad Request|Unauthorized|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)\b", re.I, "HTTP エラー"),
+    (r"\btimed out\b|\btimeout\b", re.I, "タイムアウト"),
+    (r"^(?:fatal|error): ", re.M, "エラー"),
+    (r"\b[1-9]\d* failed\b|\bFAILED\b|\b[Ff]ailed to\b", 0, "失敗"),
+    (r"Unexpected token|SyntaxError|Segmentation fault|\bKilled\b", 0, "エラー"),
+)]
+# はっきり成功と分かる結果 (成功はふつう小さく上げ、これだと少し多めに上げる)
+MOOD_OK_RE = re.compile(r"\bExited with code 0\b|\bexit(?:[ _]code)?\s*[=:]\s*0\b|^Edited |\bhttp[=: ]+200\b|\b[1-9]\d* passed\b|\bSuccessfully\b|\bsuccess(?:fully)?\b", re.I | re.M)
+# 思考の中の言葉 (「Hmm」は多すぎて当てにならないので数えない)。1 ターンで動かせる幅は ±MOOD_THINK_CAP まで
+MOOD_THINK_NEG = re.compile(r"\b(?:still (?:fail\w*|not work\w*|broken|the same)|didn't work|doesn't work|not working|stuck|same (?:error|issue|problem)|oops|unfortunately|frustrat\w*|no luck|that's odd)\b", re.I)
+MOOD_THINK_POS = re.compile(r"\b(?:it works|works now|now works|that worked|it worked|finally|fixed|all (?:tests )?passed|perfect|excellent|great[!,.])", re.I)
+MOOD_THINK_CAP = 6.0
+MOOD_LEVELS = ((85, "絶好調", "😆"), (65, "順調", "😊"), (40, "普通", "🙂"), (20, "苦戦", "😣"), (0, "どん底", "😵"))
+
+
+def mood_level(score):
+    for lo, label, face in MOOD_LEVELS:
+        if score >= lo:
+            return label, face
+    return MOOD_LEVELS[-1][1:]
+
+
+def _msg_text(m):
+    c = m.get("content")
+    if isinstance(c, list):
+        c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+    return c if isinstance(c, str) else ""
+
+
+def judge_tool_result(text):
+    """ツールの結果 1 件を ("fail" | "ok" | "good", 理由) に分ける。JSON なら exit_code / error / success の欄を優先して見る"""
+    t = (text or "").strip()
+    if t.startswith("{"):
+        try:
+            j = json.loads(t)
+        except Exception:
+            j = None
+        if isinstance(j, dict):
+            for k in ("exit_code", "returncode", "exitCode", "exit_status"):
+                v = j.get(k)
+                if isinstance(v, int) and not isinstance(v, bool):
+                    if v != 0:
+                        return "fail", f"終了コード {v}"
+                    break
+            err = j.get("error")
+            if err and (not isinstance(err, str) or err.strip()):
+                return "fail", "エラー"
+            if j.get("success") is False or str(j.get("status", "")).lower() in ("error", "failed", "failure"):
+                return "fail", "失敗"
+            parts = [j[k] for k in ("output", "result", "content", "stdout", "stderr") if isinstance(j.get(k), str)]
+            if parts:
+                t = "\n".join(parts)
+    head = t[:3000] + "\n" + t[-1500:] if len(t) > 4500 else t
+    for rx, label in MOOD_FAIL_RES:
+        if rx.search(head):
+            return "fail", label
+    if MOOD_OK_RE.search(head):
+        return "good", "成功"
+    return "ok", "成功"
+
+
+class MoodTracker:
+    """会話ごとのテンション (0-100、始まりは 50)。
+
+    - 失敗が続くと、連続回数が増えるほど大きく下がる (じわじわ → どんどん)
+    - 失敗が 2 回以上続いた後の成功は、失敗の回数に比例してドカッと上がる
+    - 成功が続くと少しずつ上がり、続くほど上がり幅が増える (上の方ほど上がりにくく、下の方ほど下がりにくい)
+    - ツールの結果 1 件ごとに 55 へ 3% ずつ戻す (ふつうの読み書きが続くだけで「絶好調」に張り付かないように。
+      2026-09 の実ログ約 1300 件で、ツールを使うターンの「絶好調」と「順調」が半々程度になるよう合わせた)
+    - 思考の中の言葉 (still failing / it works など) で少し動く (1 ターン ±6 まで)
+    会話は「最初の user メッセージ」(と発信元・OpenCode のセッション ID) で見分ける。
+    要求には会話の履歴が丸ごと入っているので、前回から増えたツールの結果だけを評価する
+    """
+
+    def __init__(self, keep=64):
+        self.lock = threading.Lock()
+        self.sessions = collections.OrderedDict()
+        self.keep = keep
+
+    @staticmethod
+    def session_key(req, source="", sid=""):
+        msgs = req.get("messages") or []
+        first = next((_msg_text(m) for m in msgs if m.get("role") == "user"), "")
+        h = hashlib.sha1(f"{source}\0{sid}\0{first[:2000]}".encode("utf-8", "replace")).hexdigest()
+        return h[:12]
+
+    @staticmethod
+    def _tool_history(msgs):
+        """[(呼び出し "名前 引数" or "", 結果の本文)] を古い順に"""
+        calls, out = {}, []
+        for m in msgs:
+            if m.get("role") == "assistant":
+                for tc in m.get("tool_calls") or []:
+                    if isinstance(tc, dict):
+                        fn = tc.get("function") or {}
+                        calls[tc.get("id")] = f"{fn.get('name', '')} {fn.get('arguments', '')}"
+            elif m.get("role") == "tool":
+                out.append((calls.get(m.get("tool_call_id"), ""), _msg_text(m)))
+        return out
+
+    @staticmethod
+    def _move(st, delta):
+        s = st["score"]
+        # 端に近いほど動きにくく (上がるときは 100 に、下がるときは 0 に近いほど小さく)
+        delta *= max(0.25, min(1.0, ((100 - s) if delta > 0 else s) / 30))
+        st["score"] = max(0.0, min(100.0, s + delta))
+        return st["score"] - s
+
+    def _apply(self, st, call, verdict, why):
+        st["score"] += (55 - st["score"]) * 0.03
+        retry = bool(call) and call in st["recent"]
+        st["recent"] = (st["recent"] + [call])[-3:]
+        if verdict == "fail":
+            st["fails"] += 1
+            st["oks"] = 0
+            d = self._move(st, -(2 + 2 * min(st["fails"], 6) + (2 if retry else 0)))
+            return d, f"失敗 {st['fails']} 連続 ({why}{'・やり直し' if retry else ''})" if st["fails"] > 1 else f"失敗 ({why})"
+        if st["fails"] >= 2:
+            n = st["fails"]
+            st["fails"], st["oks"] = 0, 1
+            return self._move(st, min(40, 6 * n + 4)), f"失敗 {n} 回の後に成功"
+        st["fails"] = 0
+        st["oks"] += 1
+        d = self._move(st, (2.5 if verdict == "good" else 1.0) * (1 + 0.1 * min(st["oks"], 10)))
+        return d, f"成功 {st['oks']} 連続" if st["oks"] > 1 else "成功"
+
+    def on_request(self, key, req):
+        """要求の履歴から、前回から増えたツールの結果を評価する。(表示用の値の dict) を返す"""
+        hist = self._tool_history(req.get("messages") or [])
+        with self.lock:
+            st = self.sessions.get(key)
+            if st is None:
+                st = {"score": 50.0, "fails": 0, "oks": 0, "seen": 0, "recent": [], "think": 0.0, "why": "", "wd": 0.0}
+                self.sessions[key] = st
+                while len(self.sessions) > self.keep:
+                    self.sessions.popitem(last=False)
+            self.sessions.move_to_end(key)
+            if len(hist) >= st["seen"]:
+                new = hist[st["seen"]:]
+            else:
+                # 履歴が縮んだ (圧縮された): 最後の assistant の後に付いた結果だけを新しいものとして扱う
+                msgs = req.get("messages") or []
+                tail = 0
+                for m in reversed(msgs):
+                    if m.get("role") != "tool":
+                        break
+                    tail += 1
+                new = hist[len(hist) - tail:] if tail else []
+            st["seen"] = len(hist)
+            st["think"] = 0.0
+            st["why"], st["wd"] = "", 0.0
+            total, why = 0.0, ""
+            for call, text in new:
+                verdict, reason = judge_tool_result(text)
+                d, why = self._apply(st, call, verdict, reason)
+                total += d
+            if new:
+                st["why"], st["wd"] = why, total
+            return self._snapshot(st, total, why)
+
+    def on_think(self, key, text):
+        """思考の 1 区切りの言葉で少し動かす。動いたら表示用の dict、動かなければ None"""
+        neg = len(MOOD_THINK_NEG.findall(text))
+        pos = len(MOOD_THINK_POS.findall(text))
+        if not neg and not pos:
+            return None
+        with self.lock:
+            st = self.sessions.get(key)
+            if st is None:
+                return None
+            want = max(-MOOD_THINK_CAP, min(MOOD_THINK_CAP, st["think"] + 1.5 * (pos - neg))) - st["think"]
+            if not want:
+                return None
+            st["think"] += want
+            d = self._move(st, want)
+            m = (MOOD_THINK_POS if d > 0 else MOOD_THINK_NEG).search(text)
+            # 理由はツールの結果 (このターンの始まりに評価したもの) の後ろに付け足す。表示の増減はこのターンの合計
+            why = f"思考: “{m.group(0)}”" if m else "思考"
+            if st["why"]:
+                why = f"{st['why']} · {why}"
+            return self._snapshot(st, st["wd"] + st["think"], why)
+
+    @staticmethod
+    def _snapshot(st, delta, why):
+        label, face = mood_level(st["score"])
+        return {"score": round(st["score"], 1), "delta": round(delta, 1), "why": why,
+                "label": label, "face": face, "fails": st["fails"], "oks": st["oks"], "tools": st["seen"]}
+
+
+MOOD = MoodTracker()
+
+
 def _hermes_rest(argv):
     """argv が hermes (または hermes を動かす python) なら hermes の後ろの引数、違えば None (server-deploy の hstop と同じ判定)"""
     if not argv:
@@ -1984,6 +2200,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         who=self._session_who(sid), who_tip=f"OpenCode セッション {sid}" if sid else "")
             turn.abort = abort
             turn.session_id = sid  # タイトル生成の応答をセッションに結びつける
+            if not turn.task:
+                # テンション: 前回から増えたツールの結果を評価。ツールを一度も使っていない会話 (Open WebUI の雑談など) は出さない
+                try:
+                    mkey = MoodTracker.session_key(req, source, sid)
+                    m = MOOD.on_request(mkey, req)
+                    if m["tools"]:
+                        turn.mood_key = mkey
+                        turn.publish_mood(m)
+                except Exception:
+                    log.debug("mood failed", exc_info=True)
             if self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1") and os.path.isdir("/proc/self/fd"):
                 # どのプロセスからの要求か (黄色のボタンのダイアログで、作業と画面のターンを結び付ける)。/proc を探すので別スレッドで
                 peer, local, tn = self.client_address, self.connection.getsockname(), turn.n
@@ -2002,15 +2228,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 # 本線のスレッドで待たず別スレッドで数える (遅くても turn_ctx が後から届くだけで、応答は止まらない)
                 meter, model, messages = self.token_meter, req.get("model") or "", req.get("messages") or []
                 auth = self.headers.get("Authorization")
+                jlog = self.translator.jlog
                 tn = turn.n  # 数え終わる前にターンが終わって turn 変数が None に戻ることがあるので、番号だけ持つ
                 def _meter():
                     try:
                         n_tok, exact = meter.count_messages(model, messages, auth)
                     except Exception:
                         n_tok, exact = 0, False
-                    BUS.publish({"type": "turn_ctx", "turn": tn, "tokens": n_tok, "exact": exact,
-                                 "max_tokens": int(req.get("max_tokens") or 0),
-                                 "ctx_limit": self.cfg.getint("ui", "ctx_limit")})
+                    ev = {"type": "turn_ctx", "turn": tn, "tokens": n_tok, "exact": exact,
+                          "max_tokens": int(req.get("max_tokens") or 0),
+                          "ctx_limit": self.cfg.getint("ui", "ctx_limit")}
+                    BUS.publish(ev)
+                    jlog.write(ev)
                 threading.Thread(target=_meter, name="ctx-meter", daemon=True).start()
             acc = ResponseAccumulator()
             if client_stream:
@@ -2193,7 +2422,7 @@ background:linear-gradient(90deg,#333e46,#242d34);border:1px solid;border-color:
 .ctxg.bump[data-lv="3"]{animation:ctxbump .45s 7}    /* 3.2 秒 */
 .ctxg.bump[data-lv="4"]{animation:ctxbump .35s 13}   /* 4.6 秒 */
 @keyframes ctxbump{0%,40%{background:var(--flbg);box-shadow:0 0 0 var(--flo) var(--fl),0 0 var(--flw) var(--fl)}100%{background:#131a1f;box-shadow:0 0 0 0 transparent}}
-@media (prefers-reduced-motion:reduce){.ctxg.bump[data-lv]{animation:none;box-shadow:0 0 0 var(--flo) var(--fl)}}
+@media (prefers-reduced-motion:reduce){.ctxg.bump[data-lv]{animation:none;box-shadow:0 0 0 var(--flo) var(--fl)}.moodg .face{animation:none!important}}
 .sysm{display:flex;flex-direction:column;font-family:"Courier New",ui-monospace,monospace;font-size:11px;line-height:1.45;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .sysm .trow{display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none}
 .sysm .trow .tw{width:10px;flex:none;color:var(--muted)}
@@ -2237,6 +2466,25 @@ background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--
 #ctxpct.hot,#ctxpct.hot b,#mctxpct.hot b{color:var(--bad)}
 #syspanel .ctxg .bar{flex:1;width:auto}
 #syspanel .sysm{width:100%}
+/* テンション (調子) メーター: 顔・段階・バー・点数、2 段目に理由。バーの色は段階で変える (どん底 青 → 普通 ティール → 絶好調 橙)。
+   ドカッと上がったとき (+10 以上) は顔が跳ねてバーが光り、大きく下がったとき (−8 以下) は顔が震える */
+.moodg{display:flex;flex-wrap:wrap;align-items:center;gap:2px 7px;font-family:"Courier New",ui-monospace,monospace;font-size:11px;color:#cfe8e4;
+padding:2px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv);--mc:var(--acc)}
+.moodg .face{font-size:17px;line-height:1.2;display:inline-block}
+.moodg .lbl{font-family:"Noto Sans JP","Hiragino Sans",sans-serif;font-weight:700;color:var(--mc);white-space:nowrap}
+.moodg .bar{flex:1;min-width:40px;height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
+.moodg .fill{display:block;height:100%;width:50%;background:var(--mc);transition:width .6s,background .6s}
+.moodg .sc{min-width:22px;text-align:right;color:#fff}
+.moodg .why{flex-basis:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+.moodg[data-lv="0"]{--mc:#ff9f1c}.moodg[data-lv="1"]{--mc:#7ee06a}.moodg[data-lv="2"]{--mc:#4fc3b8}.moodg[data-lv="3"]{--mc:#7f9cf0}.moodg[data-lv="4"]{--mc:#5a67e0}
+.moodg.idle{opacity:.55}
+.moodg.jump .face{animation:mjump .45s ease-out 3}
+.moodg.jump .bar{box-shadow:0 0 10px var(--mc)}
+.moodg.sink .face{animation:msink .12s linear 6}
+@keyframes mjump{0%,100%{transform:translateY(0) scale(1)}40%{transform:translateY(-6px) scale(1.25)}}
+@keyframes msink{0%,100%{transform:translateX(0)}50%{transform:translateX(-2px)}}
+#syspanel .moodg{width:100%}
+.turn h3 .tmood{font-size:13px;line-height:1}
 .turn.hidden{display:none}
 .segs .note{color:var(--muted);font-size:12.5px}
 header select{background:#131a1f;color:var(--ink);padding:1px 4px;font:12px "Courier New",ui-monospace,monospace;
@@ -2405,6 +2653,11 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 #mmenu{min-width:48px;height:30px;padding:0 10px;font-size:15px;font-weight:700;line-height:1;letter-spacing:.1em}
 .mob #mctx .ctxg{display:flex;width:100%}
 .mob #mctx .ctxg .bar{flex:1;width:auto}
+/* スマホ: テンションは 1 行 (顔・段階・バー・理由)。点数は出さない */
+.mob #mmood .moodg{flex-wrap:nowrap;width:100%}
+.mob #mmood .moodg .sc{display:none}
+.mob #mmood .moodg .why{flex:0 1 auto;flex-basis:auto;max-width:45%}
+.mob #mmood:empty{display:none}
 .mob #mgpu{padding:3px 6px;flex:none;line-height:1.45}
 .mob #mgpu:empty{display:none}
 .mob #mgpu .trow{min-height:30px}
@@ -2521,6 +2774,7 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
   <span id="mctxpct" title="最新ターンのコンテキスト使用率 (上限に対する割合)"></span>
   <span class="sp"></span><button id="mmenu" type="button" aria-label="メニュー">…</button></div>
  <div id="mctx"></div>
+ <div id="mmood"></div>
  <div id="mgpu" class="sysm"></div>
  <div id="morig"><div class="mocap"><span class="cap">原文</span><span id="moturn"></span></div><div id="motext"><div id="motail"></div></div></div>
 </div>
@@ -2531,6 +2785,9 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
  </div>
  <div class="sysbox"><div class="caprow"><span class="cap">コンテキスト</span><span id="ctxpct" title="最新ターンのコンテキスト使用率 (上限に対する割合)"></span></div>
   <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="dlt" title="直前の値からの増減"></span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
+ </div>
+ <div class="sysbox"><div class="caprow"><span class="cap">テンション</span></div>
+  <div class="moodg idle" id="moodg" data-lv="2" title="ツールの結果 (失敗・成功の続き方) と思考の言葉から推し量った AI の調子"><span class="face">🙂</span><span class="lbl">-</span><span class="bar"><span class="fill"></span></span><span class="sc"></span><span class="why">ツールを使う会話が始まると動きます</span></div>
  </div>
  <div class="sysbox"><span class="cap">システム</span>
   <div id="sysmc"></div>
@@ -2720,6 +2977,23 @@ function ctxBump(g,d,k,lim){const b=g.querySelector('.dlt');
   b.textContent=(d>0?'+':'−')+k(Math.abs(d));g.dataset.dir=d>0?'up':'down';g.dataset.lv=ctxLevel(d,lim);
   g.classList.remove('bump');void g.offsetWidth;g.classList.add('bump');   // 光っている最中でも最初から光らせ直す
   clearTimeout(ctxBumpT);ctxBumpT=setTimeout(()=>g.classList.remove('bump'),6000)}
+// テンション (調子) メーター。中継が要求ごと・思考の区切りごとに mood を送る (点数 0-100 と段階・顔・理由)。
+// スマホは最初に届いたときに上の欄 (#mmood) へ移す。ターンの見出しにもその時点の顔を付ける (さかのぼって移り変わりを見られるように)
+let moodT=null;
+function onMood(ev){const g=document.getElementById('moodg');
+  if(MOB){const mm=document.getElementById('mmood');if(g.parentNode!==mm)mm.appendChild(g)}
+  const sc=ev.score, d=ev.delta||0;
+  g.dataset.lv=sc>=85?0:sc>=65?1:sc>=40?2:sc>=20?3:4;g.classList.remove('idle');
+  g.querySelector('.face').textContent=ev.face;g.querySelector('.lbl').textContent=ev.label;
+  g.querySelector('.fill').style.width=sc+'%';g.querySelector('.sc').textContent=Math.round(sc);
+  const why=(ev.why||'')+(Math.abs(d)>=0.5?' '+(d>0?'+':'−')+Math.abs(d).toFixed(0):'');
+  g.querySelector('.why').textContent=why;
+  g.title='テンション '+Math.round(sc)+' / 100 ('+ev.label+')'+(ev.who||ev.source?' · '+(ev.who||ev.source):'')+(why?' · '+why:'')+' — ツールの結果と思考の言葉から推し量った AI の調子';
+  if(ctxLive&&(d>=10||d<=-8)){g.classList.remove('jump','sink');void g.offsetWidth;g.classList.add(d>0?'jump':'sink');
+    clearTimeout(moodT);moodT=setTimeout(()=>g.classList.remove('jump','sink'),1600)}
+  const t=turn(ev.turn);if(t){let f=t.el.querySelector('h3 .tmood');
+    if(!f){f=document.createElement('span');f.className='tmood';t.el.querySelector('h3 .n').after(f)}
+    f.textContent=ev.face;f.title='テンション '+Math.round(sc)+' ('+ev.label+')'+(why?' · '+why:'')}}
 function renderAns(t){t.ansTimer=null;t.ans.innerHTML=t.ansRaw.trim()?'<div class="cap"><span class="chip">回答</span></div>'+md(t.ansRaw):'';scroll()}
 function onAnswer(ev){const t=turn(ev.turn);if(!t)return;t.ansRaw+=ev.text;if(!t.ansTimer)t.ansTimer=setTimeout(()=>renderAns(t),150)}
 function onTools(ev){const t=turn(ev.turn);if(!t)return;t.tools.innerHTML=(ev.tools||[]).map(x=>'<div title="'+esc(x.args)+'"><b>🔧 '+esc(x.name)+'</b><code>'+esc(x.args)+'</code></div>').join('');scroll()}
@@ -3180,7 +3454,7 @@ function renderSys(s){lastSysmon=s;renderSysCard()}
 function renderGpu(gpus){lastGpus=gpus;renderSysCard()}
 function onSysmon(ev){renderSys(ev)}
 function onError(ev){const d=document.createElement('div');d.className='seg bad';d.innerHTML='<div class="ja"></div>';d.querySelector('.ja').textContent=ev.text;main.appendChild(d)}
-const H={turn_proc:onTurnProc,turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError,turn_ctx:onTurnCtx,gpu:onGpu,sysmon:onSysmon};
+const H={turn_proc:onTurnProc,turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError,turn_ctx:onTurnCtx,mood:onMood,gpu:onGpu,sysmon:onSysmon};
 function connect(){
   const es=new EventSource('/events');
   es.onopen=()=>{ctxLive=false;lamp(['sdot','msdot'],'ok');document.getElementById('stext').textContent='接続中'};
