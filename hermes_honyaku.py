@@ -50,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.3.4"
+APP_VERSION = "1.4.0"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -2174,13 +2174,26 @@ background:linear-gradient(90deg,#333e46,#242d34);border:1px solid;border-color:
 .ctxg .fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#35e05a 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat;transition:width .25s,background-size .25s}
 .ctxg.warn{color:var(--warn)}
 .ctxg.hot .txt,.ctxg.hot{color:var(--bad)}
-/* メーターの値が変わったとき (JS が .bump を付ける): 枠を 3 回光らせ、増減 (+1.2k) の札をしばらく出す */
-.ctxg .dlt{display:none;flex:none;padding:0 5px;font-weight:700;color:#0b1013;background:var(--acc);border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
-.ctxg .dlt.down{background:#9fb3c8}
+/* メーターの値が変わったとき (JS が .bump・data-dir・data-lv を付ける): 枠を点滅させ、増減 (+1.2k) の札を 6 秒出す。
+   増えたら赤系、減ったら緑系。増減が大きい (data-lv 1→4) ほど色が強く・光が広く・点滅が長く速くなる。
+   速さは最速でも 1 回 0.35 秒 (1 秒に 3 回未満。これより速いと点滅に見えず、光過敏にも良くない) */
+.ctxg{--flo:2px;--flw:10px}
+.ctxg[data-dir=up][data-lv="1"]{--fl:#b85a52;--flbg:#3a1c1a}
+.ctxg[data-dir=up][data-lv="2"]{--fl:#ff4136;--flbg:#6e1f1a}
+.ctxg[data-dir=up][data-lv="3"]{--fl:#ff2a1a;--flbg:#8e1a10;--flw:18px}
+.ctxg[data-dir=up][data-lv="4"]{--fl:#ff1f4b;--flbg:#b0102a;--flo:3px;--flw:26px}
+.ctxg[data-dir=down][data-lv="1"]{--fl:#4f9e5f;--flbg:#1a3322}
+.ctxg[data-dir=down][data-lv="2"]{--fl:#35e05a;--flbg:#1c5a2a}
+.ctxg[data-dir=down][data-lv="3"]{--fl:#3dff6a;--flbg:#1f7a34;--flw:18px}
+.ctxg[data-dir=down][data-lv="4"]{--fl:#7dff3d;--flbg:#2f9a1c;--flo:3px;--flw:26px}
+.ctxg .dlt{display:none;flex:none;padding:0 5px;font-weight:700;color:#0b1013;background:var(--fl);border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
 .ctxg.bump .dlt{display:inline-block}
-.ctxg.bump{animation:ctxbump .7s ease-out 3}
-@keyframes ctxbump{0%{background:#2d6b64;box-shadow:0 0 0 2px var(--acc),0 0 14px var(--acc)}100%{background:#131a1f;box-shadow:0 0 0 0 transparent}}
-@media (prefers-reduced-motion:reduce){.ctxg.bump{animation:none;box-shadow:0 0 0 2px var(--acc)}}
+.ctxg.bump[data-lv="1"]{animation:ctxbump .7s 2}     /* 1.4 秒 */
+.ctxg.bump[data-lv="2"]{animation:ctxbump .55s 4}    /* 2.2 秒 */
+.ctxg.bump[data-lv="3"]{animation:ctxbump .45s 7}    /* 3.2 秒 */
+.ctxg.bump[data-lv="4"]{animation:ctxbump .35s 13}   /* 4.6 秒 */
+@keyframes ctxbump{0%,40%{background:var(--flbg);box-shadow:0 0 0 var(--flo) var(--fl),0 0 var(--flw) var(--fl)}100%{background:#131a1f;box-shadow:0 0 0 0 transparent}}
+@media (prefers-reduced-motion:reduce){.ctxg.bump[data-lv]{animation:none;box-shadow:0 0 0 var(--flo) var(--fl)}}
 .sysm{display:flex;flex-direction:column;font-family:"Courier New",ui-monospace,monospace;font-size:11px;line-height:1.45;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .sysm .trow{display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none}
 .sysm .trow .tw{width:10px;flex:none;color:var(--muted)}
@@ -2218,10 +2231,10 @@ background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--
 /* 「コンテキスト」の見出しの行の右端に使用率 (メーターと同じ 50% で黄・80% で赤) */
 .sysbox .caprow{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
 .sysbox .caprow .cap{margin-bottom:0}
-#ctxpct{font-family:"Courier New",ui-monospace,monospace;font-size:12px;color:#cfe8e4;white-space:nowrap}
+#ctxpct,#mctxpct{font-family:"Courier New",ui-monospace,monospace;font-size:12px;color:#cfe8e4;white-space:nowrap}
 #ctxpct b{font-size:14px;color:#fff}
-#ctxpct.warn,#ctxpct.warn b{color:var(--warn)}
-#ctxpct.hot,#ctxpct.hot b{color:var(--bad)}
+#ctxpct.warn,#ctxpct.warn b,#mctxpct.warn b{color:var(--warn)}
+#ctxpct.hot,#ctxpct.hot b,#mctxpct.hot b{color:var(--bad)}
 #syspanel .ctxg .bar{flex:1;width:auto}
 #syspanel .sysm{width:100%}
 .turn.hidden{display:none}
@@ -2382,6 +2395,13 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 #mbar .sp{flex:1}
 #mbar .mlamp{display:inline-flex;align-items:center;white-space:nowrap}
 #mbar .mlamp .dot{margin:0 3px 0 6px}
+/* スマホのタイトル行: 中継・翻訳のランプの右に使用率。
+   幅 380px 未満は「Hermes 」を省いて収める。横向きは左の欄が狭い (約 235px) ので、使用率だけタイトル行の 2 段目に回す */
+#mctxpct{margin-left:4px;font-size:11px;color:var(--bar-ink)}
+#mctxpct b{font-size:13px;color:#fff}
+@media (max-width:379px){.mob #mbar .mfull{display:none}}
+@media (max-width:339px) and (orientation:portrait){#mctxpct .lb{display:none}}   /* 幅 320px の機種は「ctx」も省く */
+@media (orientation:landscape){.mob #mbar{flex-wrap:wrap;row-gap:0}.mob #mctxpct{order:9;flex-basis:100%;margin:0 0 2px}}
 #mmenu{min-width:48px;height:30px;padding:0 10px;font-size:15px;font-weight:700;line-height:1;letter-spacing:.1em}
 .mob #mctx .ctxg{display:flex;width:100%}
 .mob #mctx .ctxg .bar{flex:1;width:auto}
@@ -2498,6 +2518,7 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
 <div id="mtop">
  <div id="mbar"><b><span class="mfull">Hermes </span>Honyaku</b>
   <span class="mlamp" title="中継サーバーとの接続 / 翻訳サーバーの状態"><span id="msdot" class="dot"></span>中継<span id="mtdot" class="dot"></span>翻訳<span id="mtq"></span></span>
+  <span id="mctxpct" title="最新ターンのコンテキスト使用率 (上限に対する割合)"></span>
   <span class="sp"></span><button id="mmenu" type="button" aria-label="メニュー">…</button></div>
  <div id="mctx"></div>
  <div id="mgpu" class="sysm"></div>
@@ -2683,17 +2704,20 @@ function onTurnCtx(ev){const t=turn(ev.turn);if(!t)return;const el=t.el.querySel
   const r=lim?ev.tokens/lim:0;g.classList.toggle('hot',r>=0.8);g.classList.toggle('warn',r>=0.5&&r<0.8);
   ctxPct(r,lim,ev.exact);
   g.title='最新ターンのコンテキスト使用量'+(ev.exact?' (llama-server の /tokenize)':' (推定値)')+(ev.max_tokens?' · max_out '+k(ev.max_tokens):'');
-  if(ev.tokens!==ctxLast){if(ctxLast!==null&&ctxLive)ctxBump(g,ev.tokens-ctxLast,k);ctxLast=ev.tokens}
+  if(ev.tokens!==ctxLast){if(ctxLast!==null&&ctxLive)ctxBump(g,ev.tokens-ctxLast,k,lim);ctxLast=ev.tokens}
   scroll()}
 // 「コンテキスト」の見出しの行の使用率 (上限が分からないときは出さない。推定値は ~ 付き)
-function ctxPct(r,lim,exact){const e=document.getElementById('ctxpct');
-  e.innerHTML=lim?'使用 <b>'+(r*100).toFixed(1)+'%</b>'+(exact?'':'~'):'';
-  e.className=r>=0.8?'hot':r>=0.5?'warn':''}
+// スマホはタイトル行 (#mctxpct) にも出す
+function ctxPct(r,lim,exact){const v=(r*100).toFixed(1)+'%</b>'+(exact?'':'~'), c=r>=0.8?'hot':r>=0.5?'warn':'';
+  const e=document.getElementById('ctxpct'), m=document.getElementById('mctxpct');
+  e.innerHTML=lim?'使用 <b>'+v:'';m.innerHTML=lim?'<span class="lb">ctx </span><b>'+v:'';e.className=m.className=c}
 // メーターの値が変わるたびに、枠を光らせて増減を 6 秒出す。
 // 接続した直後にまとめて届く過去のターン (中継は続けて status を送る) の間と、「画面を消去」直後の 1 回目は基準にするだけで光らせない
 let ctxLast=null, ctxLive=false, ctxBumpT=null;
-function ctxBump(g,d,k){const b=g.querySelector('.dlt');
-  b.textContent=(d>0?'+':'−')+k(Math.abs(d));b.classList.toggle('down',d<0);
+// 増減の大きさの段階 (上限に対する割合。上限 200k なら 2k 未満 / 10k 未満 / 30k 未満 / それ以上)
+function ctxLevel(d,lim){const f=Math.abs(d)/(lim||200000);return f<0.01?1:f<0.05?2:f<0.15?3:4}
+function ctxBump(g,d,k,lim){const b=g.querySelector('.dlt');
+  b.textContent=(d>0?'+':'−')+k(Math.abs(d));g.dataset.dir=d>0?'up':'down';g.dataset.lv=ctxLevel(d,lim);
   g.classList.remove('bump');void g.offsetWidth;g.classList.add('bump');   // 光っている最中でも最初から光らせ直す
   clearTimeout(ctxBumpT);ctxBumpT=setTimeout(()=>g.classList.remove('bump'),6000)}
 function renderAns(t){t.ansTimer=null;t.ans.innerHTML=t.ansRaw.trim()?'<div class="cap"><span class="chip">回答</span></div>'+md(t.ansRaw):'';scroll()}
