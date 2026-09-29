@@ -50,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -2174,6 +2174,13 @@ background:linear-gradient(90deg,#333e46,#242d34);border:1px solid;border-color:
 .ctxg .fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#35e05a 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat;transition:width .25s,background-size .25s}
 .ctxg.warn{color:var(--warn)}
 .ctxg.hot .txt,.ctxg.hot{color:var(--bad)}
+/* 10 秒以上止まっていたメーターが動いたとき (JS が .bump を付ける): 枠を 3 回光らせ、増減 (+1.2k) の札をしばらく出す */
+.ctxg .dlt{display:none;flex:none;padding:0 5px;font-weight:700;color:#0b1013;background:var(--acc);border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
+.ctxg .dlt.down{background:#9fb3c8}
+.ctxg.bump .dlt{display:inline-block}
+.ctxg.bump{animation:ctxbump .7s ease-out 3}
+@keyframes ctxbump{0%{background:#2d6b64;box-shadow:0 0 0 2px var(--acc),0 0 14px var(--acc)}100%{background:#131a1f;box-shadow:0 0 0 0 transparent}}
+@media (prefers-reduced-motion:reduce){.ctxg.bump{animation:none;box-shadow:0 0 0 2px var(--acc)}}
 .sysm{display:flex;flex-direction:column;font-family:"Courier New",ui-monospace,monospace;font-size:11px;line-height:1.45;color:#cfe8e4;padding:6px 8px;background:#131a1f;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .sysm .trow{display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none}
 .sysm .trow .tw{width:10px;flex:none;color:var(--muted)}
@@ -2495,7 +2502,7 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
   <div class="row" title="翻訳サーバーの状態"><span id="tdot" class="dot"></span>翻訳: <span id="ttext">-</span> <span id="tq"></span></div>
  </div>
  <div class="sysbox"><span class="cap">コンテキスト</span>
-  <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
+  <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="dlt" title="10 秒以上止まっていた後の増減"></span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
  </div>
  <div class="sysbox"><span class="cap">システム</span>
   <div id="sysmc"></div>
@@ -2564,7 +2571,7 @@ else{pref('wake',wake,v=>{if(v)wakeReq();else if(wakeLock){wakeLock.release();wa
 function addSource(name){if(!name||[...srcsel.options].some(o=>o.value===name))return;const o=document.createElement('option');o.value=name;o.textContent=name;srcsel.appendChild(o)}
 function clearScreen(){for(const k in turns){turns[k].el.remove();delete turns[k]}
   [...main.children].forEach(c=>{if(c!==empty&&c.id!=='mjcap')c.remove()});empty.style.display='';moUpdate();
-  const g=document.getElementById('ctxg');g.querySelector('.txt').textContent='ctx -';setFill(g.querySelector('.fill'),0);g.className='ctxg';g.title='最新ターンのコンテキスト使用量'}
+  const g=document.getElementById('ctxg');g.querySelector('.txt').textContent='ctx -';setFill(g.querySelector('.fill'),0);g.className='ctxg';g.title='最新ターンのコンテキスト使用量';ctxLast=null;clearTimeout(ctxBumpT)}
 document.getElementById('clear').onclick=clearScreen;
 function sysnote(text){const d=document.createElement('div');d.className='sysnote';d.textContent=text;main.appendChild(d)}
 // 中継サーバーの起動 id。変わっていたら再起動された = ターン番号が 1 から振り直されるので、古い表示を片付ける
@@ -2666,9 +2673,19 @@ function onTurnCtx(ev){const t=turn(ev.turn);if(!t)return;const el=t.el.querySel
   const g=document.getElementById('ctxg');
   g.querySelector('.txt').textContent='ctx '+k(ev.tokens)+(lim?'/'+k(lim):'')+(ev.exact?'':'~');
   setFill(g.querySelector('.fill'),lim?Math.min(100,ev.tokens/lim*100):0);
-  g.className='ctxg'+(lim&&ev.tokens/lim>=0.8?' hot':lim&&ev.tokens/lim>=0.5?' warn':'');
+  const r=lim?ev.tokens/lim:0;g.classList.toggle('hot',r>=0.8);g.classList.toggle('warn',r>=0.5&&r<0.8);
   g.title='最新ターンのコンテキスト使用量'+(ev.exact?' (llama-server の /tokenize)':' (推定値)')+(ev.max_tokens?' · max_out '+k(ev.max_tokens):'');
+  if(ev.tokens!==ctxLast){const now=Date.now();
+    if(ctxLast!==null&&now-ctxAt>=CTX_IDLE_MS)ctxBump(g,ev.tokens-ctxLast,k);
+    ctxLast=ev.tokens;ctxAt=now}
   scroll()}
+// 10 秒以上値が変わらなかったメーターが動いたら、枠を光らせて増減を 6 秒出す。
+// 時刻は画面側で測る: ページを開いた直後の再生 (過去ターンがまとめて届く) や「画面を消去」直後の 1 回目は基準にするだけで光らせない
+const CTX_IDLE_MS=10000;let ctxLast=null, ctxAt=0, ctxBumpT=null;
+function ctxBump(g,d,k){const b=g.querySelector('.dlt');
+  b.textContent=(d>0?'+':'−')+k(Math.abs(d));b.classList.toggle('down',d<0);
+  g.classList.remove('bump');void g.offsetWidth;g.classList.add('bump');   // 光っている最中でも最初から光らせ直す
+  clearTimeout(ctxBumpT);ctxBumpT=setTimeout(()=>g.classList.remove('bump'),6000)}
 function renderAns(t){t.ansTimer=null;t.ans.innerHTML=t.ansRaw.trim()?'<div class="cap"><span class="chip">回答</span></div>'+md(t.ansRaw):'';scroll()}
 function onAnswer(ev){const t=turn(ev.turn);if(!t)return;t.ansRaw+=ev.text;if(!t.ansTimer)t.ansTimer=setTimeout(()=>renderAns(t),150)}
 function onTools(ev){const t=turn(ev.turn);if(!t)return;t.tools.innerHTML=(ev.tools||[]).map(x=>'<div title="'+esc(x.args)+'"><b>🔧 '+esc(x.name)+'</b><code>'+esc(x.args)+'</code></div>').join('');scroll()}
