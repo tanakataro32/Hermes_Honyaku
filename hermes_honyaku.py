@@ -50,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.4"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -2174,7 +2174,7 @@ background:linear-gradient(90deg,#333e46,#242d34);border:1px solid;border-color:
 .ctxg .fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#35e05a 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat;transition:width .25s,background-size .25s}
 .ctxg.warn{color:var(--warn)}
 .ctxg.hot .txt,.ctxg.hot{color:var(--bad)}
-/* 10 秒以上止まっていたメーターが動いたとき (JS が .bump を付ける): 枠を 3 回光らせ、増減 (+1.2k) の札をしばらく出す */
+/* メーターの値が変わったとき (JS が .bump を付ける): 枠を 3 回光らせ、増減 (+1.2k) の札をしばらく出す */
 .ctxg .dlt{display:none;flex:none;padding:0 5px;font-weight:700;color:#0b1013;background:var(--acc);border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
 .ctxg .dlt.down{background:#9fb3c8}
 .ctxg.bump .dlt{display:inline-block}
@@ -2509,7 +2509,7 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
   <div class="row" title="翻訳サーバーの状態"><span id="tdot" class="dot"></span>翻訳: <span id="ttext">-</span> <span id="tq"></span></div>
  </div>
  <div class="sysbox"><div class="caprow"><span class="cap">コンテキスト</span><span id="ctxpct" title="最新ターンのコンテキスト使用率 (上限に対する割合)"></span></div>
-  <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="dlt" title="10 秒以上止まっていた後の増減"></span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
+  <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="dlt" title="直前の値からの増減"></span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
  </div>
  <div class="sysbox"><span class="cap">システム</span>
   <div id="sysmc"></div>
@@ -2683,17 +2683,15 @@ function onTurnCtx(ev){const t=turn(ev.turn);if(!t)return;const el=t.el.querySel
   const r=lim?ev.tokens/lim:0;g.classList.toggle('hot',r>=0.8);g.classList.toggle('warn',r>=0.5&&r<0.8);
   ctxPct(r,lim,ev.exact);
   g.title='最新ターンのコンテキスト使用量'+(ev.exact?' (llama-server の /tokenize)':' (推定値)')+(ev.max_tokens?' · max_out '+k(ev.max_tokens):'');
-  if(ev.tokens!==ctxLast){const now=Date.now();
-    if(ctxLast!==null&&now-ctxAt>=CTX_IDLE_MS)ctxBump(g,ev.tokens-ctxLast,k);
-    ctxLast=ev.tokens;ctxAt=now}
+  if(ev.tokens!==ctxLast){if(ctxLast!==null&&ctxLive)ctxBump(g,ev.tokens-ctxLast,k);ctxLast=ev.tokens}
   scroll()}
-// 10 秒以上値が変わらなかったメーターが動いたら、枠を光らせて増減を 6 秒出す。
-// 時刻は画面側で測る: ページを開いた直後の再生 (過去ターンがまとめて届く) や「画面を消去」直後の 1 回目は基準にするだけで光らせない
 // 「コンテキスト」の見出しの行の使用率 (上限が分からないときは出さない。推定値は ~ 付き)
 function ctxPct(r,lim,exact){const e=document.getElementById('ctxpct');
   e.innerHTML=lim?'使用 <b>'+(r*100).toFixed(1)+'%</b>'+(exact?'':'~'):'';
   e.className=r>=0.8?'hot':r>=0.5?'warn':''}
-const CTX_IDLE_MS=10000;let ctxLast=null, ctxAt=0, ctxBumpT=null;
+// メーターの値が変わるたびに、枠を光らせて増減を 6 秒出す。
+// 接続した直後にまとめて届く過去のターン (中継は続けて status を送る) の間と、「画面を消去」直後の 1 回目は基準にするだけで光らせない
+let ctxLast=null, ctxLive=false, ctxBumpT=null;
 function ctxBump(g,d,k){const b=g.querySelector('.dlt');
   b.textContent=(d>0?'+':'−')+k(Math.abs(d));b.classList.toggle('down',d<0);
   g.classList.remove('bump');void g.offsetWidth;g.classList.add('bump');   // 光っている最中でも最初から光らせ直す
@@ -3161,9 +3159,9 @@ function onError(ev){const d=document.createElement('div');d.className='seg bad'
 const H={turn_proc:onTurnProc,turn_start:onTurnStart,think:onThink,answer:onAnswer,seg:onSeg,ja:onJa,tools:onTools,turn_end:onTurnEnd,status:onStatus,error:onError,turn_ctx:onTurnCtx,gpu:onGpu,sysmon:onSysmon};
 function connect(){
   const es=new EventSource('/events');
-  es.onopen=()=>{lamp(['sdot','msdot'],'ok');document.getElementById('stext').textContent='接続中'};
+  es.onopen=()=>{ctxLive=false;lamp(['sdot','msdot'],'ok');document.getElementById('stext').textContent='接続中'};
   es.onerror=()=>{lamp(['sdot','msdot'],'error');document.getElementById('stext').textContent='再接続待ち…'};
-  es.onmessage=e=>{try{const ev=JSON.parse(e.data);checkBoot(ev);const h=H[ev.type];if(h)h(ev)}catch(err){console.error(err)}};
+  es.onmessage=e=>{try{const ev=JSON.parse(e.data);checkBoot(ev);const h=H[ev.type];if(h)h(ev);if(ev.type==='status')ctxLive=true}catch(err){console.error(err)}};
 }
 document.getElementById('hsok').addEventListener('click',()=>document.getElementById('hsdlg').close());
 connect();
