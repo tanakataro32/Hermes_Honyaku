@@ -50,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -2367,7 +2367,7 @@ background-size:4px 4px;background-position:0 0,0 2px,2px -2px,-2px 0}
 header{position:sticky;top:0;z-index:5;display:flex;gap:10px;align-items:center;padding:5px 8px;font-size:12px;flex-wrap:wrap;
 background:linear-gradient(90deg,var(--bar1),var(--bar2));color:var(--bar-ink);border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow:inset 0 0 0 1px #0a0f13}
 header b{font-size:13px;color:#fff;letter-spacing:.04em}
-.dot{display:inline-block;width:8px;height:8px;background:var(--muted);margin-right:5px;vertical-align:middle;border:1px solid var(--sv)}
+.dot{display:inline-block;flex:none;width:8px;height:8px;background:var(--muted);margin-right:5px;vertical-align:middle;border:1px solid var(--sv)}
 .dot.ok{background:var(--acc)}.dot.error{background:var(--bad)}.dot.busy{background:var(--warn)}
 header label{color:var(--bar-ink);cursor:pointer;user-select:none}
 header .sp{flex:1}
@@ -2457,6 +2457,15 @@ background:var(--panel);border:1px solid;border-color:var(--sv) var(--hv) var(--
 .sysbox .row{display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden}
 .sysbox .row+.row{margin-top:5px}
 #syspanel .ctxg{width:100%}
+/* 「接続」は見出し・中継・翻訳を 1 行に並べる。翻訳のエラーなどで長くなったら末尾を「…」で切る (全文はマウスを乗せると出る) */
+.sysbox.conn{display:flex;align-items:center;gap:10px}
+.sysbox.conn .cap{margin-bottom:0;flex:none}
+.sysbox.conn .row{flex:none}
+.sysbox.conn .row+.row{margin-top:0}
+.sysbox.conn .row.tr{flex:1 1 auto;min-width:0}
+#ttext{min-width:0;overflow:hidden;text-overflow:ellipsis;margin-left:4px}
+#tq{flex:none;margin-left:4px}
+#tq:empty{display:none}
 /* 「コンテキスト」の見出しの行の右端に使用率 (メーターと同じ 50% で黄・80% で赤) */
 .sysbox .caprow{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
 .sysbox .caprow .cap{margin-bottom:0}
@@ -2643,13 +2652,24 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 #mbar .sp{flex:1}
 #mbar .mlamp{display:inline-flex;align-items:center;white-space:nowrap}
 #mbar .mlamp .dot{margin:0 3px 0 6px}
+#mtq{margin-left:3px}
 /* スマホのタイトル行: 中継・翻訳のランプの右に使用率。
-   幅 380px 未満は「Hermes 」を省いて収める。横向きは左の欄が狭い (約 235px) ので、使用率だけタイトル行の 2 段目に回す */
+   幅 380px 未満は「Hermes 」を省いて収める。横向きは左の欄が狭い (約 235px) ので、2 段に組む:
+   1 段目 = タイトル、2 段目 = ランプと使用率 (使用率は右寄せ)、[…] は右端で 2 段ぶんの高さ。翻訳の待ちが 2 桁になってもはみ出さない */
 #mctxpct{margin-left:4px;font-size:11px;color:var(--bar-ink)}
 #mctxpct b{font-size:13px;color:#fff}
 @media (max-width:379px){.mob #mbar .mfull{display:none}}
 @media (max-width:339px) and (orientation:portrait){#mctxpct .lb{display:none}}   /* 幅 320px の機種は「ctx」も省く */
-@media (orientation:landscape){.mob #mbar{flex-wrap:wrap;row-gap:0}.mob #mctxpct{order:9;flex-basis:100%;margin:0 0 2px}}
+@media (orientation:landscape){
+ .mob #mbar{display:grid;grid-template-columns:minmax(0,1fr) auto auto;grid-template-areas:"t t m" "l p m";align-items:center;column-gap:6px;row-gap:1px;padding:2px 2px 2px 8px}
+ .mob #mbar>b{grid-area:t}
+ .mob #mbar .mlamp{grid-area:l;min-width:0;overflow:hidden}
+ .mob #mbar .mlamp .dot:first-child{margin-left:0}
+ .mob #mctxpct{grid-area:p;margin:0}
+ .mob #mctxpct .lb{display:none}   /* 「ctx」を省いて、待ちが 3 桁でもランプの行に収める */
+ .mob #mbar .sp{display:none}
+ .mob #mmenu{grid-area:m;height:auto;align-self:stretch;min-height:40px}
+}
 #mmenu{min-width:48px;height:30px;padding:0 10px;font-size:15px;font-weight:700;line-height:1;letter-spacing:.1em}
 .mob #mctx .ctxg{display:flex;width:100%}
 .mob #mctx .ctxg .bar{flex:1;width:auto}
@@ -2714,6 +2734,8 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
 #msheet .dt button{margin-left:auto;height:32px;padding:0 14px}
 #msheet .msb{overflow-y:auto;padding:10px 10px calc(12px + env(safe-area-inset-bottom));-webkit-overflow-scrolling:touch}
 #msheet .sysbox .row{white-space:normal}
+#msheet .sysbox.conn{flex-wrap:wrap;row-gap:4px}
+#msheet .sysbox.conn #ttext{overflow:visible;overflow-wrap:anywhere}
 #msheet .sysm .trow{min-height:30px}
 .mview label,.mother label{display:flex;align-items:center;gap:10px;min-height:40px;font-size:14px;cursor:pointer}
 .mview input[type=checkbox],.mother input[type=checkbox]{width:20px;height:20px;flex:none}
@@ -2779,9 +2801,9 @@ border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv);box-shadow
  <div id="morig"><div class="mocap"><span class="cap">原文</span><span id="moturn"></span></div><div id="motext"><div id="motail"></div></div></div>
 </div>
 <aside id="syspanel">
- <div class="sysbox"><span class="cap">接続</span>
-  <div class="row"><span id="sdot" class="dot"></span><span id="stext">接続中…</span></div>
-  <div class="row" title="翻訳サーバーの状態"><span id="tdot" class="dot"></span>翻訳: <span id="ttext">-</span> <span id="tq"></span></div>
+ <div class="sysbox conn"><span class="cap">接続</span>
+  <span class="row"><span id="sdot" class="dot"></span><span id="stext">接続中…</span></span>
+  <span class="row tr" title="翻訳サーバーの状態"><span id="tdot" class="dot"></span>翻訳: <span id="ttext">-</span><span id="tq"></span></span>
  </div>
  <div class="sysbox"><div class="caprow"><span class="cap">コンテキスト</span><span id="ctxpct" title="最新ターンのコンテキスト使用率 (上限に対する割合)"></span></div>
   <span class="ctxg" id="ctxg" title="最新ターンのコンテキスト使用量"><span class="txt" id="ctxgt">ctx -</span><span class="dlt" title="直前の値からの増減"></span><span class="bar"><span class="fill" id="ctxgf"></span></span></span>
@@ -3107,7 +3129,7 @@ function stopBtn(n){
  return b}
 function onStatus(ev){lamp(['tdot','mtdot'],ev.translator==='ok'?(ev.queue>0?'busy':'ok'):ev.translator==='error'?'error':'');
   document.getElementById('mtq').textContent=ev.queue>0?' 待'+ev.queue:'';
-  document.getElementById('ttext').textContent=ev.engine+(ev.translator==='error'?' エラー: '+ev.error:'');
+  const tt=document.getElementById('ttext');tt.textContent=ev.engine+(ev.translator==='error'?' エラー: '+ev.error:'');tt.title=tt.textContent;   // 1 行で切れたときの全文
   document.getElementById('tq').textContent=ev.queue>0?'(待ち '+ev.queue+')':'';
   if(ev.gpus!==undefined)renderGpu(ev.gpus);
   if(ev.sysmon!==undefined)renderSys(ev.sysmon)}
