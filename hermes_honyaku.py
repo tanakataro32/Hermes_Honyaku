@@ -50,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -1282,7 +1282,10 @@ class SysMonitor:
                 for line in f:
                     k, _, v = line.partition(":")
                     info[k] = int(v.split()[0])  # kB
-            return info["MemTotal"], info["MemAvailable"]
+            # キャッシュ = free コマンドの buff/cache と同じ (Buffers + Cached + SReclaimable)。
+            # llama.cpp が mmap で読んだモデルはここに入り、MemAvailable からは「空けられる」扱いになる
+            cache = info.get("Buffers", 0) + info.get("Cached", 0) + info.get("SReclaimable", 0)
+            return info["MemTotal"], info["MemAvailable"], cache
         except Exception:
             return None
 
@@ -1384,12 +1387,14 @@ class SysMonitor:
             data["cpu"] = None
         mem = self._read_meminfo()
         if mem:
-            total, avail = mem  # kB
+            total, avail, cache = mem  # kB
             data["mem_total"] = total / 1048576.0  # GB
             data["mem_used"] = (total - avail) / 1048576.0
+            data["mem_cache"] = max(0, min(cache, avail)) / 1048576.0  # 使用 + キャッシュが全体を超えないように
         else:
             data["mem_total"] = None
             data["mem_used"] = None
+            data["mem_cache"] = None
         try:
             st = os.statvfs("/")
             data["disk_total"] = st.f_frsize * st.f_blocks / 1073741824.0  # GB
@@ -2440,6 +2445,9 @@ background:linear-gradient(90deg,#333e46,#242d34);border:1px solid;border-color:
 .sysm .leaf .bval{order:2;color:#cfe8e4;white-space:nowrap;min-width:56px;text-align:right}
 .sysm .bar{height:8px;background:#0c1114;overflow:hidden;border:1px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
 .sysm .bar .fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#35e05a 0 calc(50% - 1px),#0c1114 calc(50% - 1px) 50%,var(--warn) 50% calc(80% - 1px),#0c1114 calc(80% - 1px) 80%,var(--bad) 80% 100%) 0 0/100% 100% no-repeat;transition:width .25s,background-size .25s} /* 3 段階カラー (.ctxg .fill と同じ) */
+.sysm .bar.stk{display:flex}
+.sysm .bar.stk .fill{flex:none}
+.sysm .bar .fill2{display:block;flex:none;height:100%;width:0%;background:#3d6f9e;transition:width .25s} /* RAM のキャッシュ (mmap したモデルなど) */
 .sysm .leaf.warn .bval{color:var(--warn)}
 .sysm .leaf.hot .bval{color:var(--bad)}
 /* システム情報パネル (左列。スクロールしても固定) */
@@ -3198,7 +3206,8 @@ const IC_DDR='<svg width="26" height="13" viewBox="0 0 52 26" style="vertical-al
 function hesc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 // 3 段階バーの fill を幅 w% にする。グラデーションがバー全幅 (100%) に一致するよう background-size を 100/w 倍に拡大
 function setFill(fill,w){fill.style.width=w+'%';fill.style.backgroundSize=(w>0?(10000/w)+'% 100%':'100% 100%')}
-function sysleaf(label,value,pct,warnPct,hotPct,tip){
+// pct2 を渡すと、fill の後ろに 2 本目 (青、RAM のキャッシュ) を積む。色の段階は pct だけで決める
+function sysleaf(label,value,pct,warnPct,hotPct,tip,pct2){
  const el=document.createElement('div');
  let cls='leaf';
  if(pct!==null){
@@ -3213,8 +3222,15 @@ function sysleaf(label,value,pct,warnPct,hotPct,tip){
  top.appendChild(bl);top.appendChild(bv);
  const bar=document.createElement('div');bar.className='bar';
  const fill=document.createElement('span');fill.className='fill';
- setFill(fill,pct===null?0:Math.max(0,Math.min(100,pct)));
+ const w=pct===null?0:Math.max(0,Math.min(100,pct));
+ setFill(fill,w);
  bar.appendChild(fill);
+ if(pct2!==undefined&&pct2!==null){
+  bar.classList.add('stk');
+  const f2=document.createElement('span');f2.className='fill2';
+  f2.style.width=Math.max(0,Math.min(100-w,pct2))+'%';
+  bar.appendChild(f2);
+ }
  el.appendChild(top);el.appendChild(bar);
  return el}
 function sysnode(name,key){
@@ -3438,15 +3454,21 @@ function renderSysCard(){
  if(s){
   const cpu=(s.cpu===null||s.cpu===undefined)?null:s.cpu;
   const cpuV=cpu===null?'-':cpu.toFixed(1)+'%';
-  const memV=(s.mem_used===null||s.mem_used===undefined)?'-':bfmt(s.mem_used)+'/'+bfmt(s.mem_total)+'G';
+  // RAM: 使用中 (プログラム) + キャッシュ (ファイルの置き場所。llama.cpp が mmap で読んだモデルもここ) / 全体
+  const memC=(s.mem_cache===null||s.mem_cache===undefined)?null:s.mem_cache;
+  const memV=(s.mem_used===null||s.mem_used===undefined)?'-':bfmt(s.mem_used)+(memC===null?'':'+'+bfmt(memC))+'/'+bfmt(s.mem_total)+'G';
   const memPct=(s.mem_total)?s.mem_used/s.mem_total*100:null;
+  const memPct2=(s.mem_total&&memC!==null)?memC/s.mem_total*100:null;
+  const memTip=memC===null?null:'使用中 '+bfmt(s.mem_used)+'G (緑) + キャッシュ '+bfmt(memC)+'G (青) / 全体 '+bfmt(s.mem_total)+'G\n'
+   +'キャッシュはファイルの置き場所 (free の buff/cache)。llama.cpp が mmap で読んだモデルもここに入る。\n'
+   +'ほかのプログラムが必要とすれば空けられるが、空けるとモデルは SSD から読み直しになる。';
   card.appendChild(sysnode('🖥️ サーバ','srv'));
   if(sysTree.srv){
    // 表示順: GPU → CPU → RAM → ディスク (スマホ表示の GPU は上の欄に別に描く)
    const gw=MOB?null:gpuSection(false);
    if(gw)card.appendChild(gw);
    card.appendChild(sysleaf(IC_CPU+' CPU',cpuV,cpu,90));
-   card.appendChild(sysleaf(IC_DDR+' RAM',memV,memPct,95));
+   card.appendChild(sysleaf(IC_DDR+' RAM',memV,memPct,95,null,memTip,memPct2));
    const dskWrap=document.createElement('div');dskWrap.className='tsub';
    dskWrap.appendChild(sysnode('💾 ディスク','dsk'));
    if(sysTree.dsk){
