@@ -50,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.6.0"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -151,6 +151,7 @@ class Config:
             "hstop": {"path": "", "timeout": "120"},
             "log": {"dir": "logs", "level": "INFO"},
             "sources": {"127.0.0.1": "Hermes", "172.": "Open WebUI", "default": ""},
+            "routes": {},
         })
         self.path = None
         self.local_path = None
@@ -1903,6 +1904,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
     translator = None
     upstream = None  # (scheme, host, port)
     token_meter = None
+    # 別の llama-server への振り分け: 名前 → ((scheme, host, port), TokenMeter)。
+    # /<名前>/v1/... に来た要求は先頭の /<名前> を外してその上流へ送る (config.ini の [routes])
+    routes = {}
     # 停止ボタンで止めた要求: (接続元 IP, 要求の中身のハッシュ) → (期限, 止めたターン番号)。
     # Hermes は通信エラーだと同じ要求をやり直すので、期限内に同じ要求が来たら 400 で断る (断るたびに期限を延ばす)
     refused = {}
@@ -2076,6 +2080,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     # ---- 振り分け ----
     def _proxy(self):
         body = self._read_body()
+        self._route()
         path = urllib.parse.urlsplit(self.path).path.rstrip("/")
         if self.command == "POST" and path.endswith("/chat/completions"):
             try:
@@ -2087,6 +2092,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if req is not None:
                 return self._chat(req)
         return self._passthrough(body)
+
+    def _route(self):
+        """/<名前>/... が [routes] にあれば、この要求だけ上流とトークン計測をその llama-server に替え、先頭の /<名前> を外す"""
+        parts = self.path.split("/", 2)
+        if len(parts) > 2 and parts[1] in self.routes:
+            self.upstream, self.token_meter = self.routes[parts[1]]
+            self.path = "/" + parts[2]
 
     def _passthrough(self, body):
         conn = None
@@ -3842,6 +3854,15 @@ def main():
         ProxyHandler.token_meter = TokenMeter(ProxyHandler.upstream)
     except Exception:
         log.exception("token meter init failed (context meter will use estimates)")
+    for name, url in cfg.cp.items("routes"):
+        ru = urllib.parse.urlsplit(url.strip())
+        target = (ru.scheme or "http", ru.hostname, ru.port or (443 if ru.scheme == "https" else 80))
+        try:
+            meter = TokenMeter(target)
+        except Exception:
+            log.exception("token meter init failed for route %s", name)
+            meter = None
+        ProxyHandler.routes[name] = (target, meter)
     UIHandler.cfg = cfg
     UIHandler.index_html = build_index_html(ver, cfg.get("ui", "hondana_url"))
     UIHandler.translator = translator
@@ -3854,6 +3875,8 @@ def main():
     threading.Thread(target=proxy.serve_forever, name="proxy", daemon=True).start()
     threading.Thread(target=ui.serve_forever, name="ui", daemon=True).start()
     log.info("proxy  : http://%s:%d/v1  ->  %s", cfg.get("proxy", "listen_host"), cfg.getint("proxy", "listen_port"), cfg.get("proxy", "upstream"))
+    for name, url in cfg.cp.items("routes"):
+        log.info("route  : http://%s:%d/%s/v1  ->  %s", cfg.get("proxy", "listen_host"), cfg.getint("proxy", "listen_port"), name, url.strip())
     log.info("ui     : http://%s:%d/", cfg.get("ui", "listen_host"), cfg.getint("ui", "listen_port"))
     log.info("translator: engine=%s url=%s model=%s workers=%d", translator.engine, translator.url, translator.model, translator.workers)
     try:
