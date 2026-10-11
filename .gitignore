@@ -10,5 +10,5 @@ windows/compare_result.txt
 windows/compare_transcript.txt
 windows/HwMonitor/bin/
 windows/HwMonitor/obj/
-windows/HwMonitor/.vs/
+.vs/
 *.user
