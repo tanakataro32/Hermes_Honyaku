@@ -51,7 +51,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -2648,7 +2648,7 @@ background:linear-gradient(90deg,#333e46,#242d34);border:1px solid;border-color:
 .sysm .bar.stk .fill{flex:none}
 .sysm .bar .fill2{display:block;flex:none;height:100%;width:0%;background:#3d6f9e;transition:width .25s} /* RAM のキャッシュ (mmap したモデルなど) */
 .sysm .leaf.warn .bval{color:var(--warn)}
-/* GPU の性能メーターは多いほど良いので、位置で色を変えず単色 (緑)。絞られているときだけ黄 (電力の上限) / 赤 (温度・ハードの減速) */
+/* GPU の性能メーター (使用率) は位置で色を変えず単色 (緑)。クロックを絞られているときだけ黄 (電力の上限) / 赤 (温度・ハードの減速) */
 .sysm .leaf.perf .bar .fill,.sysm .leaf.flat .bar .fill{background:#35e05a} /* flat = 電力の内訳 (全体に占める割合なので段階の色にしない) */
 .sysm .leaf.perf.warn .bar .fill{background:var(--warn)}
 .sysm .leaf.perf.hot .bar .fill{background:var(--bad)}
@@ -3460,17 +3460,17 @@ function sysnode(name,key){
  el.appendChild(tw);el.appendChild(nm);
  el.addEventListener('click',()=>{sysTree[key]=!sysTree[key];saveTree();renderSysCard()});
  return el}
-// 性能メーター: いまの SM クロックが、そのカードの最大クロックの何割で回っているか (= いま出せている力)。
-// 電力の上限で絞られていれば黄、温度・ハードの減速なら赤。値はいまのクロック。マウスを乗せると最大クロック・使用率・P ステート・電力の上限・理由を出す
+// 性能メーター: GPU の使用率 (nvidia-smi の utilization.gpu。CPU の使用率と同じ % でそろえる)。
+// 電力の上限でクロックを絞られていれば黄、温度・ハードの減速なら赤。マウスを乗せるとクロック・P ステート・電力の上限・理由を出す
 function gpuPerf(g,label){
- if(g.clock==null||!g.clock_max)return null;
- const th=g.throttle||[],pct=g.clock/g.clock_max*100;
+ if(g.util==null)return null;
+ const th=g.throttle||[],pct=g.util;
  const hot=th.some(t=>t.kind==='thermal'||t.kind==='hw'),warn=th.length>0;
- const tip='SM クロック '+g.clock.toFixed(0)+' / 最大 '+g.clock_max.toFixed(0)+' MHz ('+pct.toFixed(0)+'%)'
-  +'\n使用率 '+(g.util==null?'-':g.util.toFixed(0)+'%')+' ・ '+(g.pstate||'-')+(g.idle?' (待機中)':'')
+ const tip='使用率 '+g.util.toFixed(0)+'% ・ '+(g.pstate||'-')+(g.idle?' (待機中)':'')
+  +'\nSM クロック '+(g.clock==null?'-':g.clock.toFixed(0))+' / 最大 '+(g.clock_max==null?'-':g.clock_max.toFixed(0))+' MHz'
   +'\n電力 '+g.power.toFixed(0)+' / 上限 '+(g.power_limit==null?'-':g.power_limit.toFixed(0))+' W'
   +'\nクロックを下げている理由: '+(th.length?th.map(t=>t.text).join('・'):'なし');
- const el=sysleaf(label||'🚀 性能',g.clock.toFixed(0)+'MHz',pct,warn?0:null,hot?0:null,tip);el.classList.add('perf');return el}
+ const el=sysleaf(label||'🚀 性能',g.util.toFixed(0)+'%',pct,warn?0:null,hot?0:null,tip);el.classList.add('perf');return el}
 // 閉じた GPU の 1 行要約: 温度・電力・VRAM (バーと同じ境目で黄 / 赤)
 function gpuSum(g){
  const sp=document.createElement('span');sp.className='gsum';
@@ -3681,7 +3681,7 @@ function gpuSection(top){
   c.appendChild(l);
   if(sysTree.gpu){
    // 並び: 温度・電力・性能・VRAM。バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、電力 max_power 満杯、
-   // 性能 = SM クロック ÷ 最大 SM クロック、VRAM 使用率 (warn 95%)
+   // 性能 = GPU の使用率、VRAM 使用率 (warn 95%)
    c.appendChild(sysleaf('🌡️ 温度',g.temp+'℃',g.temp/90*100,75/90*100,85/90*100));
    const mp=g.max_power||250;
    c.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
@@ -3739,9 +3739,9 @@ function cpuPct(){const s=lastSysmon;return (!s||s.cpu===null||s.cpu===undefined
 function perfGroup(top){
  const gpus=Array.isArray(lastGpus)?lastGpus:[],cpu=cpuPct();
  const parts=[['CPU '+(cpu===null?'-':cpu.toFixed(0)+'%'),cpu!==null&&cpu>=90?'warn':'']];
- for(const g of gpus){if(g.clock==null||!g.clock_max)continue;const th=g.throttle||[];
-  parts.push([(g.label||g.name)+' '+(g.clock/g.clock_max*100).toFixed(0)+'%',th.some(t=>t.kind==='thermal'||t.kind==='hw')?'hot':th.length?'warn':''])}
- const [wrap,n,body]=groupNode('🚀 性能','prf',parts,top,'CPU は使用率、GPU はいまの SM クロック ÷ 最大クロック (電力の上限で絞られていれば黄、温度などなら赤)');
+ for(const g of gpus){if(g.util==null)continue;const th=g.throttle||[];
+  parts.push([(g.label||g.name)+' '+g.util.toFixed(0)+'%',th.some(t=>t.kind==='thermal'||t.kind==='hw')?'hot':th.length?'warn':''])}
+ const [wrap,n,body]=groupNode('🚀 性能','prf',parts,top,'CPU も GPU も使用率 (GPU は電力の上限でクロックを絞られていれば黄、温度などなら赤)');
  if(gpus.length)n.appendChild(hstopBtns());
  if(sysTree.prf){
   body.appendChild(sysleaf(IC_CPU+' CPU',cpu===null?'-':cpu.toFixed(1)+'%',cpu,90,null,'CPU の使用率 (/proc/stat)'));
