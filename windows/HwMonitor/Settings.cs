@@ -11,6 +11,8 @@ public sealed class Settings
     public bool TopMost { get; set; }
     public bool HideTasks { get; set; } = true;    // 背景タスク (タイトル生成など) の和訳を出さない
     public bool ShowTranslation { get; set; } = true;
+    public bool ShowSource { get; set; }               // 和訳の下に原文 (英文の区切り) を併記
+    public bool ShowThink { get; set; } = true;        // 和訳の上に、いま考えている英文の欄
     public string Range { get; set; } = "1h";
     public string Group { get; set; } = "p";
     public string Tab { get; set; } = "graph";

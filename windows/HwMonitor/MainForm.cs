@@ -19,6 +19,8 @@ public sealed class MainForm : Form
     readonly ToolStripButton tabEnergy = new("電気代") { CheckOnClick = false };
     readonly ToolStripButton topMost = new("最前面") { CheckOnClick = true };
     readonly ToolStripButton showJa = new("和訳") { CheckOnClick = true };
+    readonly ToolStripButton showSrc = new("原文を併記") { CheckOnClick = true, ToolTipText = "和訳の 1 区切りごとに、翻訳した英文を下に小さく出す" };
+    readonly ToolStripButton showThink = new("原文の欄") { CheckOnClick = true, ToolTipText = "和訳の上に、いま考えている英文を届いたそばから流す (和訳より早い)" };
     readonly ToolStripLabel status = new() { Alignment = ToolStripItemAlignment.Right };
     readonly System.Windows.Forms.Timer nowTimer = new() { Interval = 2000 };
     readonly System.Windows.Forms.Timer slowTimer = new() { Interval = 10000 };
@@ -52,9 +54,13 @@ public sealed class MainForm : Form
         topMost.CheckedChanged += (_, _) => { TopMost = settings.TopMost = topMost.Checked; settings.Save(); };
         showJa.Checked = settings.ShowTranslation;
         showJa.CheckedChanged += (_, _) => { settings.ShowTranslation = showJa.Checked; ApplyTranslation(); settings.Save(); };
+        showSrc.Checked = settings.ShowSource;
+        showSrc.CheckedChanged += (_, _) => { settings.ShowSource = translation.ShowSource = showSrc.Checked; settings.Save(); };
+        showThink.Checked = settings.ShowThink;
+        showThink.CheckedChanged += (_, _) => { settings.ShowThink = translation.ShowThink = showThink.Checked; settings.Save(); };
         var setup = new ToolStripButton("設定…");
         setup.Click += (_, _) => OpenSettings();
-        bar.Items.AddRange([tabGraph, tabEnergy, new ToolStripSeparator(), topMost, showJa, setup, status]);
+        bar.Items.AddRange([tabGraph, tabEnergy, new ToolStripSeparator(), topMost, showJa, showSrc, showThink, new ToolStripSeparator(), setup, status]);
 
         // 真ん中 (グラフ / 電気代) と下 (和訳) は境目をドラッグで動かせる
         split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, BackColor = Theme.Grid, SplitterWidth = 4 };
@@ -84,7 +90,7 @@ public sealed class MainForm : Form
         Load += async (_, _) =>
         {
             TopMost = settings.TopMost;
-            split.SplitterDistance = Math.Max(120, split.Height - 170);
+            split.SplitterDistance = Math.Max(120, split.Height - 230);   // 和訳 (+原文の欄) に下の 230px
             SetTab(settings.Tab);
             ApplyTranslation();
             nowTimer.Start();
@@ -119,6 +125,9 @@ public sealed class MainForm : Form
     void ApplyTranslation()
     {
         split.Panel2Collapsed = !settings.ShowTranslation;
+        showSrc.Enabled = showThink.Enabled = settings.ShowTranslation;   // 和訳を隠しているときは原文の 2 つも押せない
+        translation.ShowSource = settings.ShowSource;
+        translation.ShowThink = settings.ShowThink;
         if (settings.ShowTranslation) translation.Start(); else translation.Stop();
     }
 
