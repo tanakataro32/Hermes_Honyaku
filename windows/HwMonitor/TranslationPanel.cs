@@ -30,7 +30,10 @@ public sealed class TranslationPanel : Control
             Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None, BackColor = Theme.Back, ForeColor = Theme.Ink,
             Font = new Font("Yu Gothic UI", 9.5f), ScrollBars = RichTextBoxScrollBars.Vertical, DetectUrls = false,
         };
-        Controls.Add(box);
+        // 文字が窓の端にくっつかないよう、余白の枠の中に置く
+        var frame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 2, 2, 4), BackColor = Theme.Back };
+        frame.Controls.Add(box);
+        Controls.Add(frame);
         Controls.Add(head);
     }
 

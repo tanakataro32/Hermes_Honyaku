@@ -14,7 +14,7 @@ public sealed class MainForm : Form
     readonly EnergyPanel energy = new() { Dock = DockStyle.Fill, Visible = false };
     readonly TranslationPanel translation;
     readonly SplitContainer split;
-    readonly ToolStrip bar = new() { GripStyle = ToolStripGripStyle.Hidden, RenderMode = ToolStripRenderMode.System, BackColor = Theme.Panel, ForeColor = Theme.Ink };
+    readonly ToolStrip bar = new() { GripStyle = ToolStripGripStyle.Hidden, Renderer = new DarkRenderer(), BackColor = Theme.Panel, ForeColor = Theme.Ink, Padding = new Padding(4, 2, 4, 2) };
     readonly ToolStripButton tabGraph = new("グラフ") { CheckOnClick = false };
     readonly ToolStripButton tabEnergy = new("電気代") { CheckOnClick = false };
     readonly ToolStripButton topMost = new("最前面") { CheckOnClick = true };
@@ -101,6 +101,9 @@ public sealed class MainForm : Form
         };
     }
 
+    // 100 円までは小数 1 桁 (使い始めは数十銭なので ¥0 にしない)
+    static string Yen(double v) => v >= 100 ? $"¥{v:#,0}" : $"¥{v:0.0}";
+
     void SetTab(string tab)
     {
         settings.Tab = tab == "energy" ? "energy" : "graph";
@@ -130,7 +133,7 @@ public sealed class MainForm : Form
             int h = meters.WantedHeight();
             if (meters.Height != h) meters.Height = h;
             if (now?.Energy is { } en)
-                status.Text = $"今日 ¥{en.TodayYen:0} ({en.TodayKwh:0.00}kWh)・今月 ¥{en.MonthYen:#,0}  ";
+                status.Text = $"今日 {Yen(en.TodayYen)} ({en.TodayKwh:0.00}kWh)・今月 {Yen(en.MonthYen)}  ";
             status.ForeColor = Theme.Ink;
         }
         catch (Exception ex)

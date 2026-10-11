@@ -154,7 +154,8 @@ public sealed class MeterPanel : Control
         {
             double pct = x.Total > 0 ? (x.Used ?? 0) / x.Total.Value * 100 : 0;
             double? pct2 = x.Cache is double ca && x.Total > 0 ? ca / x.Total.Value * 100 : null;
-            string val = x.Cache is double cc ? $"{x.Used:0.0}+{cc:0.0}/{x.Total:0}G" : $"{x.Used:0.0}/{x.Total:0}G";
+            // RAM は「使用中+キャッシュ/全体」を整数で (小数まで出すと値の欄からはみ出す)
+            string val = x.Cache is double cc ? $"{x.Used:0}+{cc:0}/{x.Total:0}G" : $"{x.Used:0.0}/{x.Total:0}G";
             string tipText = x.Kind == "ram"
                 ? $"使用中 {x.Used:0.0}G (緑) + キャッシュ {x.Cache:0.0}G (青) / 全体 {x.Total:0.0}G\nキャッシュは llama.cpp が mmap で読んだモデルなど (空けられるが、空けると SSD から読み直し)"
                 : $"{x.Label} の VRAM";
@@ -168,7 +169,7 @@ public sealed class MeterPanel : Control
         foreach (var d in data.Disks)
         {
             double pct = d.Total > 0 ? (d.Used ?? 0) / d.Total.Value * 100 : 0;
-            Row(g, c, i++, "💾 " + d.Label, pct, Theme.Level(pct, 80, 90), $"{d.Used:0}/{d.Total:0}G",
+            Row(g, c, i++, d.Label, pct, Theme.Level(pct, 80, 90), $"{d.Used:0}/{d.Total:0}G",
                 pct >= 90 ? Theme.Warn : Theme.Ink, d.Tip);
         }
     }
