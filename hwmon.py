@@ -6,7 +6,7 @@ GpuMonitor・SysMonitor (CpuPower・TempSensors) をそのまま使い回すの�
 翻訳の中継 (hermes-honyaku、8081) とは別のプロセスなので、こちらを再起動しても Hermes などの通信は止まらない。
 
   GET /api/now                    いまの値 (2 秒ごとに更新)
-  GET /api/history?range=24h      履歴 (1h / 3h / 6h / 24h / 7d / 30d)。1h は 10 秒刻み、ほかは 1 分の記録をまとめたもの
+  GET /api/history?range=24h      履歴 (2m / 10m / 30m / 1h / 3h / 6h / 24h / 7d / 30d)。1h までは 2〜10 秒刻み、ほかは 1 分の記録をまとめたもの
   GET /api/energy                 電気代 (今日・今月・日ごと 31 日・月ごと 13 か月) と、トークン数・レンタルとの比べ (compare)
   GET /health
 
@@ -41,8 +41,8 @@ log = logging.getLogger("hwmon")
 TEMPK = {"cpu": (100, 85, 95), "gpu": (90, 75, 85), "ddr": (90, 70, 80), "ssd": (85, 65, 75),
          "board": (80, 55, 70), "lan": (110, 85, 100)}
 
-# 履歴の刻み: range -> (さかのぼる秒, 刻みの秒)。1h はメモリの 2 秒の記録から、ほかは 1 分の記録から
-RANGES = {"1h": (3600, 10), "3h": (3 * 3600, 60), "6h": (6 * 3600, 60), "24h": (86400, 240),
+# 履歴の刻み: range -> (さかのぼる秒, 刻みの秒)。1 時間までは (メモリの) 2 秒の記録から、ほかは 1 分の記録から
+RANGES = {"2m": (120, 2), "10m": (600, 2), "30m": (1800, 5), "1h": (3600, 10), "3h": (3 * 3600, 60), "6h": (6 * 3600, 60), "24h": (86400, 240),
           "7d": (7 * 86400, 1800), "30d": (30 * 86400, 7200)}
 
 
@@ -394,12 +394,14 @@ class HwMonitor:
         now = time.time()
         since = now - span
         buckets = collections.OrderedDict()
-        if rng == "1h":
+        filled = False
+        if span <= 3600:
             # 2 秒の記録はメモリにしか無いので、起動し直した直後は足りない。足りない前の部分は 1 分の記録で埋める
             with self.lock:
                 rows = [(t, f) for t, f in self.ring if t >= since]
             start = rows[0][0] if rows else now
             if start - since > 60:
+                filled = True
                 old = [(ts + 30, json.loads(d)) for ts, d in self.store.minutes_since(int(since)) if ts + 60 <= start]
                 rows = old + rows
         else:
@@ -423,7 +425,7 @@ class HwMonitor:
         ts = list(buckets.keys())
         series = {k: [round(acc[k][0] / acc[k][1], 2) if k in acc else None for acc in buckets.values()] for k in keys}
         # 線をつなぐ間隔の上限 (これより空いたら記録が無いとみなして切る)。1h の前の部分は 1 分ごとなので広めに
-        max_gap = 150 if rng == "1h" else int(step * 2.5)
+        max_gap = 150 if filled else max(int(step * 2.5), 6)
         return {"range": rng, "step": step, "from": int(since), "to": int(now), "t": ts, "series": series, "max_gap": max_gap}
 
     def _pending(self):

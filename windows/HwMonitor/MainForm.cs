@@ -27,7 +27,7 @@ public sealed class MainForm : Form
     readonly ToolStripButton showThink = new("原文の欄") { CheckOnClick = true, ToolTipText = "和訳の上に、いま考えている英文を届いたそばから流す (和訳より早い)" };
     readonly ToolStripLabel status = new() { Alignment = ToolStripItemAlignment.Right };
     readonly System.Windows.Forms.Timer nowTimer = new() { Interval = 2000 };
-    readonly System.Windows.Forms.Timer slowTimer = new() { Interval = 10000 };
+    readonly System.Windows.Forms.Timer slowTimer = new() { Interval = 2000 };   // 履歴・電気代 (間隔は RefreshSlow で期間ごとに)
     DateTime lastHistory = DateTime.MinValue, lastEnergy = DateTime.MinValue;
     bool busyNow, busyHist, busyEnergy;
 
@@ -165,10 +165,10 @@ public sealed class MainForm : Form
         finally { busyNow = false; }
     }
 
-    // 履歴: 1 時間は 10 秒ごと、それより長い期間は 1 分ごと。電気代は 1 分ごと
+    // 履歴: 120 秒・10 分は 2 秒ごと、30 分は 5 秒ごと、1 時間は 10 秒ごと、それより長い期間は 1 分ごと。電気代は 1 分ごと
     async Task RefreshSlow(bool force = false)
     {
-        var due = settings.Range == "1h" ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(60);
+        var due = TimeSpan.FromSeconds(settings.Range switch { "2m" or "10m" => 2, "30m" => 5, "1h" => 10, _ => 60 });
         if (chart.Visible && (force || DateTime.Now - lastHistory >= due)) await RefreshHistory();
         if ((energy.Visible || cost.Visible) && (force || DateTime.Now - lastEnergy >= TimeSpan.FromSeconds(60))) await RefreshEnergy();
     }

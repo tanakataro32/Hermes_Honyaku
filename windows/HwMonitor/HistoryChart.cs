@@ -9,7 +9,7 @@ namespace HwMonitor;
 public sealed class HistoryChart : Control
 {
     public static readonly (string key, string label)[] Ranges =
-        [("1h", "1時間"), ("3h", "3時間"), ("6h", "6時間"), ("24h", "24時間"), ("7d", "7日"), ("30d", "30日")];
+        [("2m", "120秒"), ("10m", "10分"), ("30m", "30分"), ("1h", "1時間"), ("3h", "3時間"), ("6h", "6時間"), ("24h", "24時間"), ("7d", "7日"), ("30d", "30日")];
     public static readonly (string key, string label, string unit)[] Groups =
         [("p", "電力", "W"), ("t", "温度", "℃"), ("u", "使用率", "%"), ("m", "メモリ", "GB"), ("r", "トークン", "t/s")];
 
@@ -190,16 +190,17 @@ public sealed class HistoryChart : Control
 
     static DateTime Local(long t) => DateTimeOffset.FromUnixTimeSeconds(t).LocalDateTime;
 
-    static string FormatTime(long t, long span) => span <= 86400 ? Local(t).ToString("HH:mm") : Local(t).ToString("M/d HH:mm");
+    static string FormatTime(long t, long span) =>
+        span <= 600 ? Local(t).ToString("HH:mm:ss") : span <= 86400 ? Local(t).ToString("HH:mm") : Local(t).ToString("M/d HH:mm");
 
     // 時刻の目盛り: 期間に合わせて切りのよい間隔で
     static IEnumerable<(long, string)> TimeTicks(long t0, long t1)
     {
         long span = t1 - t0;
-        long step = span <= 3600 ? 600 : span <= 3 * 3600 ? 1800 : span <= 6 * 3600 ? 3600 : span <= 86400 ? 4 * 3600 : span <= 7 * 86400 ? 86400 : 5 * 86400;
+        long step = span <= 120 ? 20 : span <= 600 ? 60 : span <= 1800 ? 300 : span <= 3600 ? 600 : span <= 3 * 3600 ? 1800 : span <= 6 * 3600 ? 3600 : span <= 86400 ? 4 * 3600 : span <= 7 * 86400 ? 86400 : 5 * 86400;
         long offset = (long)TimeZoneInfo.Local.GetUtcOffset(DateTime.Now).TotalSeconds;  // 日付の区切りを日本時間の 0 時に
         for (long t = ((t0 + offset) / step + 1) * step - offset; t < t1; t += step)
-            yield return (t, step >= 86400 ? Local(t).ToString("M/d") : Local(t).ToString("HH:mm"));
+            yield return (t, step >= 86400 ? Local(t).ToString("M/d") : step < 60 ? Local(t).ToString("HH:mm:ss") : Local(t).ToString("HH:mm"));
     }
 
     protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); hoverX = e.X; Invalidate(); }

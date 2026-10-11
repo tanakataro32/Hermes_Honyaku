@@ -51,7 +51,7 @@ public sealed class CostPanel : Control
         }
         // ---- 表: 期間 × (トークン・推論時間・4 つの費用)。費用の下の小さい字は 100 万出力トークンあたり ----
         string[] heads = ["期間", "生成", "入力", "推論時間", .. Kinds.Select(k => k.label)];
-        int[] widths = [56, 70, 70, 76, 120, 120, 170, 180];
+        int[] widths = [56, 70, 70, 104, 120, 120, 170, 180];
         int x0 = Pad, y = Pad;
         int x = x0;
         for (int i = 0; i < heads.Length; i++)
@@ -70,7 +70,7 @@ public sealed class CostPanel : Control
             x = x0;
             // 最安を太字で (その期間に生成が無ければ比べない)
             string? best = pr.Out > 0 ? Kinds.Select(k => (k.key, v: Get(pr.Yen, k.key))).Where(t => t.v != null).MinBy(t => t.v)!.key : null;
-            string[] cells = [pr.Label, Tok(pr.Out), Tok(pr.In), $"{pr.BusyH:0.0}/{pr.Hours:0.0}時間"];
+            string[] cells = [pr.Label, Tok(pr.Out), Tok(pr.In), $"{pr.BusyH:0.0#}/{pr.Hours:0.0#}時間"];
             for (int i = 0; i < cells.Length; i++)
             {
                 TextRenderer.DrawText(g, cells[i], i == 0 ? Theme.UiBold : Theme.Num, new Rectangle(x, y, widths[i] - 6, 18),
