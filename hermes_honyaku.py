@@ -50,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.6.2"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -2712,7 +2712,11 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 .sysm .gsum>span{display:inline-block;text-align:right}
 .sysm .gsum .gt{min-width:5ch}.sysm .gsum .gm{min-width:8ch}.sysm .gsum .gp{min-width:4ch}
 .sysm .gsum .warn{color:var(--warn)}.sysm .gsum .hot{color:var(--bad)}
-.sysm .gline{display:flex;align-items:center;gap:6px;margin-left:10px;min-height:22px}
+.sysm .gline{display:flex;align-items:center;gap:6px;margin-left:28px;min-height:22px;position:relative}
+/* 閉じた GPU のカード行に、GPU 行の ▶ から枝の線を引く (├ / 最後は └)。左の位置 = GPU 行の ▶ の中心 (PC は 14+5px、スマホの上の欄は 0+5px) */
+.sysm .gline::before{content:"";position:absolute;left:-9px;top:-5px;height:calc(50% + 5px);width:6px;border-left:1px solid #62787e;border-bottom:1px solid #62787e}
+.sysm .gline:not(:last-child)::after{content:"";position:absolute;left:-9px;top:50%;bottom:0;border-left:1px solid #62787e}
+#mgpu .gline{margin-left:14px}
 .sysm .gline b{color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 原文の最新行。文字が増えても下揃えで、上にあふれた分は隠す */
 #morig{display:flex;flex-direction:column;min-height:0;padding:2px 6px 4px;background:#12181d;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
