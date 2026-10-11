@@ -50,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.6.2"
+APP_VERSION = "1.6.3"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -2712,11 +2712,12 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 .sysm .gsum>span{display:inline-block;text-align:right}
 .sysm .gsum .gt{min-width:5ch}.sysm .gsum .gm{min-width:8ch}.sysm .gsum .gp{min-width:4ch}
 .sysm .gsum .warn{color:var(--warn)}.sysm .gsum .hot{color:var(--bad)}
-.sysm .gline{display:flex;align-items:center;gap:6px;margin-left:28px;min-height:22px;position:relative}
-/* 閉じた GPU のカード行に、GPU 行の ▶ から枝の線を引く (├ / 最後は └)。左の位置 = GPU 行の ▶ の中心 (PC は 14+5px、スマホの上の欄は 0+5px) */
-.sysm .gline::before{content:"";position:absolute;left:-9px;top:-5px;height:calc(50% + 5px);width:6px;border-left:1px solid #62787e;border-bottom:1px solid #62787e}
-.sysm .gline:not(:last-child)::after{content:"";position:absolute;left:-9px;top:50%;bottom:0;border-left:1px solid #62787e}
-#mgpu .gline{margin-left:14px}
+.sysm .gcard{position:relative;margin-left:28px}
+#mgpu .gcard{margin-left:14px}
+.sysm .gline{display:flex;align-items:center;gap:6px;height:22px}
+/* GPU 行の ▶ からカードへ枝の線 (├ / 最後は └)。左の位置 = GPU 行の ▶ の中心。縦線はカードのバーの横も通す */
+.sysm .gcard::before{content:"";position:absolute;left:-9px;top:-5px;height:16px;width:6px;border-left:1px solid #62787e;border-bottom:1px solid #62787e}
+.sysm .gcard:not(:last-child)::after{content:"";position:absolute;left:-9px;top:11px;bottom:0;border-left:1px solid #62787e}
 .sysm .gline b{color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 原文の最新行。文字が増えても下揃えで、上にあふれた分は隠す */
 #morig{display:flex;flex-direction:column;min-height:0;padding:2px 6px 4px;background:#12181d;border:2px solid;border-color:var(--sv) var(--hv) var(--hv) var(--sv)}
@@ -3164,10 +3165,9 @@ function onGpu(ev){renderGpu(ev.gpus)}
 function bfmt(v){return v===null?'-':v.toFixed(1)}
 // ツリー表示の折りたたみ状態 (2秒毎の再描画を跨いで保持)
 const sysTree={srv:true,dsk:true,gpu:true};
-const gpuTree={}; // 各 GPU ノード ('gpu0','gpu1',...)
 // GPU の開閉を覚えておく (スマホの縦向きで閉じて和訳を広く見る使い方のため。PC も同じ)
-try{const v=JSON.parse(localStorage.getItem('hh.mtree')||'null');if(v){if(typeof v.gpu==='boolean')sysTree.gpu=v.gpu;Object.assign(gpuTree,v.g||{})}}catch(e){}
-function saveTree(){try{localStorage.setItem('hh.mtree',JSON.stringify({gpu:sysTree.gpu,g:gpuTree}))}catch(e){}}
+try{const v=JSON.parse(localStorage.getItem('hh.mtree')||'null');if(v){if(typeof v.gpu==='boolean')sysTree.gpu=v.gpu}}catch(e){}
+function saveTree(){try{localStorage.setItem('hh.mtree',JSON.stringify({gpu:sysTree.gpu}))}catch(e){}}
 let lastSysmon=null, lastGpus=null;
 // ラベル先頭のアイコン (実物風の固定配色: 緑=基板 / 金=端子・ピン / 銀=金属 / 黒=チップ。切欠きは背景色 #131a1f で抜く)
 // ---- CPU: LGA パッケージ (緑基板 + 銀の IHS + 金ピン、IHS は Win98 風ベベル) ----
@@ -3258,16 +3258,6 @@ function sysnode(name,key){
  const nm=document.createElement('b');nm.innerHTML=name;
  el.appendChild(tw);el.appendChild(nm);
  el.addEventListener('click',()=>{sysTree[key]=!sysTree[key];saveTree();renderSysCard()});
- return el}
-function gpuNode(g,i){
- const key='gpu'+i;
- if(gpuTree[key]===undefined)gpuTree[key]=true;
- const el=document.createElement('div');el.className='trow';
- const tw=document.createElement('span');tw.className='tw';tw.textContent=gpuTree[key]?'▼':'▶';
- const nm=document.createElement('b');nm.textContent=g.label||g.name;
- el.appendChild(tw);el.appendChild(nm);
- if(!gpuTree[key])el.appendChild(gpuSum(g));
- el.addEventListener('click',()=>{gpuTree[key]=!gpuTree[key];saveTree();renderSysCard()});
  return el}
 // 閉じた GPU の 1 行要約: 温度・VRAM・電力 (バーと同じ境目で黄 / 赤)
 function gpuSum(g){
@@ -3434,35 +3424,28 @@ function hstopBtns(){
  w.appendChild(hstopBtn('jobs'));w.appendChild(hstopBtn('all'));
  return w}
 // GPU の枝 (GPU 行 + 黄・赤のボタン + カードごとの温度・VRAM・電力)。top = スマホ表示の上の欄に単独で置く (字下げを 1 段減らす)。
-// GPU 行を閉じたときは、カードごとの 1 行要約を残す
+// GPU 行を閉じたときは、カードごとの 1 行要約を残す (開閉は GPU 行だけ。カードごとには開閉しない)
 function gpuSection(top){
  if(!Array.isArray(lastGpus)||!lastGpus.length)return null;
  const gw=document.createElement('div');gw.className=top?'':'tsub';
  const gn=sysnode(IC_GPU+' GPU','gpu');gn.appendChild(hstopBtns());
  gw.appendChild(gn);
- if(sysTree.gpu){
-  const body=document.createElement('div');body.className='tsub';
-  lastGpus.forEach((g,i)=>{
-   const gwrap=document.createElement('div');gwrap.className='tsub';
-   gwrap.appendChild(gpuNode(g,i));
-   if(gpuTree['gpu'+i]){
-    const gb=document.createElement('div');gb.className='tsub';
-    // バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、VRAM 使用率 (warn 95%)、電力 max_power 満杯 
-    const tp=(g.temp/90*100);
-    gb.appendChild(sysleaf('🌡️ 温度',g.temp+'℃',tp,75/90*100,85/90*100));
-    const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
-    gb.appendChild(sysleaf(IC_DDR,mv,g.mem_total?g.mem_used/g.mem_total*100:null,95,null,'VRAM'));   // アイコンだけ (メーターを長く)
-    const mp=g.max_power||250;
-    gb.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
-    gwrap.appendChild(gb);
-   }
-   body.appendChild(gwrap);
-  });
-  gw.appendChild(body);
- }else{
-  lastGpus.forEach(g=>{const l=document.createElement('div');l.className='gline';
-   const nm=document.createElement('b');nm.textContent=g.label||g.name;l.append(nm,gpuSum(g));gw.appendChild(l)});
- }
+ // カードごとに 名前の行 (高さ固定) + 開いていれば温度・VRAM・電力のバー。閉じていれば名前の行の右に 1 行要約。
+ // 開閉は GPU 行の 1 か所だけ (カードの行は開いても閉じても同じ位置・同じ高さ)
+ lastGpus.forEach(g=>{
+  const c=document.createElement('div');c.className='gcard';
+  const l=document.createElement('div');l.className='gline';
+  const nm=document.createElement('b');nm.textContent=g.label||g.name;l.appendChild(nm);
+  c.appendChild(l);
+  if(sysTree.gpu){
+   // バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、VRAM 使用率 (warn 95%)、電力 max_power 満杯
+   c.appendChild(sysleaf('🌡️ 温度',g.temp+'℃',g.temp/90*100,75/90*100,85/90*100));
+   const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
+   c.appendChild(sysleaf(IC_DDR,mv,g.mem_total?g.mem_used/g.mem_total*100:null,95,null,'VRAM'));   // アイコンだけ (メーターを長く)
+   const mp=g.max_power||250;
+   c.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
+  }else l.appendChild(gpuSum(g));
+  gw.appendChild(c)});
  return gw}
 function renderSysCard(){
  if(MOB){const m=document.getElementById('mgpu'),gw=gpuSection(true);m.innerHTML='';if(gw)m.appendChild(gw)}
