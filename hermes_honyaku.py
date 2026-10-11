@@ -25,6 +25,7 @@ Hermes Agent と llama-server の間に挟む中継サーバー。
 import collections
 import configparser
 import datetime
+import glob
 import hashlib
 import http.client
 import json
@@ -50,7 +51,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -147,6 +148,7 @@ class Config:
                            "deepl_key": "", "deepl_url": "https://api-free.deepl.com/v2/translate"},
             "segment": {"max_chars": "500", "min_chars": "120", "idle_flush_sec": "2.0", "code_words": ""},
             "gpu": {"interval": "2", "power_max": "250"},
+            "power": {"cpu_source": "auto", "other_w": "50", "psu_eff": "0.90", "psu_w": "0", "cpu_max_w": "88"},
              "sysmon": {"interval": "2"},
             "hstop": {"path": "", "timeout": "120"},
             "log": {"dir": "logs", "level": "INFO"},
@@ -1278,6 +1280,71 @@ class GpuMonitor:
 # --------------------------------------------------------------------------
 # システムモニター (左パネルの CPU・RAM・ディスク用)
 # --------------------------------------------------------------------------
+class CpuPower:
+    """CPU (ソケット全体) の消費電力 W を root なしで読む。読めなければ read() は None。
+
+    source:
+      auto   … rapl → amdgpu の順に、読めた方を使う
+      rapl   … /sys/class/powercap/intel-rapl:0/energy_uj の差分 (Intel / AMD 共通。ふつうは root しか読めない)
+      amdgpu … 内蔵 GPU (Ryzen 7000 など) のドライバが出す PPT = ソケット全体の電力 (一般ユーザーで読める)。
+               power1_cap があるのは単体の Radeon (カード自身の電力) なので使わない
+      none   … 読まない
+    """
+
+    RAPL = "/sys/class/powercap/intel-rapl:0"
+
+    def __init__(self, source="auto"):
+        self.kind, self.path, self.label = None, None, ""
+        self._prev = None
+        if source in ("auto", "rapl") and os.access(self.RAPL + "/energy_uj", os.R_OK):
+            self.kind, self.path, self.label = "rapl", self.RAPL, "RAPL (powercap)"
+            try:
+                with open(self.RAPL + "/max_energy_range_uj") as f:
+                    self._range = int(f.read())
+            except Exception:
+                self._range = 0
+        elif source in ("auto", "amdgpu"):
+            for h in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+                try:
+                    with open(h + "/name") as f:
+                        if f.read().strip() != "amdgpu":
+                            continue
+                except Exception:
+                    continue
+                if os.path.exists(h + "/power1_cap"):
+                    continue
+                for fn in ("power1_input", "power1_average"):
+                    if os.access(f"{h}/{fn}", os.R_OK):
+                        self.kind, self.path, self.label = "amdgpu", f"{h}/{fn}", "内蔵 GPU のドライバの PPT (amdgpu)"
+                        break
+                if self.kind:
+                    break
+        if self.kind:
+            log.info("cpu power: %s (%s)", self.label, self.path)
+        elif source != "none":
+            log.info("cpu power: 読める場所がないので CPU の電力は出しません (source=%s)", source)
+
+    def read(self):
+        try:
+            if self.kind == "amdgpu":
+                with open(self.path) as f:
+                    return int(f.read()) / 1e6  # µW
+            if self.kind == "rapl":
+                with open(self.path + "/energy_uj") as f:
+                    e = int(f.read())
+                t = time.monotonic()
+                prev, self._prev = self._prev, (e, t)
+                if prev is None or t <= prev[1]:
+                    return None
+                de = e - prev[0]
+                if de < 0:
+                    de += self._range  # カウンタが一周した
+                return de / 1e6 / (t - prev[1])
+        except Exception:
+            return None
+        return None
+
+
 class SysMonitor:
     """/proc/stat・/proc/meminfo・statvfs から CPU 使用率・RAM 使用量・ディスク使用量を読み、
     5 秒間隔で sysmon イベントを BUS に流す (GPU モニターと同じ周期が既定)。
@@ -1291,8 +1358,12 @@ class SysMonitor:
     disks リストで送る。非 NVMe 環境では空リスト (UI は従来どおり disk_* フィールドで 1 行)。
     """
 
-    def __init__(self, interval=5.0):
+    def __init__(self, interval=5.0, power=None):
         self.interval = interval
+        # システム全体の電力 (推定) の材料。CPU は実測、残りは設定の見込み値 (画面で GPU と足して出す)
+        power = power or {}
+        self.cpu_power = CpuPower(power.get("cpu_source", "auto"))
+        self.power_cfg = {k: power[k] for k in ("other_w", "psu_eff", "psu_w", "cpu_max_w") if k in power}
         self.lock = threading.Lock()
         self.data = {}
         self.updated = 0.0
@@ -1441,13 +1512,15 @@ class SysMonitor:
             data["disk_total"] = None
             data["disk_used"] = None
         data["disks"] = self._read_disks()
+        cw = self.cpu_power.read()
+        data["power"] = dict(self.power_cfg, cpu=None if cw is None else round(cw, 1), cpu_src=self.cpu_power.label)
         return data
 
     def _loop(self):
         fails = 0
         while True:
             data = self._snapshot()
-            self.ok = any(v is not None for v in data.values())
+            self.ok = any(v is not None for k, v in data.items() if k != "power")
             if not self.ok and fails == 1:
                 log.info("sys monitor: /proc 取得に失敗 (次から再試続行)")
             fails = 0 if self.ok else fails + 1
@@ -2499,7 +2572,7 @@ background:linear-gradient(90deg,#333e46,#242d34);border:1px solid;border-color:
 .sysm .bar .fill2{display:block;flex:none;height:100%;width:0%;background:#3d6f9e;transition:width .25s} /* RAM のキャッシュ (mmap したモデルなど) */
 .sysm .leaf.warn .bval{color:var(--warn)}
 /* GPU の性能メーターは多いほど良いので、位置で色を変えず単色 (緑)。絞られているときだけ黄 (電力の上限) / 赤 (温度・ハードの減速) */
-.sysm .leaf.perf .bar .fill{background:#35e05a}
+.sysm .leaf.perf .bar .fill,.sysm .leaf.flat .bar .fill{background:#35e05a} /* flat = 電力の内訳 (全体に占める割合なので段階の色にしない) */
 .sysm .leaf.perf.warn .bar .fill{background:var(--warn)}
 .sysm .leaf.perf.hot .bar .fill{background:var(--bad)}
 .sysm .leaf.hot .bval{color:var(--bad)}
@@ -2745,6 +2818,7 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 .mob #mgpu .tsub .trow{margin-left:10px}
 .mob #mgpu .leaf{margin:0 0 1px 22px}
 .mob #mgpu .leaf .bl{width:44px}
+.mob #mgpu .pwr .leaf .bl{width:76px} /* 電力の内訳は名前 (P40・電源ロスなど) が読めるように広く */
 .mob .sysm .trow .hsbtn{width:42px;height:28px}
 .mob .sysm .trow .hsbtn svg{width:16px;height:16px}
 /* ツリーを閉じた GPU は 1 行の要約 (温度・電力・VRAM) を残す */
@@ -3205,10 +3279,10 @@ function onStatus(ev){lamp(['tdot','mtdot'],ev.translator==='ok'?(ev.queue>0?'bu
 function onGpu(ev){renderGpu(ev.gpus)}
 function bfmt(v){return v===null?'-':v.toFixed(1)}
 // ツリー表示の折りたたみ状態 (2秒毎の再描画を跨いで保持)
-const sysTree={srv:true,dsk:true,gpu:true};
+const sysTree={srv:true,dsk:true,gpu:true,pwr:false};
 // GPU の開閉を覚えておく (スマホの縦向きで閉じて和訳を広く見る使い方のため。PC も同じ)
-try{const v=JSON.parse(localStorage.getItem('hh.mtree')||'null');if(v){if(typeof v.gpu==='boolean')sysTree.gpu=v.gpu}}catch(e){}
-function saveTree(){try{localStorage.setItem('hh.mtree',JSON.stringify({gpu:sysTree.gpu}))}catch(e){}}
+try{const v=JSON.parse(localStorage.getItem('hh.mtree')||'null');if(v){for(const k of ['gpu','pwr'])if(typeof v[k]==='boolean')sysTree[k]=v[k]}}catch(e){}
+function saveTree(){try{localStorage.setItem('hh.mtree',JSON.stringify({gpu:sysTree.gpu,pwr:sysTree.pwr}))}catch(e){}}
 let lastSysmon=null, lastGpus=null;
 // ラベル先頭のアイコン (実物風の固定配色: 緑=基板 / 金=端子・ピン / 銀=金属 / 黒=チップ。切欠きは背景色 #131a1f で抜く)
 // ---- CPU: LGA パッケージ (緑基板 + 銀の IHS + 金ピン、IHS は Win98 風ベベル) ----
@@ -3321,6 +3395,36 @@ function gpuSum(g){
  part('gp',g.power.toFixed(0)+'W',mp?g.power/mp*100:null,null,null);
  part('gm',(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G',g.mem_total?g.mem_used/g.mem_total*100:null,95,null);
  return sp}
+// システム全体の電力 (推定)。top = スマホ表示の上の欄に GPU と並べて置く。GPU (nvidia-smi) と CPU (ソケット全体) は実測、その他 (マザーボード・メモリ・SSD・ファン) は
+// 設定の固定値、それを電源の効率で割ってコンセント側の値にする。バーの満杯は電源の容量 (psu_w)、未設定なら出しうる最大の見込み
+function powerSection(top){
+ const p=lastSysmon&&lastSysmon.power;if(!p)return null;
+ const gpus=Array.isArray(lastGpus)?lastGpus:[];
+ const other=p.other_w||0,eff=p.psu_eff>0&&p.psu_eff<=1?p.psu_eff:1;
+ const gw=gpus.reduce((a,g)=>a+(g.power||0),0),cw=p.cpu==null?null:p.cpu;
+ const dc=gw+(cw||0)+other,wall=dc/eff;
+ const maxDc=gpus.reduce((a,g)=>a+(g.power_limit||g.max_power||0),0)+(p.cpu_max_w||0)+other;
+ const full=p.psu_w>0?p.psu_w:maxDc/eff;
+ const w=v=>v.toFixed(0)+'W';
+ const tip='コンセント側の消費電力の見込み (±15% くらい)\n'
+  +'= (GPU '+w(gw)+' + CPU '+(cw==null?'読めない':w(cw))+' + その他 '+w(other)+') ÷ 電源の効率 '+(eff*100).toFixed(0)+'%\n'
+  +'GPU は nvidia-smi、CPU は '+(p.cpu_src||'-')+' の実測。その他 (マザーボード・メモリ・SSD・ファン) は config の [power] other_w の固定値\n'
+  +'バーの満杯: '+(p.psu_w>0?'電源の容量 '+w(p.psu_w):'出しうる最大の見込み '+w(full)+' (GPU の電力上限 + CPU '+w(p.cpu_max_w||0)+' + その他)');
+ const wrap=document.createElement('div');wrap.className=top?'':'tsub';
+ const n=sysnode('⚡️ 電力 (推定)','pwr');n.title=tip;
+ const sm=document.createElement('span');sm.className='gsum';sm.textContent='約 '+w(wall)+(cw==null?' (CPU 抜き)':'');n.appendChild(sm);
+ wrap.appendChild(n);
+ if(sysTree.pwr){
+  const body=document.createElement('div');body.className='tsub pwr';
+  body.appendChild(sysleaf('🔌 全体',w(wall)+'/'+w(full),full?wall/full*100:null,80,95,tip));
+  // 内訳のバーは全体 (コンセント側) に占める割合
+  const part=(label,v,t)=>body.appendChild(sysleaf(label,v==null?'-':w(v),v==null||!wall?null:v/wall*100,null,null,t)).classList.add('flat');
+  for(const g of gpus)part(IC_GPU+' '+hesc(g.label||g.name),g.power,'GPU '+g.index+' ('+g.name+') nvidia-smi の実測');
+  part(IC_CPU+' CPU',cw,cw==null?'CPU の電力が読めません (config の [power] cpu_source)':'CPU ソケット全体の実測 ('+p.cpu_src+')');
+  part('🧩 その他',other,'マザーボード・メモリ・SSD・ファンなどの見込み (固定値、config の [power] other_w)');
+  part('♨️ 電源ロス',wall-dc,'電源ユニットの変換ロスの見込み (効率 '+(eff*100).toFixed(0)+'%、config の [power] psu_eff)');
+  wrap.appendChild(body)}
+ return wrap}
 // ---- hstop ボタン: GPU 行の右端。黄 = hstop (裏の作業だけ) / 赤 = hstop --all (本体も起動し直す) ----
 const IC_RESET='<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">'
 +'<path d="M13.2 9.2A5.4 5.4 0 1 1 11.6 4" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="square"/>'
@@ -3502,10 +3606,10 @@ function gpuSection(top){
   gw.appendChild(c)});
  return gw}
 function renderSysCard(){
- if(MOB){const m=document.getElementById('mgpu'),gw=gpuSection(true);m.innerHTML='';if(gw)m.appendChild(gw)}
+ if(MOB){const m=document.getElementById('mgpu'),pw=powerSection(true),gw=gpuSection(true);m.innerHTML='';if(pw)m.appendChild(pw);if(gw)m.appendChild(gw)}
  const c=document.getElementById('sysmc');if(!c)return;c.innerHTML='';
  const card=document.createElement('div');card.className='sysm';
- card.title='サーバの GPU・CPU・RAM・各 SSD 使用量 (/proc・statvfs・nvidia-smi、2秒更新)';
+ card.title='サーバの電力 (推定)・GPU・CPU・RAM・各 SSD 使用量 (/proc・statvfs・nvidia-smi・hwmon、2秒更新)';
  const s=lastSysmon;
  if(s){
   const cpu=(s.cpu===null||s.cpu===undefined)?null:s.cpu;
@@ -3520,7 +3624,9 @@ function renderSysCard(){
    +'ほかのプログラムが必要とすれば空けられるが、空けるとモデルは SSD から読み直しになる。';
   card.appendChild(sysnode('🖥️ サーバ','srv'));
   if(sysTree.srv){
-   // 表示順: GPU → CPU → RAM → ディスク (スマホ表示の GPU は上の欄に別に描く)
+   // 表示順: 電力 → GPU → CPU → RAM → ディスク (スマホ表示の GPU は上の欄に別に描く)
+   const pw=MOB?null:powerSection(false);
+   if(pw)card.appendChild(pw);
    const gw=MOB?null:gpuSection(false);
    if(gw)card.appendChild(gw);
    card.appendChild(sysleaf(IC_CPU+' CPU',cpuV,cpu,90));
@@ -3912,7 +4018,10 @@ def main():
     UIHandler.translator = translator
     UIHandler.gpu_monitor = GpuMonitor(interval=cfg.getfloat("gpu", "interval"),
                                        power_max=cfg.getfloat("gpu", "power_max"))
-    UIHandler.sysmon_monitor = SysMonitor(interval=cfg.getfloat("sysmon", "interval"))
+    UIHandler.sysmon_monitor = SysMonitor(interval=cfg.getfloat("sysmon", "interval"), power={
+        "cpu_source": cfg.get("power", "cpu_source").lower(),
+        "other_w": cfg.getfloat("power", "other_w"), "psu_eff": cfg.getfloat("power", "psu_eff"),
+        "psu_w": cfg.getfloat("power", "psu_w"), "cpu_max_w": cfg.getfloat("power", "cpu_max_w")})
 
     proxy = Server((cfg.get("proxy", "listen_host"), cfg.getint("proxy", "listen_port")), ProxyHandler)
     ui = Server((cfg.get("ui", "listen_host"), cfg.getint("ui", "listen_port")), UIHandler)
