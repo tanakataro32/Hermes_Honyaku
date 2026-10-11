@@ -392,6 +392,79 @@ p40 = http://127.0.0.1:18090
 OpenCode の provider の `baseURL` を `http://127.0.0.1:8081/p40/v1` にすると、その思考も「OpenCode」ラベルで流れます。
 起動ログに `route  : http://…:8081/p40/v1  ->  http://127.0.0.1:18090` と出れば有効です。
 
+## 4d. ハードウェアモニタ (Windows のアプリ)
+
+llmsv の温度・電力・使用率・メモリを、Windows の専用アプリで常に見ておくためのものです。履歴のグラフと電気代も出し、Hermes の思考の和訳も小さく流します。
+
+```
+[llmsv]  hwmon.py (honyaku-hwmon.service、:8766)  … 2 秒ごとに集めて JSON で配る。1 分ごとの平均を SQLite に残す
+         hermes_honyaku.py (:8765)               … 和訳 (/events)
+            │
+            └──(LAN / Tailscale)──> [Windows] windows/HwMonitor (WinForms、.NET 10)
+```
+
+- `hwmon.py` は翻訳の中継とは**別のプロセス**です。こちらを再起動しても、8081 の中継 (Hermes・OpenCode・Open WebUI) は止まりません。
+  値の集め方 (GPU・CPU の電力・温度・`[power]` の見込み) は `hermes_honyaku.py` と同じものを使うので、翻訳の画面と同じ値になります。
+- 記録は `~/.local/share/hermes-honyaku/hwmon.sqlite` (`[hwmon] db`)。1 分ごとの平均を 35 日 (`keep_days`)、日ごとの電力量はずっと残します。
+- API (読むだけ): `/api/now` (いまの値・llama-server の枠)・`/api/history?range=2m|10m|30m|1h|3h|6h|24h|7d|30d`・`/api/energy` (今日・今月・日ごと・月ごと・コスト比較)。
+- **トークン数**: `[hwmon] llama_servers` の llama-server の `/slots` を 0.5 秒ごとに読み、枠ごとの入力・生成の増え方を数えます
+  (終わる直前の 0.5 秒ぶんは数え漏れることがあるので概数)。日ごと・サーバーごとに SQLite の `tokens` に残します。
+  翻訳の中継を通らない要求も数えます。
+
+### llmsv 側 (一回だけ)
+
+```bash
+deploy honyaku main
+sudo cp /mnt/smb_data/htdocs/honyaku/honyaku-hwmon.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now honyaku-hwmon
+curl -s http://127.0.0.1:8766/api/now | head -c 200      # JSON が返れば OK
+# Windows (LAN・Tailscale) から読めるように 8766 を開ける (ufw を使っている場合)
+sudo ufw allow from 192.168.1.0/24 to any port 8766 proto tcp
+sudo ufw allow in on tailscale0 to any port 8766 proto tcp
+```
+
+電気代の単価は `config.local.ini` に書きます (既定 31 円/kWh = 家電の電気代表示の目安単価)。契約の単価 (燃料費調整額・再エネ賦課金を足したもの) が分かったら:
+
+```ini
+[hwmon]
+price_yen_kwh = 36.5
+```
+
+書き換えたら `sudo systemctl restart honyaku-hwmon` (過去の日の電気代も新しい単価で計算し直されます。記録しているのは電力量 Wh です)。
+
+### Windows 側
+
+1. VS2026 で `windows\HwMonitor\HwMonitor.slnx` (ソリューション) を開き、F5 で起動します (.NET 10 のデスクトップ開発のワークロードが要ります)。
+   いつも使うなら「発行」で exe を作り、スタートアップに入れておきます。
+2. 初回は llmsv のアドレス `192.168.1.50`・モニタのポート 8766・翻訳の画面のポート 8765 で動きます。Tailscale から使うときは「設定…」でアドレスを変えます。
+3. 画面はコードだけで組んでいます (Designer のファイルはありません)。VS でフォームを開くとコードが開きます。
+
+画面:
+
+- **上**: いまの値。温度・電力 (推定)・使用率・メモリ (+ディスク) の 4 列 (翻訳の画面の「項目別」と同じ分け方、2 秒ごと)。行にマウスを乗せると説明が出ます。
+- **真ん中 (グラフ)**: 履歴の折れ線。上の段で期間 (120 秒〜30 日) と項目 (電力・温度・使用率・メモリ) を選びます。凡例を押すとその線を隠せます。マウスを乗せた時刻の値が出ます。
+  120 秒・10 分は 2 秒刻み、30 分は 5 秒刻み、1 時間は 10 秒刻み (2〜10 秒ごとに描き直す)。それより長い期間は 1 分の記録をまとめたものです (24 時間 = 4 分、7 日 = 30 分、30 日 = 2 時間刻み)。
+  2 秒の記録は hwmon.py のメモリにしか無いので、hwmon.py を起動し直した直後は、足りない前の部分を 1 分の記録で埋めます。
+- **真ん中 (電気代)**: 今日・今月・月末の見込み (いまの平均の W がひと月続いたら)、日ごと 31 日の棒グラフ、月ごとの表。
+  電力はコンセント側の**推定** (`[power]`) を積み上げたものです。hwmon.py が止まっていた時間は数えないので、その日の棒は薄く出ます。
+- **枠** (メーターの下): llama-server ごとに枠 (`-np`) を横に並べ、使っている量 / 枠の上限と生成の速さを出します。
+  推論中の枠は、翻訳の画面のターンと結んで「OpenCode · 会話の札」「Hermes」などの札を付けます (OpenCode は緑)。
+  結び方は、枠が新しい要求を受けた時刻と、翻訳の中継がターンを始めた時刻 (どちらも llmsv の時計) が 5 秒以内のもの (実測では差 0.1〜0.5 秒)。
+  入力の量では結びません (中継はメッセージだけを数え、llama-server はツールの定義も数えるので、Hermes では約 1 万トークン違う)。
+  時刻で結べないとき (アプリや hwmon.py を途中で起動したとき) だけ、量の近さ (枠の入力が中継の 0.9〜1.8 倍 + 2 万以内) で結びます。
+  待機中の枠は、最後に使っていた量を薄く残します。マウスを乗せると入力・生成の内訳が出ます。
+- **真ん中 (コスト比較)**: 電気代と、同じだけ推論したときのレンタルを、今日・7 日・今月・31 日で並べます (太字が最安。下の小さい字は 100 万出力トークンあたり)。
+  - GPU 時間貸し (推論中だけ) = どれかの枠が動いていた時間 × `[rental] gpu_usd_per_hour`。(つけっぱなし) = トークンを数えていた時間ずっと借りた場合
+  - API 従量 = 入力・生成のトークン数 × `[rental] api` の単価。入力はキャッシュから使い回した分も満額で数えます
+  - 電気代は、トークンを数えていた間のサーバー全体の推定です (推論していない時間も含む)
+  - 下は日ごとの棒 (電気代・API・GPU 推論中だけ) と、つけっぱなしの線
+- **グラフの「トークン」**: llama-server ごとの読み込み・生成の速さ (トークン/秒)。
+- **下 (和訳)**: Hermes の思考の和訳を小さく流します (コマンドの行と、背景タスクは出しません)。境目をドラッグして高さを変えられ、上の「和訳」で隠せます。
+  - **原文を併記**: 和訳の 1 区切りごとに、翻訳した英文を下に小さく薄く出します (訳が合っているかの見比べ用)。切り替えると、出してある分も描き直します。
+  - **原文の欄**: 和訳の上に小さな欄を出し、いま考えている英文を届いたそばから流します。和訳は翻訳を待つぶん遅れるので、いま何を考えているかはこちらが早く分かります。
+  - どちらも翻訳の画面 (8765) の `/events` に初めから流れているものを読むだけなので、llmsv 側の再起動は要りません。
+- 「最前面」で、ほかの窓より前に出しておけます。窓の位置・選んだ期間などは `%APPDATA%\HwMonitor\settings.json` に覚えておきます。
+
 ## 5. 設定 (config.ini)
 
 | セクション | 項目 | 意味 |
@@ -414,6 +487,14 @@ OpenCode の provider の `baseURL` を `http://127.0.0.1:8081/p40/v1` にする
 | power | psu_eff | 電源ユニットの効率 (既定 0.90)。コンセント側 = 部品の合計 ÷ この値 |
 | power | psu_w | 全体のバーの満杯にする電源の容量 (W)。0 (既定) なら GPU の電力上限の合計 + `cpu_max_w` + `other_w` を効率で割った値 |
 | power | cpu_max_w | CPU の電力の上限 (W、既定 88 = Ryzen 5 7600 の PPT)。`psu_w = 0` のときのバーの満杯に使う |
+| hwmon | listen_host / listen_port | ハードウェアモニタ (hwmon.py) の待ち受け (既定 0.0.0.0:8766) |
+| hwmon | db | 記録の SQLite (既定 `~/.local/share/hermes-honyaku/hwmon.sqlite`) |
+| hwmon | keep_days | 1 分ごとの記録 (履歴のグラフ) を残す日数 (既定 35)。日ごとの電力量はずっと残す |
+| hwmon | price_yen_kwh | 電気代の単価 (円/kWh、既定 31) |
+| hwmon | llama_servers | トークン数を数える llama-server (`名前=URL` をカンマで区切る。/slots を読む) |
+| rental | usd_jpy | コスト比較のドル円 (既定 150) |
+| rental | gpu_usd_per_hour | GPU の時間貸し ($/時、既定 0.30 = V100 32GB + P40 24GB 相当) |
+| rental | api | API の従量 (`名前=入力/出力` の $/100 万トークン。名前は llama_servers と同じ) |
 | hstop | path | GPU 行のボタン (黄 = hstop --list / --pid / 赤 = hstop --all) で実行する hstop の場所。空欄なら PATH → `~/.local/bin/hstop` の順に探す |
 | hstop | timeout | hstop がこの秒数 (既定 120) で終わらなければ打ち切ってエラー表示 |
 | log | dir | 原文と訳文、コンテキスト量 (`turn_ctx`)・テンション (`mood`) を JSONL で残すフォルダ (日付ごと 1 ファイル)。空欄で無効 |

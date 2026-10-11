@@ -8,3 +8,8 @@ windows/local_settings.bat
 windows/compare_*.log
 windows/compare_result.txt
 windows/compare_transcript.txt
+windows/HwMonitor/bin/
+windows/HwMonitor/obj/
+.vs/
+*.user
+windows/HwMonitor/icon_preview.png

@@ -51,7 +51,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.11.0"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -149,6 +149,9 @@ class Config:
             "segment": {"max_chars": "500", "min_chars": "120", "idle_flush_sec": "2.0", "code_words": ""},
             "gpu": {"interval": "2", "power_max": "250"},
             "power": {"cpu_source": "auto", "other_w": "50", "psu_eff": "0.90", "psu_w": "0", "cpu_max_w": "88"},
+            "hwmon": {"listen_host": "0.0.0.0", "listen_port": "8766", "db": "~/.local/share/hermes-honyaku/hwmon.sqlite",
+                      "keep_days": "35", "price_yen_kwh": "31", "llama_servers": ""},
+            "rental": {"usd_jpy": "150", "gpu_usd_per_hour": "0.30", "api": ""},
              "sysmon": {"interval": "2"},
             "hstop": {"path": "", "timeout": "120"},
             "log": {"dir": "logs", "level": "INFO"},

@@ -2,23 +2,43 @@
 # Hermes Honyaku: run by `deploy` (tanakataro32/server-deploy) after the code is switched.
 #   1. Python の文法チェック
 #   2. 再起動の案内 (systemd の再起動は sudo が要るので deploy からはしない)
-#      hermes-honyaku.service / lighttpd-honyaku.conf が変わっていれば入れ直しも案内する
+#      hermes-honyaku.service / honyaku-hwmon.service / lighttpd-honyaku.conf が変わっていれば入れ直しも案内する
+#      hermes-honyaku (翻訳の中継、8081) を再起動すると Hermes などの通信が数秒止まるので、要るときだけ案内する
 set -euo pipefail
 cd "$DEPLOY_DIR"
 
-python3 -m py_compile hermes_honyaku.py && echo "Python の文法チェック: OK"
+python3 -m py_compile hermes_honyaku.py hwmon.py && echo "Python の文法チェック: OK"
 rm -rf __pycache__
 
 changed() {   # 前回のコミットから変わったか (初回の --new / --adopt では常に「変わった」扱い)
     [ -z "${DEPLOY_OLD:-}" ] && return 0
-    ! git diff --quiet "$DEPLOY_OLD" "$DEPLOY_NEW" -- "$1" 2>/dev/null
+    ! git diff --quiet "$DEPLOY_OLD" "$DEPLOY_NEW" -- "$@" 2>/dev/null
 }
 echo
-echo "※ 新しいコードは再起動するまで動きません。反映するには:"
+cmds=()
 if changed hermes-honyaku.service; then
-    echo "    sudo cp $DEPLOY_DIR/hermes-honyaku.service /etc/systemd/system/ && sudo systemctl daemon-reload"
+    cmds+=("sudo cp $DEPLOY_DIR/hermes-honyaku.service /etc/systemd/system/ && sudo systemctl daemon-reload")
 fi
 if changed lighttpd-honyaku.conf; then
-    echo "    sudo cp $DEPLOY_DIR/lighttpd-honyaku.conf /etc/lighttpd/honyaku.conf && sudo lighttpd -tt -f /etc/lighttpd/lighttpd.conf && sudo systemctl restart lighttpd"
+    cmds+=("sudo cp $DEPLOY_DIR/lighttpd-honyaku.conf /etc/lighttpd/honyaku.conf && sudo lighttpd -tt -f /etc/lighttpd/lighttpd.conf && sudo systemctl restart lighttpd")
 fi
-echo "    sudo systemctl restart hermes-honyaku"
+if changed hermes_honyaku.py config.ini hermes-honyaku.service; then
+    cmds+=("sudo systemctl restart hermes-honyaku")
+fi
+# ハードウェアモニタ (hwmon.py は hermes_honyaku.py の集め方を使い回すので、そちらが変わっても再起動する)
+if ! systemctl cat honyaku-hwmon >/dev/null 2>&1; then
+    cmds+=("sudo cp $DEPLOY_DIR/honyaku-hwmon.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now honyaku-hwmon   # 初回だけ")
+else
+    if changed honyaku-hwmon.service; then
+        cmds+=("sudo cp $DEPLOY_DIR/honyaku-hwmon.service /etc/systemd/system/ && sudo systemctl daemon-reload")
+    fi
+    if changed hwmon.py hermes_honyaku.py config.ini honyaku-hwmon.service; then
+        cmds+=("sudo systemctl restart honyaku-hwmon")
+    fi
+fi
+if [ ${#cmds[@]} -eq 0 ]; then
+    echo "※ サーバー側の再起動は要りません (windows/ や README だけの変更)"
+else
+    echo "※ 新しいコードは再起動するまで動きません。反映するには:"
+    for c in "${cmds[@]}"; do echo "    $c"; done
+fi

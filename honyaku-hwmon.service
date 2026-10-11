@@ -1,0 +1,25 @@
+# /etc/systemd/system/honyaku-hwmon.service
+# llmsv のハードウェアモニタ (hwmon.py、port 8766)。Windows のアプリ windows/HwMonitor が読む
+# sudo cp honyaku-hwmon.service /etc/systemd/system/
+# sudo systemctl daemon-reload && sudo systemctl enable --now honyaku-hwmon
+# 翻訳の中継 (hermes-honyaku、8081) とは別のプロセスなので、こちらの再起動で Hermes などの通信は止まらない
+[Unit]
+Description=Hermes Honyaku hardware monitor API (temps, power, utilization, history, electricity cost) on port 8766
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/smb_data/htdocs/honyaku
+
+[Service]
+User=masa
+Group=masa
+WorkingDirectory=/mnt/smb_data/htdocs/honyaku
+ExecStart=/usr/bin/python3 /mnt/smb_data/htdocs/honyaku/hwmon.py /mnt/smb_data/htdocs/honyaku/config.ini
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# 止めるときは SIGTERM で、いまの 1 分を書き込んでから終わる
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
