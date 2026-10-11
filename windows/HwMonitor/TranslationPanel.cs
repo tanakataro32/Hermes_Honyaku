@@ -19,6 +19,10 @@ public sealed class TranslationPanel : Control
     readonly TextBox thinkBox;
     readonly System.Windows.Forms.Timer thinkTimer = new() { Interval = 250 };
     readonly Func<bool> hideTasks;
+    // 欄の見出し。翻訳の中継が翻訳を止めている (engine = none) ときは「原文」にする
+    string headBase = "和訳 (Hermes の思考)";
+    string headState = "";
+    Color headColor = Theme.Muted;
 
     // SSE を読む側 (裏のスレッド) だけが触る
     readonly HashSet<(long boot, int turn, int seg)> seen = [];
@@ -44,7 +48,7 @@ public sealed class TranslationPanel : Control
     {
         this.hideTasks = hideTasks;
         feed.Event += OnEvent;
-        feed.Status += (text, ok) => SetHead("和訳 (Hermes の思考)" + (text == "" ? "" : "・" + text), ok || text.StartsWith("つないで") ? Theme.Muted : Theme.Warn);
+        feed.Status += (text, ok) => { headState = text; headColor = ok || text.StartsWith("つないで") ? Theme.Muted : Theme.Warn; SetHead(); };
         BackColor = Theme.Back;
         head = new Label { Dock = DockStyle.Top, Height = 20, Text = "和訳 (Hermes の思考)", ForeColor = Theme.Muted, Font = Theme.Ui, Padding = new Padding(6, 3, 0, 0) };
         box = new RichTextBox
@@ -112,7 +116,13 @@ public sealed class TranslationPanel : Control
             }
             boot = bt;
         }
-        if (type == "status") return;
+        if (type == "status")
+        {
+            string engine = Str(ev, "engine");
+            string hb = engine == "none" ? "原文 (Hermes の思考・翻訳は止めています)" : "和訳 (Hermes の思考)";
+            if (hb != headBase) { headBase = hb; SetHead(); }
+            return;
+        }
         if (!ev.TryGetProperty("turn", out var tn) || !tn.TryGetInt32(out int n)) return;
         switch (type)
         {
@@ -165,15 +175,18 @@ public sealed class TranslationPanel : Control
                 bool ok = ev.TryGetProperty("ok", out var o) && o.ValueKind == JsonValueKind.True;
                 bool translated = ok && how != "en" && how != "interrupted";
                 segSrc.Remove((n, seg), out var src);
+                if (how == "none") src = null;   // 翻訳を止めているときは訳文 = 原文なので、併記しない
                 // 訳せなかった区切りは和訳の欄に原文がそのまま出るので、併記はしない
                 Add(new Entry(n, info.source, Str(ev, "text").Trim(), translated ? src : null, translated, DateTime.Now));
                 break;
         }
     }
 
-    void SetHead(string text, Color color)
+    void SetHead()
     {
         if (IsDisposed || !IsHandleCreated) return;
+        string text = headBase + (headState == "" ? "" : "・" + headState);
+        var color = headColor;
         BeginInvoke(() => { head.Text = text; head.ForeColor = color; });
     }
 
