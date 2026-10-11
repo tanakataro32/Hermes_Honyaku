@@ -12,6 +12,8 @@
     <RootNamespace>HwMonitor</RootNamespace>
     <AssemblyName>HwMonitor</AssemblyName>
     <Version>1.0.0</Version>
+    <!-- アイコン: CPU のチップの上を走る心電図の線。作り直すときは python3 make_icon.py -->
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <!-- llmsv (Linux) でもビルドの確認ができるように -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>

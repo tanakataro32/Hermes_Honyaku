@@ -34,6 +34,7 @@ public sealed class MainForm : Form
         translation = new TranslationPanel(() => settings.HonyakuBase, () => settings.HideTasks) { Dock = DockStyle.Fill };
 
         Text = "llmsv ハードウェアモニタ";
+        Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);   // exe に入れたアイコン (app.ico) をタイトルバーとタスクバーにも
         BackColor = Theme.Back;
         ForeColor = Theme.Ink;
         Font = Theme.Ui;
