@@ -51,7 +51,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.0"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -1345,6 +1345,81 @@ class CpuPower:
         return None
 
 
+class TempSensors:
+    """hwmon から、取れる部品の温度を集める (画面の「項目別」の 🌡️ 温度。GPU は nvidia-smi の側)。
+    戻り値: [{kind, label, temp, tip}, ...]  kind = cpu / ddr / ssd / board / lan (画面の並び順・色の境目に使う)。
+    センサーの場所は起動時に一度だけ探す。0℃ やマイナス (つながっていない端子) は出さない"""
+
+    ORDER = ("cpu", "ddr", "ssd", "board", "lan")
+
+    def __init__(self):
+        self.items = []  # (kind, label, [(path, name), ...], tip の頭)
+        ddr = []
+        for h in sorted(glob.glob("/sys/class/hwmon/hwmon*"), key=lambda x: int(re.sub(r"\D", "", x) or 0)):
+            try:
+                with open(h + "/name") as f:
+                    name = f.read().strip()
+            except Exception:
+                continue
+            labels = {}
+            for t in glob.glob(h + "/temp*_input"):
+                try:
+                    with open(t[:-6] + "_label") as f:
+                        labels[f.read().strip()] = t
+                except Exception:
+                    labels.setdefault("", t)
+            if name in ("k10temp", "coretemp", "zenpower"):
+                key = next((k for k in ("Tctl", "Package id 0", "Tdie") if k in labels), next(iter(labels), None))
+                if key is not None:
+                    self.items.append(["cpu", "CPU", [(labels[key], name)], f"{name} {key}".strip()])
+            elif name in ("spd5118", "jc42"):
+                if labels:
+                    ddr.append((next(iter(labels.values())), name))
+            elif name == "nvme":
+                t = labels.get("Composite") or next(iter(labels.values()), None)
+                ctrl = os.path.basename(os.path.realpath(h + "/device"))
+                try:
+                    with open(h + "/device/model") as f:
+                        model = f.read().strip()
+                except Exception:
+                    model = ""
+                if t:
+                    self.items.append(["ssd", SysMonitor._short_disk_name(model, ctrl), [(t, name)],
+                                       f"{model or ctrl} ({ctrl})"])
+            elif name.startswith("nct") or name.startswith("it87"):
+                t = labels.get("SYSTIN")
+                if t:
+                    self.items.append(["board", "マザボ", [(t, name)], f"マザーボード ({name} SYSTIN)"])
+            elif re.match(r"^(r8169|r8125|igc|e1000e|ixgbe|atlantic)", name):
+                t = next(iter(labels.values()), None)
+                if t:
+                    self.items.append(["lan", "LAN", [(t, name)], name])
+        if ddr:
+            self.items.append(["ddr", "DDR5" if ddr[0][1] == "spd5118" else "DDR4", ddr, f"{ddr[0][1]} × {len(ddr)} 枚"])
+        self.items.sort(key=lambda x: self.ORDER.index(x[0]))
+
+    @staticmethod
+    def _read(path):
+        try:
+            with open(path) as f:
+                v = int(f.read()) / 1000.0
+        except Exception:
+            return None
+        return v if 0 < v < 150 else None
+
+    def read(self):
+        out = []
+        for kind, label, paths, tip in self.items:
+            vals = [self._read(p) for p, _ in paths]
+            ok = [v for v in vals if v is not None]
+            if not ok:
+                continue
+            if len(paths) > 1:  # メモリは何枚あっても 1 行 (いちばん熱い 1 枚)。全部はマウスを乗せると出す
+                tip = tip + ": " + " / ".join("-" if v is None else f"{v:.1f}℃" for v in vals)
+            out.append({"kind": kind, "label": label, "temp": round(max(ok), 1), "tip": tip})
+        return out
+
+
 class SysMonitor:
     """/proc/stat・/proc/meminfo・statvfs から CPU 使用率・RAM 使用量・ディスク使用量を読み、
     5 秒間隔で sysmon イベントを BUS に流す (GPU モニターと同じ周期が既定)。
@@ -1363,6 +1438,7 @@ class SysMonitor:
         # システム全体の電力 (推定) の材料。CPU は実測、残りは設定の見込み値 (画面で GPU と足して出す)
         power = power or {}
         self.cpu_power = CpuPower(power.get("cpu_source", "auto"))
+        self.temps = TempSensors()
         self.power_cfg = {k: power[k] for k in ("other_w", "psu_eff", "psu_w", "cpu_max_w") if k in power}
         self.lock = threading.Lock()
         self.data = {}
@@ -1512,6 +1588,7 @@ class SysMonitor:
             data["disk_total"] = None
             data["disk_used"] = None
         data["disks"] = self._read_disks()
+        data["temps"] = self.temps.read()
         cw = self.cpu_power.read()
         data["power"] = dict(self.power_cfg, cpu=None if cw is None else round(cw, 1), cpu_src=self.cpu_power.label)
         return data
@@ -1520,7 +1597,7 @@ class SysMonitor:
         fails = 0
         while True:
             data = self._snapshot()
-            self.ok = any(v is not None for k, v in data.items() if k != "power")
+            self.ok = any(v is not None for k, v in data.items() if k not in ("power", "temps"))
             if not self.ok and fails == 1:
                 log.info("sys monitor: /proc 取得に失敗 (次から再試続行)")
             fails = 0 if self.ok else fails + 1
@@ -2697,6 +2774,13 @@ header .ver{font-size:11px;font-weight:400;color:rgba(234,255,251,.72);white-spa
 header .hlink{color:var(--bar-ink);text-decoration:none;padding:0 8px;background:#131a1f;border:2px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
 /* GPU 行の hstop ボタン (右寄せ・リセットアイコン)。黄 = hstop (裏の作業だけ) / 赤 = hstop --all */
 .sysm .trow .hsbtns{margin-left:auto;display:inline-flex;gap:4px}
+.sysm .trow .gsum+.hsbtns{margin-left:8px}
+/* サーバ行の右の「部品別 / 項目別」 (押した方がへこむ) */
+.sysm .trow .vsw{margin-left:auto;display:inline-flex}
+.sysm .vsw button{font:inherit;font-size:10px;line-height:1;height:18px;padding:0 6px;cursor:pointer;color:var(--muted);background:#1d262c;
+ border:1px solid;border-color:var(--hv) var(--sv) var(--sv) var(--hv)}
+.sysm .vsw button.on{color:#fff;background:#0c1114;border-color:var(--sv) var(--hv) var(--hv) var(--sv);cursor:default}
+.mob .sysm .vsw button{height:28px;font-size:12px;padding:0 10px}
 .sysm .trow .hsbtn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:18px;padding:0;
 background:#b3261e;border-color:#e0695f #4a0d09 #4a0d09 #e0695f;box-shadow:inset 1px 1px 0 rgba(255,255,255,.15)}
 .sysm .trow .hsbtn:hover{background:#cc3127}
@@ -2818,7 +2902,8 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 .mob #mgpu .tsub .trow{margin-left:10px}
 .mob #mgpu .leaf{margin:0 0 1px 22px}
 .mob #mgpu .leaf .bl{width:44px}
-.mob #mgpu .pwr .leaf .bl{width:76px} /* 電力の内訳は名前 (P40・電源ロスなど) が読めるように広く */
+.sysm .wide .leaf .bl{width:84px}
+.mob #mgpu .wide .leaf .bl{width:100px} /* 電力の内訳・項目別は名前 (P40・電源ロスなど) が読めるように広く */
 .mob .sysm .trow .hsbtn{width:42px;height:28px}
 .mob .sysm .trow .hsbtn svg{width:16px;height:16px}
 /* ツリーを閉じた GPU は 1 行の要約 (温度・電力・VRAM) を残す */
@@ -3279,10 +3364,11 @@ function onStatus(ev){lamp(['tdot','mtdot'],ev.translator==='ok'?(ev.queue>0?'bu
 function onGpu(ev){renderGpu(ev.gpus)}
 function bfmt(v){return v===null?'-':v.toFixed(1)}
 // ツリー表示の折りたたみ状態 (2秒毎の再描画を跨いで保持)
-const sysTree={srv:true,dsk:true,gpu:true,pwr:false};
+const TREE_KEEP=['gpu','pwr','tmp','prf','mem'];   // 開閉を覚えておく行
+const sysTree={srv:true,dsk:true,gpu:true,pwr:false,tmp:true,prf:true,mem:true};
 // GPU の開閉を覚えておく (スマホの縦向きで閉じて和訳を広く見る使い方のため。PC も同じ)
-try{const v=JSON.parse(localStorage.getItem('hh.mtree')||'null');if(v){for(const k of ['gpu','pwr'])if(typeof v[k]==='boolean')sysTree[k]=v[k]}}catch(e){}
-function saveTree(){try{localStorage.setItem('hh.mtree',JSON.stringify({gpu:sysTree.gpu,pwr:sysTree.pwr}))}catch(e){}}
+try{const v=JSON.parse(localStorage.getItem('hh.mtree')||'null');if(v){for(const k of TREE_KEEP)if(typeof v[k]==='boolean')sysTree[k]=v[k]}}catch(e){}
+function saveTree(){const o={};for(const k of TREE_KEEP)o[k]=sysTree[k];try{localStorage.setItem('hh.mtree',JSON.stringify(o))}catch(e){}}
 let lastSysmon=null, lastGpus=null;
 // ラベル先頭のアイコン (実物風の固定配色: 緑=基板 / 金=端子・ピン / 銀=金属 / 黒=チップ。切欠きは背景色 #131a1f で抜く)
 // ---- CPU: LGA パッケージ (緑基板 + 銀の IHS + 金ピン、IHS は Win98 風ベベル) ----
@@ -3376,7 +3462,7 @@ function sysnode(name,key){
  return el}
 // 性能メーター: いまの SM クロックが、そのカードの最大クロックの何割で回っているか (= いま出せている力)。
 // 電力の上限で絞られていれば黄、温度・ハードの減速なら赤。値はいまのクロック。マウスを乗せると最大クロック・使用率・P ステート・電力の上限・理由を出す
-function gpuPerf(g){
+function gpuPerf(g,label){
  if(g.clock==null||!g.clock_max)return null;
  const th=g.throttle||[],pct=g.clock/g.clock_max*100;
  const hot=th.some(t=>t.kind==='thermal'||t.kind==='hw'),warn=th.length>0;
@@ -3384,7 +3470,7 @@ function gpuPerf(g){
   +'\n使用率 '+(g.util==null?'-':g.util.toFixed(0)+'%')+' ・ '+(g.pstate||'-')+(g.idle?' (待機中)':'')
   +'\n電力 '+g.power.toFixed(0)+' / 上限 '+(g.power_limit==null?'-':g.power_limit.toFixed(0))+' W'
   +'\nクロックを下げている理由: '+(th.length?th.map(t=>t.text).join('・'):'なし');
- const el=sysleaf('🚀 性能',g.clock.toFixed(0)+'MHz',pct,warn?0:null,hot?0:null,tip);el.classList.add('perf');return el}
+ const el=sysleaf(label||'🚀 性能',g.clock.toFixed(0)+'MHz',pct,warn?0:null,hot?0:null,tip);el.classList.add('perf');return el}
 // 閉じた GPU の 1 行要約: 温度・電力・VRAM (バーと同じ境目で黄 / 赤)
 function gpuSum(g){
  const sp=document.createElement('span');sp.className='gsum';
@@ -3415,7 +3501,7 @@ function powerSection(top){
  const sm=document.createElement('span');sm.className='gsum';sm.textContent='約 '+w(wall)+(cw==null?' (CPU 抜き)':'');n.appendChild(sm);
  wrap.appendChild(n);
  if(sysTree.pwr){
-  const body=document.createElement('div');body.className='tsub pwr';
+  const body=document.createElement('div');body.className='tsub wide';
   body.appendChild(sysleaf('🔌 全体',w(wall)+'/'+w(full),full?wall/full*100:null,80,95,tip));
   // 内訳のバーは全体 (コンセント側) に占める割合
   const part=(label,v,t)=>body.appendChild(sysleaf(label,v==null?'-':w(v),v==null||!wall?null:v/wall*100,null,null,t)).classList.add('flat');
@@ -3600,59 +3686,145 @@ function gpuSection(top){
    const mp=g.max_power||250;
    c.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
    const pf=gpuPerf(g);if(pf)c.appendChild(pf);
-   const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
-   c.appendChild(sysleaf(IC_DDR,mv,g.mem_total?g.mem_used/g.mem_total*100:null,95,null,'VRAM'));   // アイコンだけ (メーターを長く)
+   c.appendChild(vramLeaf(g,IC_DDR));   // アイコンだけ (メーターを長く)
   }else l.appendChild(gpuSum(g));
   gw.appendChild(c)});
  return gw}
+// ---- サーバのツリーの形 (サーバ行の右のボタンで切り替え、覚えておく) ----
+//  dev  = 部品別: 電力 → GPU (カードごとに温度・電力・性能・VRAM) → CPU → RAM → ディスク
+//  kind = 項目別: 温度 (CPU・GPU・メモリ・SSD・マザーボード・LAN) → 電力 → 性能 (CPU 使用率・GPU のクロック) → メモリ (RAM・VRAM) → ディスク
+// スマホ表示では、絶えず動くもの (部品別は電力と GPU、項目別はディスク以外) を上の欄に、残りを […] のメニューに出す
+let sysView='dev';
+try{if(localStorage.getItem('hh.sysview')==='kind')sysView='kind'}catch(e){}
+function viewSwitch(){
+ const w=document.createElement('span');w.className='vsw';w.title='ツリーの形: 部品別 (GPU・CPU ごと) / 項目別 (温度・電力・性能・メモリごと)';
+ for(const [v,t] of [['dev','部品別'],['kind','項目別']]){
+  const b=document.createElement('button');b.type='button';b.textContent=t;if(sysView===v)b.className='on';
+  b.addEventListener('click',e=>{e.stopPropagation();if(sysView===v)return;sysView=v;
+   try{localStorage.setItem('hh.sysview',v)}catch(_){}renderSysCard()});
+  w.appendChild(b)}
+ return w}
+// 温度の色の境目 (バーの満杯・黄・赤、℃)。CPU は Ryzen の Tctl (95℃ で頭打ちになる作り)、SSD は NVMe の Composite
+const TEMPK={cpu:[100,85,95],gpu:[90,75,85],ddr:[90,70,80],ssd:[85,65,75],board:[80,55,70],lan:[110,85,100]};
+const TEMPIC={cpu:IC_CPU,gpu:IC_GPU,ddr:IC_DDR,ssd:'💾',board:'🧩',lan:'🌐'};
+function tempItems(){
+ const t=(lastSysmon&&Array.isArray(lastSysmon.temps))?lastSysmon.temps:[];
+ const gs=(Array.isArray(lastGpus)?lastGpus:[]).map(g=>({kind:'gpu',label:g.label||g.name,temp:g.temp,tip:'GPU '+g.index+' ('+g.name+') nvidia-smi'}));
+ return t.filter(x=>x.kind==='cpu').concat(gs,t.filter(x=>x.kind!=='cpu'))}
+// 項目のまとまり (温度・性能・メモリ) の行。閉じていれば右に 1 行の要約 (parts = [[文字, 黄か赤か], ...])
+function groupNode(name,key,parts,top,tip){
+ const n=sysnode(name,key);if(tip)n.title=tip;
+ if(!sysTree[key]&&parts.length){const sm=document.createElement('span');sm.className='gsum';
+  for(const [t,cls] of parts){const e=document.createElement('span');e.textContent=t;if(cls)e.className=cls;sm.appendChild(e)}
+  n.appendChild(sm)}
+ const wrap=document.createElement('div');wrap.className=top?'':'tsub';wrap.appendChild(n);
+ const body=document.createElement('div');body.className='tsub wide';
+ return [wrap,n,body]}
+function lvl(v,warn,hot){return v>=hot?'hot':v>=warn?'warn':''}
+function tempGroup(top){
+ const it=tempItems();if(!it.length)return null;
+ // 閉じたときの要約: 境目に近い順 (黄・赤の境目に対する割合) にいちばん危ないもの 1 つ
+ let worst=null,wr=-1;
+ for(const x of it){const k=TEMPK[x.kind]||TEMPK.board,r=x.temp/k[1];if(r>wr){wr=r;worst=x}}
+ const k=TEMPK[worst.kind]||TEMPK.board;
+ const [wrap,,body]=groupNode('🌡️ 温度','tmp',[[worst.label+' '+worst.temp.toFixed(0)+'℃',lvl(worst.temp,k[1],k[2])]],top,
+  '取れる部品の温度 (GPU は nvidia-smi、ほかは hwmon)。閉じているときは黄・赤の境目にいちばん近いもの');
+ if(sysTree.tmp){
+  for(const x of it){const k=TEMPK[x.kind]||TEMPK.board;
+   body.appendChild(sysleaf((TEMPIC[x.kind]||'🌡️')+' '+hesc(x.label),x.temp.toFixed(0)+'℃',x.temp/k[0]*100,k[1]/k[0]*100,k[2]/k[0]*100,
+    x.tip+'\n黄 '+k[1]+'℃ / 赤 '+k[2]+'℃'))}
+  wrap.appendChild(body)}
+ return wrap}
+function cpuPct(){const s=lastSysmon;return (!s||s.cpu===null||s.cpu===undefined)?null:s.cpu}
+function perfGroup(top){
+ const gpus=Array.isArray(lastGpus)?lastGpus:[],cpu=cpuPct();
+ const parts=[['CPU '+(cpu===null?'-':cpu.toFixed(0)+'%'),cpu!==null&&cpu>=90?'warn':'']];
+ for(const g of gpus){if(g.clock==null||!g.clock_max)continue;const th=g.throttle||[];
+  parts.push([(g.label||g.name)+' '+(g.clock/g.clock_max*100).toFixed(0)+'%',th.some(t=>t.kind==='thermal'||t.kind==='hw')?'hot':th.length?'warn':''])}
+ const [wrap,n,body]=groupNode('🚀 性能','prf',parts,top,'CPU は使用率、GPU はいまの SM クロック ÷ 最大クロック (電力の上限で絞られていれば黄、温度などなら赤)');
+ if(gpus.length)n.appendChild(hstopBtns());
+ if(sysTree.prf){
+  body.appendChild(sysleaf(IC_CPU+' CPU',cpu===null?'-':cpu.toFixed(1)+'%',cpu,90,null,'CPU の使用率 (/proc/stat)'));
+  for(const g of gpus){const pf=gpuPerf(g,IC_GPU+' '+hesc(g.label||g.name));if(pf)body.appendChild(pf)}
+  wrap.appendChild(body)}
+ return wrap}
+function ramLeaf(label){
+ const s=lastSysmon;
+ // RAM: 使用中 (プログラム) + キャッシュ (ファイルの置き場所。llama.cpp が mmap で読んだモデルもここ) / 全体
+ const memC=(s.mem_cache===null||s.mem_cache===undefined)?null:s.mem_cache;
+ const memV=(s.mem_used===null||s.mem_used===undefined)?'-':bfmt(s.mem_used)+(memC===null?'':'+'+bfmt(memC))+'/'+bfmt(s.mem_total)+'G';
+ const memPct=(s.mem_total)?s.mem_used/s.mem_total*100:null;
+ const memPct2=(s.mem_total&&memC!==null)?memC/s.mem_total*100:null;
+ const memTip=memC===null?null:'使用中 '+bfmt(s.mem_used)+'G (緑) + キャッシュ '+bfmt(memC)+'G (青) / 全体 '+bfmt(s.mem_total)+'G\n'
+  +'キャッシュはファイルの置き場所 (free の buff/cache)。llama.cpp が mmap で読んだモデルもここに入る。\n'
+  +'ほかのプログラムが必要とすれば空けられるが、空けるとモデルは SSD から読み直しになる。';
+ return sysleaf(label,memV,memPct,95,null,memTip,memPct2)}
+function vramLeaf(g,label){
+ const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
+ return sysleaf(label,mv,g.mem_total?g.mem_used/g.mem_total*100:null,95,null,'VRAM')}
+function memGroup(top){
+ const s=lastSysmon,gpus=Array.isArray(lastGpus)?lastGpus:[];if(!s)return null;
+ const parts=[];
+ if(s.mem_total)parts.push(['RAM '+bfmt(s.mem_used)+'/'+s.mem_total.toFixed(0)+'G',s.mem_used/s.mem_total*100>=95?'warn':'']);
+ if(gpus.length){const u=gpus.reduce((a,g)=>a+g.mem_used,0)/1024,t=gpus.reduce((a,g)=>a+g.mem_total,0)/1024;
+  parts.push(['VRAM '+u.toFixed(0)+'/'+t.toFixed(0)+'G',gpus.some(g=>g.mem_total&&g.mem_used/g.mem_total*100>=95)?'warn':''])}
+ const [wrap,,body]=groupNode(IC_DDR+' メモリ','mem',parts,top,'RAM (使用中 + キャッシュ) と GPU ごとの VRAM');
+ if(sysTree.mem){
+  body.appendChild(ramLeaf(IC_DDR+' RAM'));
+  for(const g of gpus)body.appendChild(vramLeaf(g,IC_GPU+' '+hesc(g.label||g.name)));
+  wrap.appendChild(body)}
+ return wrap}
+function diskSection(){
+ const s=lastSysmon;
+ const dskWrap=document.createElement('div');dskWrap.className='tsub';
+ dskWrap.appendChild(sysnode('💾 ディスク','dsk'));
+ if(sysTree.dsk){
+  const body=document.createElement('div');body.className='tsub';
+  if(Array.isArray(s.disks)&&s.disks.length){
+   for(const dk of s.disks){
+    const t=(dk.total===null||dk.total===undefined)?null:dk.total;
+    const u=(dk.used===null||dk.used===undefined)?null:dk.used;
+    const v=(u===null||t===null)?'-':bfmt(u)+'/'+bfmt(t)+'G';
+    const pct=(t&&u!==null)?u/t*100:null;
+    const tip=(dk.label?dk.label+' ('+dk.device+')':dk.device);
+    body.appendChild(sysleaf('💾 '+hesc(dk.label_short||dk.device),v,pct,90,null,tip));
+   }
+  }else{
+   const du=(s.disk_used===null||s.disk_used===undefined)?null:s.disk_used;
+   const v=(du===null)?'-':bfmt(du)+'/'+bfmt(s.disk_total)+'G';
+   const pct=(s.disk_total&&du!==null)?s.disk_used/s.disk_total*100:null;
+   body.appendChild(sysleaf('💾 ディスク',v,pct,90,null));
+  }
+  dskWrap.appendChild(body);
+ }
+ return dskWrap}
+// 項目別で上に並べるまとまり (スマホは上の欄、PC はサーバ行の下)
+function kindGroups(top){return [tempGroup(top),powerSection(top),perfGroup(top),memGroup(top)].filter(Boolean)}
 function renderSysCard(){
- if(MOB){const m=document.getElementById('mgpu'),pw=powerSection(true),gw=gpuSection(true);m.innerHTML='';if(pw)m.appendChild(pw);if(gw)m.appendChild(gw)}
+ const kind=sysView==='kind';
+ if(MOB){const m=document.getElementById('mgpu');m.innerHTML='';
+  for(const e of (kind?kindGroups(true):[powerSection(true),gpuSection(true)]))if(e)m.appendChild(e)}
  const c=document.getElementById('sysmc');if(!c)return;c.innerHTML='';
  const card=document.createElement('div');card.className='sysm';
- card.title='サーバの電力 (推定)・GPU・CPU・RAM・各 SSD 使用量 (/proc・statvfs・nvidia-smi・hwmon、2秒更新)';
+ card.title='サーバの電力 (推定)・温度・GPU・CPU・RAM・各 SSD 使用量 (/proc・statvfs・nvidia-smi・hwmon、2秒更新)';
  const s=lastSysmon;
  if(s){
-  const cpu=(s.cpu===null||s.cpu===undefined)?null:s.cpu;
-  const cpuV=cpu===null?'-':cpu.toFixed(1)+'%';
-  // RAM: 使用中 (プログラム) + キャッシュ (ファイルの置き場所。llama.cpp が mmap で読んだモデルもここ) / 全体
-  const memC=(s.mem_cache===null||s.mem_cache===undefined)?null:s.mem_cache;
-  const memV=(s.mem_used===null||s.mem_used===undefined)?'-':bfmt(s.mem_used)+(memC===null?'':'+'+bfmt(memC))+'/'+bfmt(s.mem_total)+'G';
-  const memPct=(s.mem_total)?s.mem_used/s.mem_total*100:null;
-  const memPct2=(s.mem_total&&memC!==null)?memC/s.mem_total*100:null;
-  const memTip=memC===null?null:'使用中 '+bfmt(s.mem_used)+'G (緑) + キャッシュ '+bfmt(memC)+'G (青) / 全体 '+bfmt(s.mem_total)+'G\n'
-   +'キャッシュはファイルの置き場所 (free の buff/cache)。llama.cpp が mmap で読んだモデルもここに入る。\n'
-   +'ほかのプログラムが必要とすれば空けられるが、空けるとモデルは SSD から読み直しになる。';
-  card.appendChild(sysnode('🖥️ サーバ','srv'));
+  const sn=sysnode('🖥️ サーバ','srv');sn.appendChild(viewSwitch());
+  card.appendChild(sn);
   if(sysTree.srv){
-   // 表示順: 電力 → GPU → CPU → RAM → ディスク (スマホ表示の GPU は上の欄に別に描く)
-   const pw=MOB?null:powerSection(false);
-   if(pw)card.appendChild(pw);
-   const gw=MOB?null:gpuSection(false);
-   if(gw)card.appendChild(gw);
-   card.appendChild(sysleaf(IC_CPU+' CPU',cpuV,cpu,90));
-   card.appendChild(sysleaf(IC_DDR+' RAM',memV,memPct,95,null,memTip,memPct2));
-   const dskWrap=document.createElement('div');dskWrap.className='tsub';
-   dskWrap.appendChild(sysnode('💾 ディスク','dsk'));
-   if(sysTree.dsk){
-    const body=document.createElement('div');body.className='tsub';
-    if(Array.isArray(s.disks)&&s.disks.length){
-     for(const dk of s.disks){
-      const t=(dk.total===null||dk.total===undefined)?null:dk.total;
-      const u=(dk.used===null||dk.used===undefined)?null:dk.used;
-      const v=(u===null||t===null)?'-':bfmt(u)+'/'+bfmt(t)+'G';
-      const pct=(t&&u!==null)?u/t*100:null;
-      const tip=(dk.label?dk.label+' ('+dk.device+')':dk.device);
-      body.appendChild(sysleaf('💾 '+hesc(dk.label_short||dk.device),v,pct,90,null,tip));
-     }
-    }else{
-     const du=(s.disk_used===null||s.disk_used===undefined)?null:s.disk_used;
-     const v=(du===null)?'-':bfmt(du)+'/'+bfmt(s.disk_total)+'G';
-     const pct=(s.disk_total&&du!==null)?s.disk_used/s.disk_total*100:null;
-     body.appendChild(sysleaf('💾 ディスク',v,pct,90,null));
-    }
-    dskWrap.appendChild(body);
+   if(kind){
+    if(!MOB)for(const e of kindGroups(false))card.appendChild(e);
+   }else{
+    // 表示順: 電力 → GPU → CPU → RAM → ディスク (スマホ表示の電力と GPU は上の欄に別に描く)
+    const pw=MOB?null:powerSection(false);
+    if(pw)card.appendChild(pw);
+    const gw=MOB?null:gpuSection(false);
+    if(gw)card.appendChild(gw);
+    const cpu=cpuPct();
+    card.appendChild(sysleaf(IC_CPU+' CPU',cpu===null?'-':cpu.toFixed(1)+'%',cpu,90));
+    card.appendChild(ramLeaf(IC_DDR+' RAM'));
    }
-   card.appendChild(dskWrap);
+   card.appendChild(diskSection());
   }
  }
  c.appendChild(card)}
