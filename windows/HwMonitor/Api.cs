@@ -113,6 +113,15 @@ public sealed class HistoryData
     public List<long> T { get; set; } = [];
     public Dictionary<string, List<double?>> Series { get; set; } = [];
     public int MaxGap { get; set; }   // これより空いたら線を切る (秒)
+    /// <summary>読み込みの最中の見込み (キー -> いつから・速さ)。llama-server は 2048 トークンごとにしか数を増やさないので、
+    /// 増えるまでの右端はゼロになる。その間を見込みの速さで描く (記録の値ではない)</summary>
+    public Dictionary<string, List<LiveRate>> Live { get; set; } = [];
+}
+
+public sealed class LiveRate
+{
+    public double From { get; set; }
+    public double Rate { get; set; }
 }
 
 public sealed class EnergyData

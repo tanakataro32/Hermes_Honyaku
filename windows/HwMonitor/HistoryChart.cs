@@ -29,7 +29,24 @@ public sealed class HistoryChart : Control
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string Group { get; set; } = "p";
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public HistoryData? Data { get => data; set { data = value; error = null; Invalidate(); } }
+    public HistoryData? Data { get => data; set { data = value; ApplyLive(value); error = null; Invalidate(); } }
+
+    // 読み込みの最中の見込みで、右端 (まだ数が増えていない刻み) を埋める。見込みより記録が大きければ記録のまま
+    static void ApplyLive(HistoryData? d)
+    {
+        if (d == null) return;
+        foreach (var (key, list) in d.Live)
+        {
+            if (!d.Series.TryGetValue(key, out var vals)) continue;
+            for (int i = 0; i < d.T.Count && i < vals.Count; i++)
+            {
+                double end = d.T[i] + d.Step, est = 0;
+                foreach (var lv in list)   // 読んでいる枠ごとの見込みを足す (枠ごとの速さは GPU を分け合ったあとの値)
+                    if (end > lv.From) est += lv.Rate * Math.Min(1, (end - lv.From) / d.Step);   // 読み始めが刻みの途中なら、その割合だけ
+                if (est > 0 && (vals[i] ?? 0) < est) vals[i] = Math.Round(est, 1);
+            }
+        }
+    }
 
     public void ShowError(string message) { error = message; Invalidate(); }
 
