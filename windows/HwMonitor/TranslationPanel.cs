@@ -99,16 +99,20 @@ public sealed class TranslationPanel : Control
     void OnEvent(JsonElement ev)
     {
         string type = Str(ev, "type");
-        if (type == "status" && ev.TryGetProperty("boot", out var b) && b.TryGetInt64(out var bt) && bt != boot)
+        // 翻訳の中継の起動番号。つないだ直後は「直近のターン」→ status の順に届くので、最初に知った番号では消さない。
+        // 番号が変わったとき (中継が起動し直して、ターンの番号が 1 からやり直し) だけ消す
+        if ((type == "status" || type == "turn_start") && ev.TryGetProperty("boot", out var b) && b.TryGetInt64(out var bt) && bt != boot)
         {
-            // 翻訳の中継が起動し直した (ターンの番号が 1 からやり直しになる)
+            if (boot != 0)
+            {
+                seen.Clear();
+                turns.Clear();
+                segSrc.Clear();
+                lock (thinkLock) { thinkTurn = -1; think.Clear(); thinkDirty = true; }
+            }
             boot = bt;
-            seen.Clear();
-            turns.Clear();
-            segSrc.Clear();
-            lock (thinkLock) { thinkTurn = -1; think.Clear(); thinkDirty = true; }
-            return;
         }
+        if (type == "status") return;
         if (!ev.TryGetProperty("turn", out var tn) || !tn.TryGetInt32(out int n)) return;
         switch (type)
         {

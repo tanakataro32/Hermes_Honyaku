@@ -132,6 +132,10 @@ class SlotWatcher:
         self.slots = {}   # (名前, 枠) -> 状態
         self.cnt = {name: {"in": 0, "proc": 0, "out": 0, "busy": 0.0} for name, _ in servers}
         self.busy_any = 0.0
+        # 読み込み (プロンプトの処理) の数は、この版の llama-server では処理が終わった瞬間にまとめて増える。
+        # そのまま 2 秒の 1 点に乗せると何百 t/s の山になるので、(名前, 始まり, 終わり, トークン数) を渡し、
+        # HwMonitor がその時間に割り振る (グラフの速さだけ。日ごとの合計はそのまま)
+        self.spans = []
         self.up = {name: False for name, _ in servers}
         self.last = None
         if servers:
@@ -184,10 +188,16 @@ class SlotWatcher:
                         busy = True
                         if sl.get("id_task") != st["task"]:  # 新しい要求
                             # started = 新しい要求を初めて見た時刻 (アプリが翻訳の中継のターンの始まりと時刻で結ぶのに使う。0.5 秒ほど遅れる)
-                            st.update(task=sl.get("id_task"), dec=0, proc=0, prompt_added=False, tps=0.0, p0=0, d0=0, started=time.time())
+                            st.update(task=sl.get("id_task"), dec=0, proc=0, prompt_added=False, tps=0.0, p0=0, d0=0,
+                                      started=time.time(), proc_t=time.time())
                         d_out = max(0, dec - st["dec"])
                         c["out"] += d_out
-                        c["proc"] += max(0, pp - st["proc"])
+                        d_proc = max(0, pp - st["proc"])
+                        if d_proc:
+                            c["proc"] += d_proc
+                            t_now = time.time()
+                            self.spans.append((name, st.get("proc_t") or t_now, t_now, d_proc))  # 前に増えた時 (または要求を受けた時) から今まで
+                            st["proc_t"] = t_now
                         if not st["prompt_added"] and npt > 0:
                             # 初めて見えたときの量。llama.cpp の版によって n_prompt_tokens に生成した分が入るので、
                             # そのとき生成済みの分 (d0) を引いて「要求の入力」にする (API の入力に当たる量。キャッシュの分も含む)
@@ -208,12 +218,14 @@ class SlotWatcher:
                 self.busy_any += dt
 
     def take(self):
-        """前回から数えた分を取り出す: ({名前: {in, proc, out, busy}}, 推論していた秒 (どれかの枠が動いていた))"""
+        """前回から数えた分を取り出す: ({名前: {in, proc, out, busy}}, 推論していた秒 (どれかの枠が動いていた),
+        読み込みの区間 [(名前, 始まり, 終わり, トークン数)])"""
         with self.lock:
             out = self.cnt
             self.cnt = {name: {"in": 0, "proc": 0, "out": 0, "busy": 0.0} for name, _ in self.servers}
             b, self.busy_any = self.busy_any, 0.0
-        return out, b
+            spans, self.spans = self.spans, []
+        return out, b, spans
 
     def view(self):
         with self.lock:
@@ -266,6 +278,17 @@ class Store:
             if ts - self._last_prune > 3600:
                 self.db.execute("DELETE FROM minutes WHERE ts < ?", (ts - self.keep_days * 86400,))
                 self._last_prune = ts
+            self.db.commit()
+
+    def add_to_minute(self, ts, key, delta):
+        """書き込み済みの 1 分の平均に足す (読み込みを、かかった時間に割り振るとき)"""
+        with self.lock:
+            row = self.db.execute("SELECT data FROM minutes WHERE ts = ?", (ts,)).fetchone()
+            if not row:
+                return
+            data = json.loads(row[0])
+            data[key] = round(data.get(key, 0.0) + delta, 2)
+            self.db.execute("UPDATE minutes SET data = ? WHERE ts = ?", (json.dumps(data, ensure_ascii=False, separators=(",", ":")), ts))
             self.db.commit()
 
     def minutes_since(self, since):
@@ -330,11 +353,11 @@ class HwMonitor:
     def _tick(self):
         t = time.time()
         view, flat, wall = snapshot(self.gpu.current(), self.sys.current(), self.pcfg)
-        cnt, busy_any = self.slots.take()
+        cnt, busy_any, spans = self.slots.take()
         dt_tok = t - self.last if self.last is not None and 0 < t - self.last <= 10 else 0
         for name, c in cnt.items():
-            if dt_tok:  # 履歴のグラフ用は 1 秒あたり (読み込み・生成)
-                flat[f"r:{name} 読込"] = round(c["proc"] / dt_tok, 1)
+            if dt_tok:  # 履歴のグラフ用は 1 秒あたり。読み込みは下の _spread で、かかった時間に割り振って足す
+                flat[f"r:{name} 読込"] = 0.0
                 flat[f"r:{name} 生成"] = round(c["out"] / dt_tok, 1)
         view["slots"] = self.slots.view()
         m = int(t // 60 * 60)
@@ -360,8 +383,39 @@ class HwMonitor:
                 a[0] += v
                 a[1] += 1
             self.ring.append((t, flat))
+            for span in spans:
+                self._spread_locked(*span)
             view["ts"] = t
             self.now = view
+
+    def _spread_locked(self, name, a, b, n):
+        """読み込み n トークンを、区間 [a, b] の速さ (n ÷ 秒) として、重なる 2 秒の記録・いまの 1 分・書き込み済みの 1 分に足す"""
+        key = f"r:{name} 読込"
+        rate = n / max(b - a, 0.5)
+        if b - a < 0.5:
+            a = b - 0.5
+        prev = None
+        for t, f in self.ring:
+            start = prev if prev is not None and t - prev <= 10 else t - self.interval
+            prev = t
+            ov = min(t, b) - max(start, a)
+            if ov <= 0 or key not in f:
+                continue
+            add = rate * ov / (t - start)   # その 2 秒の平均の速さに足す分
+            f[key] = round(f[key] + add, 1)
+            if t >= self.minute:            # いま貯めている 1 分にも
+                acc = self.acc.setdefault(key, [0.0, 0])
+                acc[0] += add
+        # 書き込み済みの 1 分 (読み込みが分をまたいだとき)
+        m = int(a // 60 * 60)
+        while m < self.minute and m < b:
+            ov = min(m + 60, b) - max(m, a)
+            if ov > 0:
+                try:
+                    self.store.add_to_minute(m, key, rate * ov / 60)
+                except Exception:
+                    log.exception("hwmon: 読み込みの割り振りの書き込みに失敗")
+            m += 60
 
     def _flush_locked(self):
         if not self.acc and self.wh == 0:
