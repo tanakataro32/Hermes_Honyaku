@@ -13,6 +13,27 @@ public sealed class NowData
     public List<MemItem> Mem { get; set; } = [];
     public List<DiskItem> Disks { get; set; } = [];
     public EnergyBrief? Energy { get; set; }
+    public List<SlotServer> Slots { get; set; } = [];
+}
+
+/// <summary>llama-server 1 台の枠 (/slots)</summary>
+public sealed class SlotServer
+{
+    public string Server { get; set; } = "";
+    public bool Up { get; set; }
+    public List<SlotInfo> Slots { get; set; } = [];
+}
+
+public sealed class SlotInfo
+{
+    public int Id { get; set; }
+    public long NCtx { get; set; }
+    public long Used { get; set; }       // 枠が使っている量 (入力 + 生成)。待機中は最後に使っていた量
+    public long Prompt { get; set; }     // 要求の入力
+    public long Decoded { get; set; }    // 生成した量
+    public bool Processing { get; set; }
+    public double? LastActive { get; set; }
+    public double Tps { get; set; }      // 生成の速さ (トークン/秒)
 }
 
 public sealed class PowerData
@@ -90,6 +111,7 @@ public sealed class HistoryData
     public long To { get; set; }
     public List<long> T { get; set; } = [];
     public Dictionary<string, List<double?>> Series { get; set; } = [];
+    public int MaxGap { get; set; }   // これより空いたら線を切る (秒)
 }
 
 public sealed class EnergyData
@@ -99,6 +121,71 @@ public sealed class EnergyData
     public EnergyMonth Month { get; set; } = new();
     public List<EnergyDay> Days { get; set; } = [];
     public List<EnergyMonthRow> Months { get; set; } = [];
+    public CompareData? Compare { get; set; }
+}
+
+/// <summary>電気代と、同じだけ推論したときのレンタル (GPU の時間貸し・API の従量) の比べ</summary>
+public sealed class CompareData
+{
+    public ComparePrices Prices { get; set; } = new();
+    public List<ComparePeriod> Periods { get; set; } = [];
+    public List<CompareDay> Days { get; set; } = [];
+}
+
+public sealed class ComparePrices
+{
+    public double YenKwh { get; set; }
+    public double UsdJpy { get; set; }
+    public double GpuUsdPerHour { get; set; }
+    public Dictionary<string, ApiPrice> Api { get; set; } = [];
+}
+
+public sealed class ApiPrice
+{
+    public double In { get; set; }
+    public double Out { get; set; }
+}
+
+public sealed class CostSet
+{
+    public double? Elec { get; set; }
+    public double? GpuBusy { get; set; }
+    public double? GpuFull { get; set; }
+    public double? Api { get; set; }
+}
+
+public sealed class ComparePeriod
+{
+    public string Key { get; set; } = "";
+    public string Label { get; set; } = "";
+    public double Kwh { get; set; }
+    public double Hours { get; set; }
+    public double BusyH { get; set; }
+    public long In { get; set; }
+    public long Out { get; set; }
+    public List<CompareServer> Servers { get; set; } = [];
+    public List<string> ApiMissing { get; set; } = [];
+    public CostSet Yen { get; set; } = new();
+    public CostSet PerMout { get; set; } = new();
+}
+
+public sealed class CompareServer
+{
+    public string Server { get; set; } = "";
+    public long In { get; set; }
+    public long Proc { get; set; }
+    public long Out { get; set; }
+    public double BusyH { get; set; }
+    public double? ApiYen { get; set; }
+}
+
+public sealed class CompareDay
+{
+    public string Date { get; set; } = "";
+    public long In { get; set; }
+    public long Out { get; set; }
+    public double BusyH { get; set; }
+    public CostSet Yen { get; set; } = new();
 }
 
 public sealed class EnergyToday

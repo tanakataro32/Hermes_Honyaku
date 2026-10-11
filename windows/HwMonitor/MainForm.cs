@@ -10,6 +10,9 @@ public sealed class MainForm : Form
     readonly Settings settings;
     readonly HwmonClient api;
     readonly MeterPanel meters = new() { Dock = DockStyle.Top };
+    readonly HonyakuFeed feed;
+    readonly SlotPanel slots;
+    readonly CostPanel cost = new() { Dock = DockStyle.Fill, Visible = false };
     readonly HistoryChart chart = new() { Dock = DockStyle.Fill };
     readonly EnergyPanel energy = new() { Dock = DockStyle.Fill, Visible = false };
     readonly TranslationPanel translation;
@@ -17,6 +20,7 @@ public sealed class MainForm : Form
     readonly ToolStrip bar = new() { GripStyle = ToolStripGripStyle.Hidden, Renderer = new DarkRenderer(), BackColor = Theme.Panel, ForeColor = Theme.Ink, Padding = new Padding(4, 2, 4, 2) };
     readonly ToolStripButton tabGraph = new("グラフ") { CheckOnClick = false };
     readonly ToolStripButton tabEnergy = new("電気代") { CheckOnClick = false };
+    readonly ToolStripButton tabCost = new("コスト比較") { CheckOnClick = false, ToolTipText = "電気代と、同じだけ推論したときのレンタル (GPU の時間貸し・API の従量) を比べる" };
     readonly ToolStripButton topMost = new("最前面") { CheckOnClick = true };
     readonly ToolStripButton showJa = new("和訳") { CheckOnClick = true };
     readonly ToolStripButton showSrc = new("原文を併記") { CheckOnClick = true, ToolTipText = "和訳の 1 区切りごとに、翻訳した英文を下に小さく出す" };
@@ -31,7 +35,9 @@ public sealed class MainForm : Form
     {
         this.settings = settings;
         api = new HwmonClient(() => settings.HwmonBase);
-        translation = new TranslationPanel(() => settings.HonyakuBase, () => settings.HideTasks) { Dock = DockStyle.Fill };
+        feed = new HonyakuFeed(() => settings.HonyakuBase);
+        translation = new TranslationPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill };
+        slots = new SlotPanel(feed.Turns) { Dock = DockStyle.Top, Height = 0 };
 
         Text = "llmsv ハードウェアモニタ";
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);   // exe に入れたアイコン (app.ico) をタイトルバーとタスクバーにも
@@ -51,6 +57,7 @@ public sealed class MainForm : Form
         // 上の帯: 表示の切り替えと設定
         tabGraph.Click += (_, _) => SetTab("graph");
         tabEnergy.Click += (_, _) => SetTab("energy");
+        tabCost.Click += (_, _) => SetTab("cost");
         topMost.Checked = settings.TopMost;
         topMost.CheckedChanged += (_, _) => { TopMost = settings.TopMost = topMost.Checked; settings.Save(); };
         showJa.Checked = settings.ShowTranslation;
@@ -61,16 +68,18 @@ public sealed class MainForm : Form
         showThink.CheckedChanged += (_, _) => { settings.ShowThink = translation.ShowThink = showThink.Checked; settings.Save(); };
         var setup = new ToolStripButton("設定…");
         setup.Click += (_, _) => OpenSettings();
-        bar.Items.AddRange([tabGraph, tabEnergy, new ToolStripSeparator(), topMost, showJa, showSrc, showThink, new ToolStripSeparator(), setup, status]);
+        bar.Items.AddRange([tabGraph, tabEnergy, tabCost, new ToolStripSeparator(), topMost, showJa, showSrc, showThink, new ToolStripSeparator(), setup, status]);
 
         // 真ん中 (グラフ / 電気代) と下 (和訳) は境目をドラッグで動かせる
         split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, BackColor = Theme.Grid, SplitterWidth = 4 };
         split.Panel1.BackColor = split.Panel2.BackColor = Theme.Back;
         split.Panel1.Controls.Add(chart);
         split.Panel1.Controls.Add(energy);
+        split.Panel1.Controls.Add(cost);
         split.Panel2.Controls.Add(translation);
 
         Controls.Add(split);
+        Controls.Add(slots);
         Controls.Add(meters);
         Controls.Add(bar);
         meters.Height = meters.WantedHeight();
@@ -94,6 +103,7 @@ public sealed class MainForm : Form
             split.SplitterDistance = Math.Max(120, split.Height - 230);   // 和訳 (+原文の欄) に下の 230px
             SetTab(settings.Tab);
             ApplyTranslation();
+            feed.Start();
             nowTimer.Start();
             slowTimer.Start();
             await RefreshNow();
@@ -104,7 +114,7 @@ public sealed class MainForm : Form
             var r = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
             settings.Bounds = [r.X, r.Y, r.Width, r.Height];
             settings.Save();
-            translation.Stop();
+            feed.Stop();
         };
     }
 
@@ -113,13 +123,11 @@ public sealed class MainForm : Form
 
     void SetTab(string tab)
     {
-        settings.Tab = tab == "energy" ? "energy" : "graph";
+        settings.Tab = tab is "energy" or "cost" ? tab : "graph";
         settings.Save();
-        bool e = settings.Tab == "energy";
-        chart.Visible = !e;
-        energy.Visible = e;
-        tabGraph.Checked = !e;
-        tabEnergy.Checked = e;
+        chart.Visible = tabGraph.Checked = settings.Tab == "graph";
+        energy.Visible = tabEnergy.Checked = settings.Tab == "energy";
+        cost.Visible = tabCost.Checked = settings.Tab == "cost";
         _ = RefreshSlow(force: true);
     }
 
@@ -129,7 +137,6 @@ public sealed class MainForm : Form
         showSrc.Enabled = showThink.Enabled = settings.ShowTranslation;   // 和訳を隠しているときは原文の 2 つも押せない
         translation.ShowSource = settings.ShowSource;
         translation.ShowThink = settings.ShowThink;
-        if (settings.ShowTranslation) translation.Start(); else translation.Stop();
     }
 
     async Task RefreshNow()
@@ -142,6 +149,9 @@ public sealed class MainForm : Form
             meters.Data = now;
             int h = meters.WantedHeight();
             if (meters.Height != h) meters.Height = h;
+            slots.Data = now?.Slots ?? [];
+            int sh = slots.WantedHeight();
+            if (slots.Height != sh) slots.Height = sh;
             if (now?.Energy is { } en)
                 status.Text = $"今日 {Yen(en.TodayYen)} ({en.TodayKwh:0.00}kWh)・今月 {Yen(en.MonthYen)}  ";
             status.ForeColor = Theme.Ink;
@@ -160,7 +170,7 @@ public sealed class MainForm : Form
     {
         var due = settings.Range == "1h" ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(60);
         if (chart.Visible && (force || DateTime.Now - lastHistory >= due)) await RefreshHistory();
-        if (energy.Visible && (force || DateTime.Now - lastEnergy >= TimeSpan.FromSeconds(60))) await RefreshEnergy();
+        if ((energy.Visible || cost.Visible) && (force || DateTime.Now - lastEnergy >= TimeSpan.FromSeconds(60))) await RefreshEnergy();
     }
 
     async Task RefreshHistory()
@@ -182,10 +192,12 @@ public sealed class MainForm : Form
         busyEnergy = true;
         try
         {
-            energy.Data = await api.Energy();
+            var en = await api.Energy();
+            energy.Data = en;
+            cost.Data = en?.Compare;
             lastEnergy = DateTime.Now;
         }
-        catch (Exception ex) { energy.ShowError("電気代を読めません: " + ex.Message); }
+        catch (Exception ex) { energy.ShowError("電気代を読めません: " + ex.Message); cost.ShowError("読めません: " + ex.Message); }
         finally { busyEnergy = false; }
     }
 
@@ -216,6 +228,7 @@ public sealed class MainForm : Form
         settings.HideTasks = hide.Checked;
         settings.Save();
         ApplyTranslation();
+        feed.Start();   // 接続先が変わったかもしれないのでつなぎ直す
         _ = RefreshNow();
         _ = RefreshSlow(force: true);
     }

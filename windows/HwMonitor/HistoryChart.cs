@@ -11,7 +11,7 @@ public sealed class HistoryChart : Control
     public static readonly (string key, string label)[] Ranges =
         [("1h", "1時間"), ("3h", "3時間"), ("6h", "6時間"), ("24h", "24時間"), ("7d", "7日"), ("30d", "30日")];
     public static readonly (string key, string label, string unit)[] Groups =
-        [("p", "電力", "W"), ("t", "温度", "℃"), ("u", "使用率", "%"), ("m", "メモリ", "GB")];
+        [("p", "電力", "W"), ("t", "温度", "℃"), ("u", "使用率", "%"), ("m", "メモリ", "GB"), ("r", "トークン", "t/s")];
 
     const int BarH = 26, LegendH = 20, PadL = 52, PadR = 14, PadB = 22;
     readonly List<(Rectangle r, Action act)> buttons = [];
@@ -116,7 +116,8 @@ public sealed class HistoryChart : Control
         }
         using (var edge = new Pen(Theme.Edge)) g.DrawRectangle(edge, plot);
 
-        // 線。途中で記録が無い所 (null や刻み 2 つより空いた所) は切る
+        // 線。途中で記録が無い所 (null や max_gap より空いた所) は切る
+        long gap = data.MaxGap > 0 ? data.MaxGap : (long)(data.Step * 2.5);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         foreach (var k in shown)
         {
@@ -126,7 +127,7 @@ public sealed class HistoryChart : Control
             long prev = 0;
             for (int i = 0; i < data.T.Count; i++)
             {
-                if (vals[i] is not double v || (pts.Count > 0 && data.T[i] - prev > data.Step * 2.5))
+                if (vals[i] is not double v || (pts.Count > 0 && data.T[i] - prev > gap))
                 {
                     Flush(g, pen, pts);
                     if (vals[i] is not double) continue;
@@ -144,6 +145,8 @@ public sealed class HistoryChart : Control
             long th = t0 + (long)((hoverX - plot.X) / (double)plot.Width * (t1 - t0));
             int idx = 0;
             for (int i = 0; i < data.T.Count; i++) if (Math.Abs(data.T[i] + data.Step / 2 - th) < Math.Abs(data.T[idx] + data.Step / 2 - th)) idx = i;
+            // 近くに記録が無い所 (記録を始める前など) では値を出さない
+            if (Math.Abs(data.T[idx] + data.Step / 2 - th) > gap) return;
             float hx = X(data.T[idx] + data.Step / 2);
             using (var p = new Pen(Theme.Muted) { DashStyle = DashStyle.Dot }) g.DrawLine(p, hx, plot.Y, hx, plot.Bottom);
             var lines = new List<(string, Color)> { (FormatTime(data.T[idx] + data.Step / 2, t1 - t0), Theme.Head) };

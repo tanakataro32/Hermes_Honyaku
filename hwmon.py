@@ -7,8 +7,11 @@ GpuMonitor・SysMonitor (CpuPower・TempSensors) をそのまま使い回すの�
 
   GET /api/now                    いまの値 (2 秒ごとに更新)
   GET /api/history?range=24h      履歴 (1h / 3h / 6h / 24h / 7d / 30d)。1h は 10 秒刻み、ほかは 1 分の記録をまとめたもの
-  GET /api/energy                 電気代 (今日・今月・日ごと 31 日・月ごと 13 か月)
+  GET /api/energy                 電気代 (今日・今月・日ごと 31 日・月ごと 13 か月) と、トークン数・レンタルとの比べ (compare)
   GET /health
+
+トークン数は llama-server の /slots ([hwmon] llama_servers) を 0.5 秒ごとに読んで数える
+(枠ごとの n_decoded・n_prompt_tokens の増え方。終わる直前の 0.5 秒ぶんは数え漏れることがあるので概数)。
 
 設定は hermes_honyaku と同じ config.ini (+ config.local.ini) の [hwmon]・[power]・[gpu]・[sysmon]。
 記録は SQLite ([hwmon] db、既定 ~/.local/share/hermes-honyaku/hwmon.sqlite)。
@@ -27,6 +30,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import hermes_honyaku as hh
@@ -106,6 +110,121 @@ def snapshot(gpus, sm, pcfg):
     return view, flat, wall
 
 
+def parse_pairs(text):
+    """「名前=値, 名前=値」を [(名前, 値), ...] に"""
+    out = []
+    for part in (text or "").split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            if k.strip() and v.strip():
+                out.append((k.strip(), v.strip()))
+    return out
+
+
+class SlotWatcher:
+    """llama-server の /slots を読んで、枠ごとの使っているトークン数と、読み込み・生成したトークン数・推論していた時間を数える。
+    数えた分は take() で取り出す (HwMonitor が 2 秒ごとに取り、1 分ごとに記録する)"""
+
+    def __init__(self, servers, interval=0.5):
+        self.servers = servers  # [(名前, URL)]
+        self.interval = interval
+        self.lock = threading.Lock()
+        self.slots = {}   # (名前, 枠) -> 状態
+        self.cnt = {name: {"in": 0, "proc": 0, "out": 0, "busy": 0.0} for name, _ in servers}
+        self.busy_any = 0.0
+        self.up = {name: False for name, _ in servers}
+        self.last = None
+        if servers:
+            log.info("トークン: %s", ", ".join(f"{n}={u}" for n, u in servers))
+            threading.Thread(target=self._loop, name="slots", daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                self._poll()
+            except Exception:
+                log.exception("slots: 読み取りに失敗 (続けます)")
+            time.sleep(self.interval)
+
+    def _get(self, url):
+        with urllib.request.urlopen(url.rstrip("/") + "/slots", timeout=1.5) as r:
+            return json.loads(r.read())
+
+    def _poll(self):
+        now = time.monotonic()
+        dt = now - self.last if self.last is not None and now - self.last < 5 else 0.0
+        self.last = now
+        got = {}
+        for name, url in self.servers:
+            try:
+                got[name] = self._get(url)
+            except Exception:
+                got[name] = None
+        with self.lock:
+            any_busy = False
+            for name, slots in got.items():
+                self.up[name] = slots is not None
+                if not slots:
+                    continue
+                c = self.cnt[name]
+                busy = False
+                for sl in slots:
+                    key = (name, sl.get("id"))
+                    st = self.slots.setdefault(key, {"task": None, "dec": 0, "proc": 0, "prompt_added": False, "used": 0,
+                                                     "prompt": 0, "decoded": 0, "tps": 0.0, "processing": False, "p0": 0, "d0": 0,
+                                                     "last_active": None, "n_ctx": 0})
+                    nt = sl.get("next_token") or {}
+                    if isinstance(nt, list):
+                        nt = nt[0] if nt else {}
+                    dec = int(nt.get("n_decoded") or 0)
+                    pp = int(sl.get("n_prompt_tokens_processed") or 0)
+                    npt = int(sl.get("n_prompt_tokens") or 0)
+                    st["n_ctx"] = int(sl.get("n_ctx") or 0)
+                    if sl.get("is_processing"):
+                        busy = True
+                        if sl.get("id_task") != st["task"]:  # 新しい要求
+                            st.update(task=sl.get("id_task"), dec=0, proc=0, prompt_added=False, tps=0.0, p0=0, d0=0)
+                        d_out = max(0, dec - st["dec"])
+                        c["out"] += d_out
+                        c["proc"] += max(0, pp - st["proc"])
+                        if not st["prompt_added"] and npt > 0:
+                            # 初めて見えたときの量。llama.cpp の版によって n_prompt_tokens に生成した分が入るので、
+                            # そのとき生成済みの分 (d0) を引いて「要求の入力」にする (API の入力に当たる量。キャッシュの分も含む)
+                            st.update(prompt_added=True, p0=npt, d0=dec)
+                            c["in"] += max(0, npt - dec)
+                        if dt > 0:
+                            st["tps"] = st["tps"] * 0.6 + d_out / dt * 0.4 if st["tps"] else d_out / dt
+                        # 枠が使っている量: n_prompt_tokens に生成分が入る版でも入らない版でも合うように
+                        used = max(npt, st["p0"] + dec - st["d0"]) if st["prompt_added"] else npt + dec
+                        st.update(dec=max(dec, st["dec"]), proc=max(pp, st["proc"]), used=used, prompt=max(0, st["p0"] - st["d0"]),
+                                  decoded=dec, processing=True, last_active=time.time())
+                    else:
+                        st.update(processing=False, tps=0.0)  # 使っていた量 (used) は残しておく
+                if busy:
+                    c["busy"] += dt
+                    any_busy = True
+            if any_busy:
+                self.busy_any += dt
+
+    def take(self):
+        """前回から数えた分を取り出す: ({名前: {in, proc, out, busy}}, 推論していた秒 (どれかの枠が動いていた))"""
+        with self.lock:
+            out = self.cnt
+            self.cnt = {name: {"in": 0, "proc": 0, "out": 0, "busy": 0.0} for name, _ in self.servers}
+            b, self.busy_any = self.busy_any, 0.0
+        return out, b
+
+    def view(self):
+        with self.lock:
+            out = []
+            for name, _ in self.servers:
+                slots = [dict(id=k[1], **{x: v[x] for x in ("n_ctx", "used", "prompt", "decoded", "processing", "last_active")},
+                              tps=round(v["tps"], 1))
+                         for k, v in sorted(self.slots.items(), key=lambda kv: kv[0][1]) if k[0] == name]
+                out.append({"server": name, "up": self.up.get(name, False), "slots": slots})
+            return out
+
+
 class Store:
     """SQLite の記録: minutes (1 分ごとの平均と電力量) と days (日ごとの電力量)"""
 
@@ -118,12 +237,26 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("CREATE TABLE IF NOT EXISTS minutes (ts INTEGER PRIMARY KEY, wh REAL, secs REAL, data TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS days (date TEXT PRIMARY KEY, wh REAL, secs REAL)")
+        # 日ごと・llama-server ごとのトークン数と推論していた秒。server = '*' の行は「どれかが推論していた秒」と、
+        # トークンを数えていた間の電力量・秒 (比べはこの時間の電気代で行う。数え始める前の電気代を混ぜない)
+        self.db.execute("CREATE TABLE IF NOT EXISTS tokens (date TEXT, server TEXT, tin INTEGER, tproc INTEGER, tout INTEGER, busy REAL,"
+                        " wh REAL DEFAULT 0, secs REAL DEFAULT 0, PRIMARY KEY (date, server))")
+        cols = [r[1] for r in self.db.execute("PRAGMA table_info(tokens)")]
+        for col in ("wh", "secs"):
+            if col not in cols:
+                self.db.execute(f"ALTER TABLE tokens ADD COLUMN {col} REAL DEFAULT 0")
         self.db.commit()
         self._last_prune = 0
 
-    def add_minute(self, ts, wh, secs, data):
+    def add_minute(self, ts, wh, secs, data, toks=None):
         date = time.strftime("%Y-%m-%d", time.localtime(ts))
         with self.lock:
+            for server, c in (toks or {}).items():
+                if any(c.values()):
+                    self.db.execute("INSERT INTO tokens (date, server, tin, tproc, tout, busy, wh, secs) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                                    "ON CONFLICT(date, server) DO UPDATE SET tin = tin + excluded.tin, tproc = tproc + excluded.tproc,"
+                                    " tout = tout + excluded.tout, busy = busy + excluded.busy, wh = wh + excluded.wh, secs = secs + excluded.secs",
+                                    (date, server, c["in"], c["proc"], c["out"], c["busy"], c.get("wh", 0.0), c.get("secs", 0.0)))
             self.db.execute("INSERT OR REPLACE INTO minutes (ts, wh, secs, data) VALUES (?, ?, ?, ?)",
                             (ts, wh, secs, json.dumps(data, ensure_ascii=False, separators=(",", ":"))))
             self.db.execute("INSERT INTO days (date, wh, secs) VALUES (?, ?, ?) "
@@ -142,12 +275,28 @@ class Store:
         with self.lock:
             return self.db.execute("SELECT date, wh, secs FROM days WHERE date >= ? ORDER BY date", (since_date,)).fetchall()
 
+    def tokens(self, since_date):
+        with self.lock:
+            return self.db.execute("SELECT date, server, tin, tproc, tout, busy, wh, secs FROM tokens WHERE date >= ? ORDER BY date",
+                                   (since_date,)).fetchall()
+
 
 class HwMonitor:
     def __init__(self, cfg):
         self.cfg = cfg
         self.pcfg = {k: cfg.get("power", k) for k in ("other_w", "psu_eff", "psu_w", "cpu_max_w")}
         self.price = cfg.getfloat("hwmon", "price_yen_kwh")
+        # レンタルとの比べ: GPU の時間貸し ($/時) と API の従量 ($/100 万トークン、入力/出力)、ドル円
+        self.usd_jpy = cfg.getfloat("rental", "usd_jpy")
+        self.gpu_usd_h = cfg.getfloat("rental", "gpu_usd_per_hour")
+        self.api = {}
+        for name, v in parse_pairs(cfg.get("rental", "api")):
+            try:
+                pin, pout = (float(x) for x in v.split("/"))
+                self.api[name] = (pin, pout)
+            except ValueError:
+                log.warning("[rental] api の %s が読めません (入力/出力 の $ を / で区切る): %s", name, v)
+        self.slots = SlotWatcher(parse_pairs(cfg.get("hwmon", "llama_servers")))
         self.interval = cfg.getfloat("sysmon", "interval")
         self.gpu = hh.GpuMonitor(interval=cfg.getfloat("gpu", "interval"), power_max=cfg.getfloat("gpu", "power_max"))
         self.sys = hh.SysMonitor(interval=self.interval, power={
@@ -164,6 +313,7 @@ class HwMonitor:
         self.acc = {}           # キー -> [合計, 個数]
         self.wh = 0.0           # この 1 分の電力量
         self.secs = 0.0         # この 1 分のうち測れた秒
+        self.toks = {}          # この 1 分のトークン数: 名前 -> {in, proc, out, busy}。'*' は「どれかが推論していた秒」
         self.last = None
         threading.Thread(target=self._loop, name="hwmon", daemon=True).start()
 
@@ -179,6 +329,13 @@ class HwMonitor:
     def _tick(self):
         t = time.time()
         view, flat, wall = snapshot(self.gpu.current(), self.sys.current(), self.pcfg)
+        cnt, busy_any = self.slots.take()
+        dt_tok = t - self.last if self.last is not None and 0 < t - self.last <= 10 else 0
+        for name, c in cnt.items():
+            if dt_tok:  # 履歴のグラフ用は 1 秒あたり (読み込み・生成)
+                flat[f"r:{name} 読込"] = round(c["proc"] / dt_tok, 1)
+                flat[f"r:{name} 生成"] = round(c["out"] / dt_tok, 1)
+        view["slots"] = self.slots.view()
         m = int(t // 60 * 60)
         with self.lock:
             if self.minute is not None and m != self.minute:
@@ -191,6 +348,12 @@ class HwMonitor:
                 self.wh += wall * dt / 3600.0
                 self.secs += dt
             self.last = t
+            for name, c in cnt.items():
+                a = self.toks.setdefault(name, {"in": 0, "proc": 0, "out": 0, "busy": 0.0})
+                for k in a:
+                    a[k] += c[k]
+            if busy_any:
+                self.toks.setdefault("*", {"in": 0, "proc": 0, "out": 0, "busy": 0.0})["busy"] += busy_any
             for k, v in flat.items():
                 a = self.acc.setdefault(k, [0.0, 0])
                 a[0] += v
@@ -203,11 +366,15 @@ class HwMonitor:
         if not self.acc and self.wh == 0:
             return
         data = {k: round(s / n, 2) for k, (s, n) in self.acc.items() if n}
+        if self.slots.servers:  # トークンを数えていた間の電力量と秒 (比べ用)
+            a = self.toks.setdefault("*", {"in": 0, "proc": 0, "out": 0, "busy": 0.0})
+            a["wh"] = a.get("wh", 0.0) + self.wh
+            a["secs"] = a.get("secs", 0.0) + self.secs
         try:
-            self.store.add_minute(self.minute, self.wh, self.secs, data)
+            self.store.add_minute(self.minute, self.wh, self.secs, data, self.toks)
         except Exception:
             log.exception("hwmon: 記録の書き込みに失敗")
-        self.acc, self.wh, self.secs = {}, 0.0, 0.0
+        self.acc, self.wh, self.secs, self.toks = {}, 0.0, 0.0, {}
 
     def flush(self):
         with self.lock:
@@ -228,8 +395,13 @@ class HwMonitor:
         since = now - span
         buckets = collections.OrderedDict()
         if rng == "1h":
+            # 2 秒の記録はメモリにしか無いので、起動し直した直後は足りない。足りない前の部分は 1 分の記録で埋める
             with self.lock:
                 rows = [(t, f) for t, f in self.ring if t >= since]
+            start = rows[0][0] if rows else now
+            if start - since > 60:
+                old = [(ts + 30, json.loads(d)) for ts, d in self.store.minutes_since(int(since)) if ts + 60 <= start]
+                rows = old + rows
         else:
             rows = [(ts + 30, json.loads(d)) for ts, d in self.store.minutes_since(int(since))]
             # まだ書き込んでいないいまの 1 分も足す
@@ -250,16 +422,85 @@ class HwMonitor:
                     keys.append(k)
         ts = list(buckets.keys())
         series = {k: [round(acc[k][0] / acc[k][1], 2) if k in acc else None for acc in buckets.values()] for k in keys}
-        return {"range": rng, "step": step, "from": int(since), "to": int(now), "t": ts, "series": series}
+        # 線をつなぐ間隔の上限 (これより空いたら記録が無いとみなして切る)。1h の前の部分は 1 分ごとなので広めに
+        max_gap = 150 if rng == "1h" else int(step * 2.5)
+        return {"range": rng, "step": step, "from": int(since), "to": int(now), "t": ts, "series": series, "max_gap": max_gap}
 
     def _pending(self):
         with self.lock:
-            return self.minute, self.wh, self.secs
+            return self.minute, self.wh, self.secs, {k: dict(v) for k, v in self.toks.items()}
 
     def energy_brief(self):
         e = self.energy(days=0)
         return {"price": e["price"], "today_kwh": e["today"]["kwh"], "today_yen": e["today"]["yen"],
                 "month_kwh": e["month"]["kwh"], "month_yen": e["month"]["yen"], "month_forecast_yen": e["month"]["forecast_yen"]}
+
+    def compare(self, rows, ptoks, m, today, month, now):
+        """電気代と、同じだけ推論したときのレンタル (GPU の時間貸し・API の従量) の比べ。
+        rows = 日ごとの [Wh, 測れた秒]、ptoks = まだ書いていない 1 分のトークン数"""
+        first = min((now - datetime.timedelta(days=30)).strftime("%Y-%m-%d"), now.strftime("%Y-%m-01"))
+        tok = {}  # 日 -> 名前 -> [in, proc, out, busy, wh, secs]
+        for d, server, tin, tproc, tout, busy, wh, secs in self.store.tokens(first):
+            tok.setdefault(d, {})[server] = [tin, tproc, tout, busy, wh or 0.0, secs or 0.0]
+        if m is not None and ptoks:
+            d = time.strftime("%Y-%m-%d", time.localtime(m))
+            for server, c in ptoks.items():
+                a = tok.setdefault(d, {}).setdefault(server, [0, 0, 0, 0.0, 0.0, 0.0])
+                a[0] += c["in"]; a[1] += c["proc"]; a[2] += c["out"]; a[3] += c["busy"]
+            # まだ書いていない 1 分の電力量も足す
+            _, pwh, psecs, _ = self._pending()
+            a = tok[d].setdefault("*", [0, 0, 0, 0.0, 0.0, 0.0])
+            a[4] += pwh; a[5] += psecs
+        yen = self.usd_jpy
+
+        def period(dates):
+            wh = secs = busy_any = 0.0   # トークンを数えていた間だけ
+            servers = {}
+            for d in dates:
+                for server, (tin, tproc, tout, busy, s_wh, s_secs) in tok.get(d, {}).items():
+                    if server == "*":
+                        busy_any += busy
+                        wh += s_wh
+                        secs += s_secs
+                        continue
+                    a = servers.setdefault(server, [0, 0, 0, 0.0])
+                    a[0] += tin; a[1] += tproc; a[2] += tout; a[3] += busy
+            busy_any = min(busy_any, secs) if secs else busy_any   # 読む間隔のずれで、数えていた時間を少し超えることがある
+            tin = sum(v[0] for v in servers.values())
+            tout = sum(v[2] for v in servers.values())
+            api_yen, api_missing = 0.0, []
+            srv = []
+            for name, (a_in, a_proc, a_out, a_busy) in servers.items():
+                price = self.api.get(name)
+                cost = (a_in * price[0] + a_out * price[1]) / 1e6 * yen if price else None
+                if price:
+                    api_yen += cost
+                elif a_in or a_out:
+                    api_missing.append(name)
+                srv.append({"server": name, "in": a_in, "proc": a_proc, "out": a_out, "busy_h": round(a_busy / 3600, 3),
+                            "api_yen": None if cost is None else round(cost, 2)})
+            elec = wh / 1000.0 * self.price
+            costs = {"elec": elec, "gpu_busy": busy_any / 3600 * self.gpu_usd_h * yen,
+                     "gpu_full": secs / 3600 * self.gpu_usd_h * yen, "api": api_yen}
+            return {"kwh": round(wh / 1000.0, 3), "hours": round(secs / 3600, 2), "busy_h": round(busy_any / 3600, 3),
+                    "in": tin, "out": tout, "servers": srv, "api_missing": api_missing,
+                    "yen": {k: round(v, 2) for k, v in costs.items()},
+                    # 100 万出力トークンあたり (出力が無ければ null)
+                    "per_mout": {k: (round(v / tout * 1e6, 1) if tout else None) for k, v in costs.items()}}
+
+        days31 = [(now - datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(30, -1, -1)]
+        mdays = sorted(d for d in set(rows) | set(tok) if d.startswith(month))
+        out = {"prices": {"yen_kwh": self.price, "usd_jpy": self.usd_jpy, "gpu_usd_per_hour": self.gpu_usd_h,
+                          "api": {k: {"in": v[0], "out": v[1]} for k, v in self.api.items()}},
+               "periods": [dict(period([today]), key="today", label="今日"),
+                           dict(period(days31[-7:]), key="7d", label="7 日"),
+                           dict(period(mdays), key="month", label="今月"),
+                           dict(period(days31), key="31d", label="31 日")],
+               "days": []}
+        for d in days31:
+            p = period([d])
+            out["days"].append({"date": d, "in": p["in"], "out": p["out"], "busy_h": p["busy_h"], "yen": p["yen"]})
+        return out
 
     def energy(self, days=31):
         now = datetime.datetime.now()
@@ -267,7 +508,7 @@ class HwMonitor:
         month = now.strftime("%Y-%m")
         first = (now - datetime.timedelta(days=400)).strftime("%Y-%m-%d") if days else now.strftime("%Y-%m-01")
         rows = {d: [wh, secs] for d, wh, secs in self.store.days(first)}
-        m, pwh, psecs = self._pending()
+        m, pwh, psecs, ptoks = self._pending()
         if m is not None and pwh:
             d = time.strftime("%Y-%m-%d", time.localtime(m))
             r = rows.setdefault(d, [0.0, 0.0])
@@ -305,6 +546,7 @@ class HwMonitor:
                 a[0] += rows[d][0]
                 a[1] += rows[d][1]
             out["days"] = day_list
+            out["compare"] = self.compare(rows, ptoks, m, today, month, now)
             out["months"] = [{"month": k, "kwh": kwh(v[0]), "yen": yen(v[0] / 1000.0)} for k, v in list(months.items())[-13:]]
         return out
 

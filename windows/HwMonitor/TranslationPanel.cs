@@ -4,8 +4,8 @@ using System.Text.Json;
 
 namespace HwMonitor;
 
-/// <summary>Hermes の思考の和訳を小さく流す欄。翻訳の画面 (hermes_honyaku.py の 8765) の /events (SSE) を読む。
-/// 切れたら 5 秒おきにつなぎ直す。つなぎ直したときに送られてくる直近のターンは、出したことのある区切りを飛ばす。
+/// <summary>Hermes の思考の和訳を小さく流す欄。翻訳の画面 (hermes_honyaku.py の 8765) の /events を HonyakuFeed から受け取る。
+/// つなぎ直したときに送られてくる直近のターンは、出したことのある区切りを飛ばす。
 ///   原文を併記 (ShowSource): 和訳の 1 区切りごとに、翻訳に回した英文 (seg) を下に小さく薄く出す
 ///   原文の欄 (ShowThink)  : 和訳の上に小さな欄を出し、いま考えている英文 (think) を届いたそばから流す (和訳は翻訳を待つぶん遅れる)</summary>
 [DesignerCategory("Code")]
@@ -18,9 +18,7 @@ public sealed class TranslationPanel : Control
     readonly Label thinkHead;
     readonly TextBox thinkBox;
     readonly System.Windows.Forms.Timer thinkTimer = new() { Interval = 250 };
-    readonly Func<string> baseUrl;
     readonly Func<bool> hideTasks;
-    CancellationTokenSource? cts;
 
     // SSE を読む側 (裏のスレッド) だけが触る
     readonly HashSet<(long boot, int turn, int seg)> seen = [];
@@ -42,10 +40,11 @@ public sealed class TranslationPanel : Control
 
     sealed record Entry(int Turn, string Source, string Ja, string? Src, bool Translated, DateTime At);
 
-    public TranslationPanel(Func<string> baseUrl, Func<bool> hideTasks)
+    public TranslationPanel(HonyakuFeed feed, Func<bool> hideTasks)
     {
-        this.baseUrl = baseUrl;
         this.hideTasks = hideTasks;
+        feed.Event += OnEvent;
+        feed.Status += (text, ok) => SetHead("和訳 (Hermes の思考)" + (text == "" ? "" : "・" + text), ok || text.StartsWith("つないで") ? Theme.Muted : Theme.Warn);
         BackColor = Theme.Back;
         head = new Label { Dock = DockStyle.Top, Height = 20, Text = "和訳 (Hermes の思考)", ForeColor = Theme.Muted, Font = Theme.Ui, Padding = new Padding(6, 3, 0, 0) };
         box = new RichTextBox
@@ -95,54 +94,10 @@ public sealed class TranslationPanel : Control
         }
     }
 
-    public void Start()
-    {
-        Stop();
-        cts = new CancellationTokenSource();
-        _ = Task.Run(() => Loop(cts.Token));
-    }
-
-    public void Stop() { cts?.Cancel(); cts = null; }
-
-    async Task Loop(CancellationToken ct)
-    {
-        using var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                SetHead("和訳 (Hermes の思考)・つないでいます…", Theme.Muted);
-                using var req = new HttpRequestMessage(HttpMethod.Get, baseUrl() + "/events");
-                req.Headers.Accept.ParseAdd("text/event-stream");
-                using var res = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-                res.EnsureSuccessStatusCode();
-                SetHead("和訳 (Hermes の思考)", Theme.Muted);
-                using var reader = new StreamReader(await res.Content.ReadAsStreamAsync(ct));
-                // 30 秒なにも来なければ切れたとみなす (サーバーは 15 秒ごとに ping を送る)
-                while (!ct.IsCancellationRequested)
-                {
-                    var read = reader.ReadLineAsync(ct).AsTask();
-                    if (await Task.WhenAny(read, Task.Delay(30000, ct)) != read) break;
-                    var line = await read;
-                    if (line == null) break;
-                    if (line.StartsWith("data: ")) OnEvent(line[6..]);
-                }
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
-            catch (Exception e)
-            {
-                SetHead("和訳 (Hermes の思考)・つながりません: " + e.Message, Theme.Warn);
-            }
-            try { await Task.Delay(5000, ct); } catch { return; }
-        }
-    }
-
     static string Str(JsonElement ev, string name) => ev.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
 
-    void OnEvent(string json)
+    void OnEvent(JsonElement ev)
     {
-        JsonElement ev;
-        try { ev = JsonDocument.Parse(json).RootElement; } catch { return; }
         string type = Str(ev, "type");
         if (type == "status" && ev.TryGetProperty("boot", out var b) && b.TryGetInt64(out var bt) && bt != boot)
         {
@@ -284,7 +239,7 @@ public sealed class TranslationPanel : Control
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { Stop(); thinkTimer.Dispose(); }
+        if (disposing) thinkTimer.Dispose();
         base.Dispose(disposing);
     }
 }
