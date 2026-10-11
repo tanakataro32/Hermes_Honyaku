@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 
@@ -7,7 +8,9 @@ namespace HwMonitor;
 /// <summary>Hermes の思考の和訳を小さく流す欄。翻訳の画面 (hermes_honyaku.py の 8765) の /events を HonyakuFeed から受け取る。
 /// つなぎ直したときに送られてくる直近のターンは、出したことのある区切りを飛ばす。
 ///   原文を併記 (ShowSource): 和訳の 1 区切りごとに、翻訳に回した英文 (seg) を下に小さく薄く出す
-///   原文の欄 (ShowThink)  : 和訳の上に小さな欄を出し、いま考えている英文 (think) を届いたそばから流す (和訳は翻訳を待つぶん遅れる)</summary>
+///   原文の欄 (ShowThink)  : 和訳の上に小さな欄を出し、いま考えている英文 (think) を届いたそばから流す (和訳は翻訳を待つぶん遅れる)
+///   DeepL               : 訳されていない英文 (翻訳の中継が翻訳を止めている・訳せなかった区切り) を、
+///                          自動 (AutoTranslate が true の間に新しく届いた分) か、行のクリック (その区切りだけ) で DeepL に訳してもらう</summary>
 [DesignerCategory("Code")]
 public sealed class TranslationPanel : Control
 {
@@ -41,8 +44,33 @@ public sealed class TranslationPanel : Control
     readonly List<Entry> entries = [];
     int lastTurn = -1;
     bool showSource;
+    // DeepL に頼む待ち行列と、頼んでいる最中か
+    readonly List<Entry> queue = [];
+    readonly System.Windows.Forms.Timer deeplTimer = new() { Interval = 800 };
+    bool deeplBusy;
 
-    sealed record Entry(int Turn, string Source, string Ja, string? Src, bool Translated, DateTime At);
+    /// <summary>1 区切り。Kind: ok = 翻訳の中継が訳した / none = 中継が翻訳を止めている (英文のまま) / bad = 中継が訳せなかった / deepl = DeepL で訳した</summary>
+    sealed class Entry
+    {
+        public int Turn;
+        public string Source = "";
+        public string Text = "";      // 欄に出す文 (訳文、または英文)
+        public string? Orig;          // 英文 (併記と DeepL に渡す用)
+        public string Kind = "ok";
+        public DateTime At;
+        public bool Pending;          // DeepL に頼んでいる最中
+        public int Start, Len;        // 欄の中の位置 (クリックでどの区切りか調べる)
+        public bool Untranslated => Kind is "none" or "bad";
+    }
+
+    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public DeepLService? DeepL { get; set; }
+    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public Func<bool> AutoTranslate { get; set; } = () => false;
+    /// <summary>自動の翻訳を止めた (上限・失敗)。理由を渡す</summary>
+    public event Action<string>? AutoStopped;
+    /// <summary>行をクリックしたが DeepL のキーが無い</summary>
+    public event Action? NeedKey;
 
     public TranslationPanel(HonyakuFeed feed, Func<bool> hideTasks)
     {
@@ -76,6 +104,10 @@ public sealed class TranslationPanel : Control
         Controls.Add(thinkFrame);
         Controls.Add(head);
         thinkTimer.Tick += (_, _) => DrawThink();
+        deeplTimer.Tick += async (_, _) => await PumpDeepL();
+        deeplTimer.Start();
+        box.MouseUp += OnBoxClick;
+        new ToolTip { InitialDelay = 600 }.SetToolTip(box, "英文の行をクリックすると、その区切りだけ DeepL で訳します (上の帯の「設定…」でキーを入れたとき)");
     }
 
     /// <summary>和訳の下に原文 (英文の区切り) を出すか。切り替えたら、出してある分も描き直す</summary>
@@ -83,7 +115,7 @@ public sealed class TranslationPanel : Control
     public bool ShowSource
     {
         get => showSource;
-        set { if (showSource == value) return; showSource = value; Redraw(); }
+        set { if (showSource == value) return; showSource = value; Redraw(true); }
     }
 
     /// <summary>いま考えている英文の欄を出すか</summary>
@@ -173,11 +205,12 @@ public sealed class TranslationPanel : Control
                 turns.TryGetValue(n, out var info);
                 if (info.task && hideTasks()) return;
                 bool ok = ev.TryGetProperty("ok", out var o) && o.ValueKind == JsonValueKind.True;
-                bool translated = ok && how != "en" && how != "interrupted";
+                string text = Str(ev, "text").Trim();
                 segSrc.Remove((n, seg), out var src);
-                if (how == "none") src = null;   // 翻訳を止めているときは訳文 = 原文なので、併記しない
-                // 訳せなかった区切りは和訳の欄に原文がそのまま出るので、併記はしない
-                Add(new Entry(n, info.source, Str(ev, "text").Trim(), translated ? src : null, translated, DateTime.Now));
+                // none = 翻訳を止めている (text が英文そのもの)。bad = 訳せなかった (英文は src)
+                string kind = how == "none" ? "none" : ok && how != "en" && how != "interrupted" ? "ok" : "bad";
+                Add(new Entry { Turn = n, Source = info.source, Text = text, Orig = kind == "none" ? text : (src ?? (kind == "bad" ? text : null)),
+                                Kind = kind, At = DateTime.Now });
                 break;
         }
     }
@@ -192,16 +225,27 @@ public sealed class TranslationPanel : Control
 
     void Add(Entry e)
     {
-        if (IsDisposed || !IsHandleCreated || e.Ja == "") return;
+        if (IsDisposed || !IsHandleCreated || e.Text == "") return;
         BeginInvoke(() =>
         {
             entries.Add(e);
-            if (entries.Count > MaxEntries) { entries.RemoveRange(0, entries.Count - MaxEntries); Redraw(); return; }
-            bool atEnd = box.SelectionStart >= box.TextLength - 1;
+            // 自動の翻訳: 押している間に新しく届いた、訳されていない区切りだけ
+            if (e.Untranslated && AutoTranslate() && DeepL != null && !string.IsNullOrEmpty(e.Orig))
+            {
+                if (DeepL.CanSpend(e.Orig.Length + queue.Sum(q => q.Orig!.Length))) { e.Pending = true; queue.Add(e); }
+                else AutoStopped?.Invoke(DeepL.HasKey ? "DeepL の今月の上限に近いので止めました" : "DeepL のキーがありません");
+            }
+            if (entries.Count > MaxEntries) { entries.RemoveRange(0, entries.Count - MaxEntries); Redraw(true); return; }
+            bool atEnd = AtEnd();
             Write(e);
-            if (atEnd) { box.SelectionStart = box.TextLength; box.ScrollToCaret(); }
+            if (atEnd) ScrollToEnd();
         });
     }
+
+    // いちばん下が見えているか (見ていれば新しい区切りで下へ送る。上を読んでいるときは動かさない)
+    bool AtEnd() => box.TextLength == 0 || box.GetPositionFromCharIndex(Math.Max(0, box.TextLength - 1)).Y <= box.ClientSize.Height;
+
+    void ScrollToEnd() { box.SelectionStart = box.TextLength; box.ScrollToCaret(); }
 
     void Write(Entry e)
     {
@@ -213,25 +257,100 @@ public sealed class TranslationPanel : Control
             box.SelectionFont = Theme.Small;
             box.AppendText((box.TextLength > 0 ? "\n" : "") + $"#{e.Turn} {e.Source}  {e.At:HH:mm}\n");
         }
-        box.SelectionColor = e.Translated ? Theme.Ink : Theme.Warn;  // 訳せなかった区切りは原文のまま黄色
+        e.Start = box.TextLength;
+        // 色: 訳文 = 白、英文のまま = 薄い白 (クリックで訳せる)、訳せなかった = 黄、DeepL に頼んでいる最中 = 灰
+        box.SelectionColor = e.Pending ? Theme.Muted : e.Kind == "bad" ? Theme.Warn : e.Kind == "none" ? Theme.EnInk : Theme.Ink;
         box.SelectionFont = box.Font;
-        box.AppendText(e.Ja + "\n");
-        if (showSource && !string.IsNullOrEmpty(e.Src))
+        box.AppendText(e.Text + (e.Pending ? "  (DeepL…)" : e.Kind == "deepl" ? "  ᴰ" : "") + "\n");
+        if (showSource && (e.Kind is "ok" or "deepl") && !string.IsNullOrEmpty(e.Orig) && e.Orig != e.Text)
         {
             box.SelectionColor = Theme.Muted;
             box.SelectionFont = Theme.Small;
-            box.AppendText(e.Src + "\n");
+            box.AppendText(e.Orig + "\n");
+        }
+        e.Len = box.TextLength - e.Start;
+    }
+
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+    const int WM_SETREDRAW = 0x0B, EM_LINESCROLL = 0xB6;
+
+    /// <summary>全部描き直す。keepView = 上を読んでいるときはその位置 (いちばん上に見えていた区切り) を保つ</summary>
+    void Redraw(bool keepView = false)
+    {
+        if (!IsHandleCreated) return;
+        bool atEnd = AtEnd();
+        Entry? top = null;
+        if (keepView && !atEnd)
+        {
+            int ci = box.GetCharIndexFromPosition(new Point(2, 2));
+            top = entries.FirstOrDefault(x => ci < x.Start + x.Len);
+        }
+        SendMessage(box.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+        try
+        {
+            box.Clear();
+            lastTurn = -1;
+            foreach (var e in entries) Write(e);
+            if (top != null)
+            {
+                box.SelectionStart = 0;
+                box.ScrollToCaret();
+                SendMessage(box.Handle, EM_LINESCROLL, IntPtr.Zero, box.GetLineFromCharIndex(top.Start));
+            }
+            else ScrollToEnd();
+        }
+        finally
+        {
+            SendMessage(box.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+            box.Invalidate();
         }
     }
 
-    void Redraw()
+    // 行のクリック: 訳されていない区切りなら、それだけ DeepL に頼む (文字を選んでいるとき = コピーしたいときは何もしない)
+    void OnBoxClick(object? sender, MouseEventArgs ev)
     {
-        if (!IsHandleCreated) return;
-        box.Clear();
-        lastTurn = -1;
-        foreach (var e in entries) Write(e);
-        box.SelectionStart = box.TextLength;
-        box.ScrollToCaret();
+        if (ev.Button != MouseButtons.Left || box.SelectionLength > 0) return;
+        int ci = box.GetCharIndexFromPosition(ev.Location);
+        var e = entries.FirstOrDefault(x => ci >= x.Start && ci < x.Start + x.Len);
+        if (e == null || !e.Untranslated || e.Pending || string.IsNullOrEmpty(e.Orig)) return;
+        if (DeepL == null || !DeepL.HasKey) { NeedKey?.Invoke(); return; }
+        if (!DeepL.CanSpend(e.Orig.Length)) { AutoStopped?.Invoke("DeepL の今月の上限に近いので訳しません"); return; }
+        e.Pending = true;
+        queue.Insert(0, e);   // クリックした分を先に
+        Redraw(true);
+    }
+
+    // 待ち行列から 25 区切り・8000 字までまとめて頼む
+    async Task PumpDeepL()
+    {
+        if (deeplBusy || queue.Count == 0 || DeepL == null) return;
+        deeplBusy = true;
+        try
+        {
+            var batch = new List<Entry>();
+            int chars = 0;
+            foreach (var e in queue)
+            {
+                if (batch.Count >= 25 || (batch.Count > 0 && chars + e.Orig!.Length > 8000)) break;
+                batch.Add(e);
+                chars += e.Orig!.Length;
+            }
+            queue.RemoveRange(0, batch.Count);
+            var res = await DeepL.Translate([.. batch.Select(e => e.Orig!)]);
+            for (int i = 0; i < batch.Count; i++)
+            {
+                batch[i].Pending = false;
+                if (res != null && i < res.Count) { batch[i].Text = res[i].Trim(); batch[i].Kind = "deepl"; }
+            }
+            if (res == null)
+            {
+                foreach (var e in queue) e.Pending = false;
+                queue.Clear();
+                AutoStopped?.Invoke("DeepL: " + DeepL.Error);
+            }
+            Redraw(true);
+        }
+        finally { deeplBusy = false; }
     }
 
     void DrawThink()
@@ -256,7 +375,7 @@ public sealed class TranslationPanel : Control
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) thinkTimer.Dispose();
+        if (disposing) { thinkTimer.Dispose(); deeplTimer.Dispose(); }
         base.Dispose(disposing);
     }
 }

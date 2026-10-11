@@ -9,6 +9,7 @@ static class Theme
     public static readonly Color Ink = Color.FromArgb(0xcf, 0xe8, 0xe4);
     public static readonly Color Head = Color.White;
     public static readonly Color Muted = Color.FromArgb(0x8a, 0x9a, 0xa0);
+    public static readonly Color EnInk = Color.FromArgb(0xa8, 0xbc, 0xb8);   // 訳していない英文 (クリックで DeepL に訳せる)
     public static readonly Color Grid = Color.FromArgb(0x2a, 0x35, 0x3c);
     public static readonly Color Edge = Color.FromArgb(0x4a, 0x57, 0x62);
     public static readonly Color Good = Color.FromArgb(0x35, 0xe0, 0x5a);

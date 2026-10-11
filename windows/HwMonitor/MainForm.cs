@@ -25,6 +25,11 @@ public sealed class MainForm : Form
     readonly ToolStripButton showJa = new("和訳") { CheckOnClick = true };
     readonly ToolStripButton showSrc = new("原文を併記") { CheckOnClick = true, ToolTipText = "和訳の 1 区切りごとに、翻訳した英文を下に小さく出す" };
     readonly ToolStripButton showThink = new("原文の欄") { CheckOnClick = true, ToolTipText = "和訳の上に、いま考えている英文を届いたそばから流す (和訳より早い)" };
+    readonly ToolStripButton autoDeepL = new("DeepL") { CheckOnClick = true,
+        ToolTipText = "押している間、新しく届いた英文 (訳されていない区切り) を DeepL で訳す。\n押していなくても、英文の行をクリックすればその区切りだけ訳す。\nキーは「設定…」で入れる" };
+    readonly ToolStripLabel deeplUsage = new() { Alignment = ToolStripItemAlignment.Right };
+    readonly DeepLService deepl;
+    int usageTicks;
     readonly ToolStripLabel status = new() { Alignment = ToolStripItemAlignment.Right };
     readonly System.Windows.Forms.Timer nowTimer = new() { Interval = 2000 };
     readonly System.Windows.Forms.Timer slowTimer = new() { Interval = 2000 };   // 履歴・電気代 (間隔は RefreshSlow で期間ごとに)
@@ -37,6 +42,12 @@ public sealed class MainForm : Form
         api = new HwmonClient(() => settings.HwmonBase);
         feed = new HonyakuFeed(() => settings.HonyakuBase);
         translation = new TranslationPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill };
+        deepl = new DeepLService(settings);
+        translation.DeepL = deepl;
+        translation.AutoTranslate = () => settings.AutoTranslate;
+        translation.AutoStopped += why => { autoDeepL.Checked = false; deeplUsage.Text = why + "  "; deeplUsage.ForeColor = Theme.Warn; };
+        translation.NeedKey += () => OpenSettings("DeepL で訳すには、DeepL API のキーを入れてください");
+        deepl.Changed += ShowUsage;
         slots = new SlotPanel(feed.Turns) { Dock = DockStyle.Top, Height = 0 };
 
         Text = "llmsv ハードウェアモニタ";
@@ -66,9 +77,23 @@ public sealed class MainForm : Form
         showSrc.CheckedChanged += (_, _) => { settings.ShowSource = translation.ShowSource = showSrc.Checked; settings.Save(); };
         showThink.Checked = settings.ShowThink;
         showThink.CheckedChanged += (_, _) => { settings.ShowThink = translation.ShowThink = showThink.Checked; settings.Save(); };
+        autoDeepL.Checked = settings.AutoTranslate;
+        autoDeepL.CheckedChanged += (_, _) =>
+        {
+            if (autoDeepL.Checked && !deepl.HasKey)
+            {
+                autoDeepL.Checked = false;
+                OpenSettings("DeepL で訳すには、DeepL API のキーを入れてください");
+                return;
+            }
+            settings.AutoTranslate = autoDeepL.Checked;
+            settings.Save();
+            if (autoDeepL.Checked) _ = deepl.RefreshUsage();
+        };
         var setup = new ToolStripButton("設定…");
         setup.Click += (_, _) => OpenSettings();
-        bar.Items.AddRange([tabGraph, tabEnergy, tabCost, new ToolStripSeparator(), topMost, showJa, showSrc, showThink, new ToolStripSeparator(), setup, status]);
+        bar.Items.AddRange([tabGraph, tabEnergy, tabCost, new ToolStripSeparator(), topMost, showJa, showSrc, showThink, autoDeepL,
+                            new ToolStripSeparator(), setup, status, deeplUsage]);
 
         // 真ん中 (グラフ / 電気代) と下 (和訳) は境目をドラッグで動かせる
         split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, BackColor = Theme.Grid, SplitterWidth = 4 };
@@ -96,7 +121,12 @@ public sealed class MainForm : Form
         };
 
         nowTimer.Tick += async (_, _) => await RefreshNow();
-        slowTimer.Tick += async (_, _) => await RefreshSlow();
+        slowTimer.Tick += async (_, _) =>
+        {
+            await RefreshSlow();
+            // DeepL の使用量は 5 分ごとに聞き直す (間はこちらで頼んだ分を足している)
+            if (deepl.HasKey && ++usageTicks >= 150) { usageTicks = 0; await deepl.RefreshUsage(); }
+        };
         Load += async (_, _) =>
         {
             TopMost = settings.TopMost;
@@ -108,6 +138,7 @@ public sealed class MainForm : Form
             slowTimer.Start();
             await RefreshNow();
             await RefreshSlow();
+            await deepl.RefreshUsage();
         };
         FormClosing += (_, _) =>
         {
@@ -201,24 +232,46 @@ public sealed class MainForm : Form
         finally { busyEnergy = false; }
     }
 
-    void OpenSettings()
+    // 上の帯の右: DeepL の今月の使用量 (上限の 8 割を超えたら黄)
+    void ShowUsage()
+    {
+        if (!deepl.HasKey) { deeplUsage.Text = ""; return; }
+        if (deepl.Error != "") { deeplUsage.Text = "DeepL: " + deepl.Error + "  "; deeplUsage.ForeColor = Theme.Warn; return; }
+        if (deepl.Used < 0) { deeplUsage.Text = ""; return; }
+        static string Man(long v) => $"{v / 10000.0:0.#}万";
+        deeplUsage.Text = $"DeepL 今月 {Man(deepl.Used)}/{Man(deepl.Cap)}字  ";
+        deeplUsage.ForeColor = deepl.Used >= deepl.Cap * 0.8 ? Theme.Warn : Theme.Ink;
+    }
+
+    void OpenSettings() => OpenSettings(null);
+
+    void OpenSettings(string? message)
     {
         using var f = new Form
         {
             Text = "設定", FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
-            StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(360, 190), Font = Theme.Ui, TopMost = TopMost,
+            StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(360, 300), Font = Theme.Ui, TopMost = TopMost,
         };
         var host = new TextBox { Text = settings.Host, Left = 150, Top = 14, Width = 190 };
         var hw = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = settings.HwmonPort, Left = 150, Top = 46, Width = 90 };
         var hy = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = settings.HonyakuPort, Left = 150, Top = 78, Width = 90 };
         var hide = new CheckBox { Text = "背景タスクの和訳を出さない", Checked = settings.HideTasks, Left = 16, Top = 112, Width = 320 };
-        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 180, Top = 148, Width = 80 };
-        var cancel = new Button { Text = "キャンセル", DialogResult = DialogResult.Cancel, Left = 266, Top = 148, Width = 80 };
+        // DeepL: キーは %APPDATA%\HwMonitor\settings.json にだけ置く。上限は万字 (0 = DeepL の上限まで)
+        var key = new TextBox { Text = settings.DeepLKey, Left = 150, Top = 150, Width = 190, UseSystemPasswordChar = true };
+        var cap = new NumericUpDown { Minimum = 0, Maximum = 10000, Value = Math.Min(10000, settings.DeepLCap / 10000), Left = 150, Top = 182, Width = 90 };
+        var note = new Label { Left = 16, Top = 214, Width = 330, Height = 32, ForeColor = SystemColors.GrayText,
+            Text = "DeepL API Free (月 50 万字まで無料) のキー。上限 0 = DeepL の上限まで。\nキーはこの PC の設定ファイルにだけ保存します" };
+        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 180, Top = 258, Width = 80 };
+        var cancel = new Button { Text = "キャンセル", DialogResult = DialogResult.Cancel, Left = 266, Top = 258, Width = 80 };
         f.Controls.AddRange([
             new Label { Text = "llmsv のアドレス", Left = 16, Top = 17, Width = 130 }, host,
             new Label { Text = "モニタのポート", Left = 16, Top = 49, Width = 130 }, hw,
             new Label { Text = "翻訳の画面のポート", Left = 16, Top = 81, Width = 130 }, hy,
-            hide, ok, cancel]);
+            hide,
+            new Label { Text = "DeepL API のキー", Left = 16, Top = 153, Width = 130 }, key,
+            new Label { Text = "月の上限 (万字)", Left = 16, Top = 185, Width = 130 }, cap,
+            note, ok, cancel]);
+        if (message != null) { f.Text = "設定 — " + message; key.Select(); }
         f.AcceptButton = ok;
         f.CancelButton = cancel;
         if (f.ShowDialog(this) != DialogResult.OK) return;
@@ -226,6 +279,9 @@ public sealed class MainForm : Form
         settings.HwmonPort = (int)hw.Value;
         settings.HonyakuPort = (int)hy.Value;
         settings.HideTasks = hide.Checked;
+        settings.DeepLKey = key.Text.Trim();
+        settings.DeepLCap = (long)cap.Value * 10000;
+        _ = deepl.RefreshUsage();
         settings.Save();
         ApplyTranslation();
         feed.Start();   // 接続先が変わったかもしれないのでつなぎ直す
