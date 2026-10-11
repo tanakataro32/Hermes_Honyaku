@@ -13,6 +13,10 @@ public sealed class Settings
     public bool ShowTranslation { get; set; } = true;
     public bool ShowSource { get; set; }               // 和訳の下に原文 (英文の区切り) を併記
     public bool ShowThink { get; set; } = true;        // 和訳の上に、いま考えている英文の欄
+    // DeepL (翻訳の中継が翻訳を止めているときなどに、見ている間だけ英文を訳す)。キーはこのファイルにだけ置く (リポジトリには入れない)
+    public string DeepLKey { get; set; } = "";
+    public bool AutoTranslate { get; set; }              // 押している間、新しく届いた英文を訳す
+    public long DeepLCap { get; set; }                   // 自分で決めた月の上限 (文字)。0 = DeepL の上限まで
     public string Range { get; set; } = "1h";
     public string Group { get; set; } = "p";
     public string Tab { get; set; } = "graph";
