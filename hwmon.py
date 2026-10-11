@@ -189,15 +189,18 @@ class SlotWatcher:
                         if sl.get("id_task") != st["task"]:  # 新しい要求
                             # started = 新しい要求を初めて見た時刻 (アプリが翻訳の中継のターンの始まりと時刻で結ぶのに使う。0.5 秒ほど遅れる)
                             st.update(task=sl.get("id_task"), dec=0, proc=0, prompt_added=False, tps=0.0, p0=0, d0=0,
-                                      started=time.time(), proc_t=time.time())
+                                      started=time.time(), proc_t=time.time(), pp_rate=0.0, pp_span=0.0)
                         d_out = max(0, dec - st["dec"])
                         c["out"] += d_out
                         d_proc = max(0, pp - st["proc"])
                         if d_proc:
                             c["proc"] += d_proc
                             t_now = time.time()
-                            self.spans.append((name, st.get("proc_t") or t_now, t_now, d_proc))  # 前に増えた時 (または要求を受けた時) から今まで
+                            a0 = st.get("proc_t") or t_now
+                            self.spans.append((name, a0, t_now, d_proc))  # 前に増えた時 (または要求を受けた時) から今まで
                             st["proc_t"] = t_now
+                            if t_now - a0 >= 0.5:  # この枠の直前のバッチの速さ (読んでいる最中のグラフの右端の見込みに使う)
+                                st["pp_rate"], st["pp_span"] = d_proc / (t_now - a0), t_now - a0
                         if not st["prompt_added"] and npt > 0:
                             # 初めて見えたときの量。llama.cpp の版によって n_prompt_tokens に生成した分が入るので、
                             # そのとき生成済みの分 (d0) を引いて「要求の入力」にする (API の入力に当たる量。キャッシュの分も含む)
@@ -226,6 +229,22 @@ class SlotWatcher:
             b, self.busy_any = self.busy_any, 0.0
             spans, self.spans = self.spans, []
         return out, b, spans
+
+    def reading(self):
+        """いま読み込み (プロンプトの処理) の最中の枠: {名前: [(前に数が増えた時, その枠の直前のバッチの速さ), ...]}。
+        数は 2048 トークン (1 バッチ) ごとにしか増えないので、増えるまでの間はグラフの右端がゼロになる。アプリはこの見込みで右端を描く。
+        この要求で 1 バッチ以上読み進んだ枠だけ (ほかの枠の後ろで待っているだけの枠は入れない)。
+        直前のバッチの 2 倍 (最低 15 秒) たっても増えない枠は、ほかの枠を待っているとみなして外す"""
+        out = {}
+        now = time.time()
+        with self.lock:
+            for (name, _), st in self.slots.items():
+                if not (st["processing"] and st["decoded"] == 0 and st.get("pp_rate")):
+                    continue
+                if now - st["proc_t"] > max(2 * st.get("pp_span", 0), 15):
+                    continue
+                out.setdefault(name, []).append((st["proc_t"], st["pp_rate"]))
+        return out
 
     def view(self):
         with self.lock:
@@ -481,7 +500,9 @@ class HwMonitor:
         series = {k: [round(acc[k][0] / acc[k][1], 2) if k in acc else None for acc in buckets.values()] for k in keys}
         # 線をつなぐ間隔の上限 (これより空いたら記録が無いとみなして切る)。1h の前の部分は 1 分ごとなので広めに
         max_gap = 150 if filled else max(int(step * 2.5), 6)
-        return {"range": rng, "step": step, "from": int(since), "to": int(now), "t": ts, "series": series, "max_gap": max_gap}
+        # 読み込みの最中の見込み (まだ数が増えていない分。右端をゼロにしないため。記録の値ではない)
+        live = {f"r:{name} 読込": [{"from": round(f, 1), "rate": round(r, 1)} for f, r in lst] for name, lst in self.slots.reading().items()}
+        return {"range": rng, "step": step, "from": int(since), "to": int(now), "t": ts, "series": series, "max_gap": max_gap, "live": live}
 
     def _pending(self):
         with self.lock:
