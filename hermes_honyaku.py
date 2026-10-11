@@ -50,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -2707,7 +2707,10 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 .mob .sysm .trow .hsbtn{width:42px;height:28px}
 .mob .sysm .trow .hsbtn svg{width:16px;height:16px}
 /* ツリーを閉じた GPU は 1 行の要約 (温度・VRAM・電力) を残す */
-.sysm .gsum{margin-left:auto;display:inline-flex;gap:9px;white-space:nowrap;color:#cfe8e4}
+.sysm .gsum{margin-left:auto;display:inline-flex;gap:9px;white-space:nowrap;color:#cfe8e4;font-variant-numeric:tabular-nums}
+/* 項目ごとに幅を決めて右寄せ (GPU が 2 枚以上でも、温度・VRAM・電力の桁が縦にそろう。はみ出す値はそのぶん伸びる) */
+.sysm .gsum>span{display:inline-block;text-align:right}
+.sysm .gsum .gt{min-width:5ch}.sysm .gsum .gm{min-width:8ch}.sysm .gsum .gp{min-width:4ch}
 .sysm .gsum .warn{color:var(--warn)}.sysm .gsum .hot{color:var(--bad)}
 .sysm .gline{display:flex;align-items:center;gap:6px;margin-left:10px;min-height:22px}
 .sysm .gline b{color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -3266,11 +3269,11 @@ function gpuNode(g,i){
 function gpuSum(g){
  const sp=document.createElement('span');sp.className='gsum';
  const mp=g.max_power||250;
- const part=(text,pct,warn,hot)=>{const e=document.createElement('span');e.textContent=text;
-  if(pct!==null&&hot!==null&&pct>=hot)e.className='hot';else if(pct!==null&&warn!==null&&pct>=warn)e.className='warn';sp.appendChild(e)};
- part(g.temp+'℃',g.temp/90*100,75/90*100,85/90*100);
- part((g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G',g.mem_total?g.mem_used/g.mem_total*100:null,95,null);
- part(g.power.toFixed(0)+'W',mp?g.power/mp*100:null,null,null);
+ const part=(cls,text,pct,warn,hot)=>{const e=document.createElement('span');e.textContent=text;
+  if(pct!==null&&hot!==null&&pct>=hot)cls+=' hot';else if(pct!==null&&warn!==null&&pct>=warn)cls+=' warn';e.className=cls;sp.appendChild(e)};
+ part('gt',g.temp+'℃',g.temp/90*100,75/90*100,85/90*100);
+ part('gm',(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G',g.mem_total?g.mem_used/g.mem_total*100:null,95,null);
+ part('gp',g.power.toFixed(0)+'W',mp?g.power/mp*100:null,null,null);
  return sp}
 // ---- hstop ボタン: GPU 行の右端。黄 = hstop (裏の作業だけ) / 赤 = hstop --all (本体も起動し直す) ----
 const IC_RESET='<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">'
