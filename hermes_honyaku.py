@@ -50,7 +50,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.6.3"
+APP_VERSION = "1.7.0"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -1145,6 +1145,22 @@ class TokenMeter:
 # GPU 温度モニター (ヘッダーのメータ用)
 # --------------------------------------------------------------------------
 GPU_SMI_QUERY = ["--query-gpu=index,name,temperature.gpu,power.draw,memory.used,memory.total", "--format=csv,noheader,nounits"]
+# 性能メーター用 (7 列目以降): いまの SM クロック・最大 SM クロック・使用率・P ステート・電力上限・クロックを下げている理由。
+# 古いドライバなどで 1 つでも読めない項目があると nvidia-smi 全体が失敗するので、そのときは上の基本の項目だけに戻す
+GPU_SMI_QUERY_EXT = ["--query-gpu=index,name,temperature.gpu,power.draw,memory.used,memory.total,"
+                     "clocks.sm,clocks.max.sm,utilization.gpu,pstate,power.limit,clocks_throttle_reasons.active",
+                     "--format=csv,noheader,nounits"]
+# clocks_throttle_reasons.active のビット → 画面に出す理由 (gpu_idle・アプリのクロック指定は「絞られている」に入れない)
+GPU_THROTTLE_BITS = [(0x4, "power", "電力の上限"), (0x8, "hw", "ハードの減速"), (0x20, "thermal", "温度"),
+                     (0x40, "thermal", "温度 (ハード)"), (0x80, "hw", "電源の減速"), (0x10, "sync", "同期ブースト")]
+
+
+def _smi_num(v):
+    """nvidia-smi の数値 (N/A・[Not Supported] は None)"""
+    try:
+        return float(v)
+    except ValueError:
+        return None
 
 
 def short_gpu_label(name):
@@ -1182,12 +1198,20 @@ class GpuMonitor:
         self.default_max = power_max
         self.hwm = {}  # GPU index -> これまでの観測最大電力 (高水位)
         self.no_smi = shutil.which("nvidia-smi") is None
+        self.ext = True  # 性能メーター用の項目も読む (読めなければ False にして基本の項目だけ)
         if not self.no_smi:
             self.thread = threading.Thread(target=self._loop, name="gpu-monitor", daemon=True)
             self.thread.start()
 
     def _query(self):
-        r = subprocess.run(["nvidia-smi"] + GPU_SMI_QUERY, capture_output=True, text=True, timeout=self.timeout)
+        if self.ext:
+            r = subprocess.run(["nvidia-smi"] + GPU_SMI_QUERY_EXT, capture_output=True, text=True, timeout=self.timeout)
+            if r.returncode != 0:
+                self.ext = False
+                log.info("gpu monitor: クロックなどが読めないので、性能メーターなしで続けます: %s",
+                         (r.stderr or r.stdout or "").strip()[:200])
+        if not self.ext:
+            r = subprocess.run(["nvidia-smi"] + GPU_SMI_QUERY, capture_output=True, text=True, timeout=self.timeout)
         if r.returncode != 0:
             raise RuntimeError((r.stderr or "").strip()[:200] or f"nvidia-smi {r.returncode}")
         out = []
@@ -1199,9 +1223,22 @@ class GpuMonitor:
                     power = float(parts[3])
                 except ValueError:
                     power = 0.0  # 消費電力センサーのないカード (N/A)
-                out.append({"index": int(parts[0]), "name": parts[1], "label": short_gpu_label(parts[1]),
-                            "temp": int(parts[2]), "power": power,
-                            "mem_used": float(parts[4]), "mem_total": float(parts[5])})
+                g = {"index": int(parts[0]), "name": parts[1], "label": short_gpu_label(parts[1]),
+                     "temp": int(parts[2]), "power": power,
+                     "mem_used": float(parts[4]), "mem_total": float(parts[5])}
+                if len(parts) >= 12:
+                    g["clock"] = _smi_num(parts[6])
+                    g["clock_max"] = _smi_num(parts[7])
+                    g["util"] = _smi_num(parts[8])
+                    g["pstate"] = parts[9]
+                    g["power_limit"] = _smi_num(parts[10])
+                    try:
+                        bits = int(parts[11], 16)
+                    except ValueError:
+                        bits = 0
+                    g["idle"] = bool(bits & 0x1)
+                    g["throttle"] = [{"kind": k, "text": t} for b, k, t in GPU_THROTTLE_BITS if bits & b]
+                out.append(g)
         # 電力バーの最大値 = 既定値と観測高水位の大きい方 (超えたらリアルタイムで最大値が上がる)
         for g in out:
             i = g["index"]
@@ -2461,6 +2498,10 @@ background:linear-gradient(90deg,#333e46,#242d34);border:1px solid;border-color:
 .sysm .bar.stk .fill{flex:none}
 .sysm .bar .fill2{display:block;flex:none;height:100%;width:0%;background:#3d6f9e;transition:width .25s} /* RAM のキャッシュ (mmap したモデルなど) */
 .sysm .leaf.warn .bval{color:var(--warn)}
+/* GPU の性能メーターは多いほど良いので、位置で色を変えず単色 (緑)。絞られているときだけ黄 (電力の上限) / 赤 (温度・ハードの減速) */
+.sysm .leaf.perf .bar .fill{background:#35e05a}
+.sysm .leaf.perf.warn .bar .fill{background:var(--warn)}
+.sysm .leaf.perf.hot .bar .fill{background:var(--bad)}
 .sysm .leaf.hot .bval{color:var(--bad)}
 /* システム情報パネル (左列。スクロールしても固定) */
 /* 左 30% (上下に固定): 接続 / コンテキスト / システム (GPU・CPU・RAM・ディスク) / 原文の最新行 (空いた高さいっぱい) */
@@ -2706,9 +2747,9 @@ background:linear-gradient(90deg,var(--bar1),var(--bar2));border:2px solid;borde
 .mob #mgpu .leaf .bl{width:44px}
 .mob .sysm .trow .hsbtn{width:42px;height:28px}
 .mob .sysm .trow .hsbtn svg{width:16px;height:16px}
-/* ツリーを閉じた GPU は 1 行の要約 (温度・VRAM・電力) を残す */
+/* ツリーを閉じた GPU は 1 行の要約 (温度・電力・VRAM) を残す */
 .sysm .gsum{margin-left:auto;display:inline-flex;gap:9px;white-space:nowrap;color:#cfe8e4;font-variant-numeric:tabular-nums}
-/* 項目ごとに幅を決めて右寄せ (GPU が 2 枚以上でも、温度・VRAM・電力の桁が縦にそろう。はみ出す値はそのぶん伸びる) */
+/* 項目ごとに幅を決めて右寄せ (GPU が 2 枚以上でも、温度・電力・VRAM の桁が縦にそろう。はみ出す値はそのぶん伸びる) */
 .sysm .gsum>span{display:inline-block;text-align:right}
 .sysm .gsum .gt{min-width:5ch}.sysm .gsum .gm{min-width:8ch}.sysm .gsum .gp{min-width:4ch}
 .sysm .gsum .warn{color:var(--warn)}.sysm .gsum .hot{color:var(--bad)}
@@ -3259,15 +3300,26 @@ function sysnode(name,key){
  el.appendChild(tw);el.appendChild(nm);
  el.addEventListener('click',()=>{sysTree[key]=!sysTree[key];saveTree();renderSysCard()});
  return el}
-// 閉じた GPU の 1 行要約: 温度・VRAM・電力 (バーと同じ境目で黄 / 赤)
+// 性能メーター: いまの SM クロックが、そのカードの最大クロックの何割で回っているか (= いま出せている力)。
+// 電力の上限で絞られていれば黄、温度・ハードの減速なら赤。値はいまのクロック。マウスを乗せると最大クロック・使用率・P ステート・電力の上限・理由を出す
+function gpuPerf(g){
+ if(g.clock==null||!g.clock_max)return null;
+ const th=g.throttle||[],pct=g.clock/g.clock_max*100;
+ const hot=th.some(t=>t.kind==='thermal'||t.kind==='hw'),warn=th.length>0;
+ const tip='SM クロック '+g.clock.toFixed(0)+' / 最大 '+g.clock_max.toFixed(0)+' MHz ('+pct.toFixed(0)+'%)'
+  +'\n使用率 '+(g.util==null?'-':g.util.toFixed(0)+'%')+' ・ '+(g.pstate||'-')+(g.idle?' (待機中)':'')
+  +'\n電力 '+g.power.toFixed(0)+' / 上限 '+(g.power_limit==null?'-':g.power_limit.toFixed(0))+' W'
+  +'\nクロックを下げている理由: '+(th.length?th.map(t=>t.text).join('・'):'なし');
+ const el=sysleaf('🚀 性能',g.clock.toFixed(0)+'MHz',pct,warn?0:null,hot?0:null,tip);el.classList.add('perf');return el}
+// 閉じた GPU の 1 行要約: 温度・電力・VRAM (バーと同じ境目で黄 / 赤)
 function gpuSum(g){
  const sp=document.createElement('span');sp.className='gsum';
  const mp=g.max_power||250;
  const part=(cls,text,pct,warn,hot)=>{const e=document.createElement('span');e.textContent=text;
   if(pct!==null&&hot!==null&&pct>=hot)cls+=' hot';else if(pct!==null&&warn!==null&&pct>=warn)cls+=' warn';e.className=cls;sp.appendChild(e)};
  part('gt',g.temp+'℃',g.temp/90*100,75/90*100,85/90*100);
- part('gm',(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G',g.mem_total?g.mem_used/g.mem_total*100:null,95,null);
  part('gp',g.power.toFixed(0)+'W',mp?g.power/mp*100:null,null,null);
+ part('gm',(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G',g.mem_total?g.mem_used/g.mem_total*100:null,95,null);
  return sp}
 // ---- hstop ボタン: GPU 行の右端。黄 = hstop (裏の作業だけ) / 赤 = hstop --all (本体も起動し直す) ----
 const IC_RESET='<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">'
@@ -3423,14 +3475,14 @@ function hstopBtns(){
  const w=document.createElement('span');w.className='hsbtns';
  w.appendChild(hstopBtn('jobs'));w.appendChild(hstopBtn('all'));
  return w}
-// GPU の枝 (GPU 行 + 黄・赤のボタン + カードごとの温度・VRAM・電力)。top = スマホ表示の上の欄に単独で置く (字下げを 1 段減らす)。
+// GPU の枝 (GPU 行 + 黄・赤のボタン + カードごとの温度・電力・性能・VRAM)。top = スマホ表示の上の欄に単独で置く (字下げを 1 段減らす)。
 // GPU 行を閉じたときは、カードごとの 1 行要約を残す (開閉は GPU 行だけ。カードごとには開閉しない)
 function gpuSection(top){
  if(!Array.isArray(lastGpus)||!lastGpus.length)return null;
  const gw=document.createElement('div');gw.className=top?'':'tsub';
  const gn=sysnode(IC_GPU+' GPU','gpu');gn.appendChild(hstopBtns());
  gw.appendChild(gn);
- // カードごとに 名前の行 (高さ固定) + 開いていれば温度・VRAM・電力のバー。閉じていれば名前の行の右に 1 行要約。
+ // カードごとに 名前の行 (高さ固定) + 開いていれば温度・電力・性能・VRAM のバー。閉じていれば名前の行の右に 1 行要約。
  // 開閉は GPU 行の 1 か所だけ (カードの行は開いても閉じても同じ位置・同じ高さ)
  lastGpus.forEach(g=>{
   const c=document.createElement('div');c.className='gcard';
@@ -3438,12 +3490,14 @@ function gpuSection(top){
   const nm=document.createElement('b');nm.textContent=g.label||g.name;l.appendChild(nm);
   c.appendChild(l);
   if(sysTree.gpu){
-   // バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、VRAM 使用率 (warn 95%)、電力 max_power 満杯
+   // 並び: 温度・電力・性能・VRAM。バーのスケール: 温度 90℃ 満杯 (warn 75℃ / hot 85℃)、電力 max_power 満杯、
+   // 性能 = SM クロック ÷ 最大 SM クロック、VRAM 使用率 (warn 95%)
    c.appendChild(sysleaf('🌡️ 温度',g.temp+'℃',g.temp/90*100,75/90*100,85/90*100));
-   const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
-   c.appendChild(sysleaf(IC_DDR,mv,g.mem_total?g.mem_used/g.mem_total*100:null,95,null,'VRAM'));   // アイコンだけ (メーターを長く)
    const mp=g.max_power||250;
    c.appendChild(sysleaf('⚡️ 電力',g.power.toFixed(0)+'/'+mp.toFixed(0)+'W',mp?g.power/mp*100:null,null));
+   const pf=gpuPerf(g);if(pf)c.appendChild(pf);
+   const mv=(g.mem_used/1024).toFixed(1)+'/'+(g.mem_total/1024).toFixed(0)+'G';
+   c.appendChild(sysleaf(IC_DDR,mv,g.mem_total?g.mem_used/g.mem_total*100:null,95,null,'VRAM'));   // アイコンだけ (メーターを長く)
   }else l.appendChild(gpuSum(g));
   gw.appendChild(c)});
  return gw}
