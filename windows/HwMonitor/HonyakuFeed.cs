@@ -81,12 +81,14 @@ public sealed class TurnTracker
         string type = HonyakuFeed.Str(ev, "type");
         lock (gate)
         {
-            if (type == "status" && ev.TryGetProperty("boot", out var b) && b.TryGetInt64(out var bt) && bt != boot)
+            // 翻訳の中継の起動番号 (boot) は turn_start と status に付いている。つないだ直後は「直近のターン (turn_start から)」→ status の順に届くので、
+            // 最初に知った番号では消さない。番号が変わったとき (中継が起動し直して、ターンの番号が 1 からやり直し) だけ消す
+            if ((type == "status" || type == "turn_start") && ev.TryGetProperty("boot", out var b) && b.TryGetInt64(out var bt) && bt != boot)
             {
-                boot = bt;   // 翻訳の中継が起動し直した (番号が 1 からやり直し)
-                turns.Clear();
-                return;
+                if (boot != 0) turns.Clear();
+                boot = bt;
             }
+            if (type == "status") return;
             if (!ev.TryGetProperty("turn", out var tn) || !tn.TryGetInt32(out int n)) return;
             switch (type)
             {
