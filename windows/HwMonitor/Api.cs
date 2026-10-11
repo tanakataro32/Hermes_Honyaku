@@ -33,6 +33,7 @@ public sealed class SlotInfo
     public long Decoded { get; set; }    // 生成した量
     public bool Processing { get; set; }
     public double? LastActive { get; set; }
+    public double? Started { get; set; }  // いまの要求を受けた時刻 (unix 秒、llmsv の時計)
     public double Tps { get; set; }      // 生成の速さ (トークン/秒)
 }
 

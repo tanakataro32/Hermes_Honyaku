@@ -32,29 +32,34 @@ public sealed class SlotPanel : Control
 
     public int WantedHeight() => data.Count == 0 ? 0 : Pad + data.Count * RowH + 2;
 
-    // 推論中の枠と、終わっていないターンを、入力の量が近い順に 1 対 1 で結ぶ
+    // 推論中の枠と、終わっていないターンを 1 対 1 で結ぶ。
+    //   1. 時刻: 枠が新しい要求を受けた時刻と、翻訳の中継がターンを始めた時刻が 5 秒以内 (どちらも llmsv の時計)。近い順に
+    //   2. 量 (時刻で結べなかったもの。アプリを途中で開いたときなど): 枠の入力が、中継の数えた量の 0.9〜1.8 倍 + 2 万トークン以内。
+    //      中継はメッセージだけを数え、llama-server はツールの定義 (Hermes で約 1 万トークン) も数えるので、枠のほうが多い
     void Match()
     {
-        var open = turns.Snapshot().Where(t => !t.Ended && t.Tokens > 0 && DateTime.Now - t.Started < TimeSpan.FromHours(2)).ToList();
-        var pairs = new List<(double score, (string, int) key, TurnTracker.Turn t)>();
+        double now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        var open = turns.Snapshot().Where(t => !t.Ended && now - t.Ts < 7200).ToList();
+        var byTime = new List<(double score, (string, int) key, TurnTracker.Turn t)>();
+        var bySize = new List<(double score, (string, int) key, TurnTracker.Turn t)>();
         foreach (var srv in data)
-            foreach (var s in srv.Slots.Where(s => s.Processing && s.Prompt > 0))
+            foreach (var s in srv.Slots.Where(s => s.Processing))
                 foreach (var t in open)
                 {
-                    double diff = Math.Abs(s.Prompt - t.Tokens);
-                    // 翻訳の中継が数える量はチャットの型の分だけ少ないので、15% か 3000 トークンまでの差は同じものとみなす
-                    if (diff <= Math.Max(3000, s.Prompt * 0.15)) pairs.Add((diff / Math.Max(1, s.Prompt), (srv.Server, s.Id), t));
+                    if (s.Started is double st && Math.Abs(st - t.Ts) <= 5) byTime.Add((Math.Abs(st - t.Ts), (srv.Server, s.Id), t));
+                    else if (t.Tokens > 0 && s.Prompt >= t.Tokens * 0.9 && s.Prompt <= t.Tokens * 1.8 + 20000)
+                        bySize.Add((Math.Abs(s.Prompt - t.Tokens) / (double)Math.Max(1, s.Prompt), (srv.Server, s.Id), t));
                 }
         var usedSlot = new HashSet<(string, int)>();
         var usedTurn = new HashSet<int>();
-        foreach (var (_, key, t) in pairs.OrderBy(p => p.score))
+        foreach (var (_, key, t) in byTime.OrderBy(p => p.score).Concat(bySize.OrderBy(p => p.score)))
         {
             if (usedSlot.Contains(key) || usedTurn.Contains(t.N)) continue;
             usedSlot.Add(key);
             usedTurn.Add(t.N);
             string who = t.Who != "" ? " · " + t.Who : "";
             string label = (t.Source == "" ? "?" : t.Source) + (t.Task ? " (背景)" : "") + who;
-            labels[key] = (label, t.Source == "OpenCode", $"#{t.N} {t.Source}{who}\n翻訳の中継が数えた入力 {t.Tokens:#,0} トークン");
+            labels[key] = (label, t.Source == "OpenCode", $"#{t.N} {t.Source}{who}" + (t.Tokens > 0 ? $"\n翻訳の中継が数えた入力 {t.Tokens:#,0} トークン (ツールの定義を除く)" : ""));
         }
         // 推論中なのに結べなかった枠は札を消す (前の要求の札を残さない)
         foreach (var srv in data)

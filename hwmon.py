@@ -171,7 +171,7 @@ class SlotWatcher:
                 for sl in slots:
                     key = (name, sl.get("id"))
                     st = self.slots.setdefault(key, {"task": None, "dec": 0, "proc": 0, "prompt_added": False, "used": 0,
-                                                     "prompt": 0, "decoded": 0, "tps": 0.0, "processing": False, "p0": 0, "d0": 0,
+                                                     "prompt": 0, "decoded": 0, "tps": 0.0, "processing": False, "p0": 0, "d0": 0, "started": None,
                                                      "last_active": None, "n_ctx": 0})
                     nt = sl.get("next_token") or {}
                     if isinstance(nt, list):
@@ -183,7 +183,8 @@ class SlotWatcher:
                     if sl.get("is_processing"):
                         busy = True
                         if sl.get("id_task") != st["task"]:  # 新しい要求
-                            st.update(task=sl.get("id_task"), dec=0, proc=0, prompt_added=False, tps=0.0, p0=0, d0=0)
+                            # started = 新しい要求を初めて見た時刻 (アプリが翻訳の中継のターンの始まりと時刻で結ぶのに使う。0.5 秒ほど遅れる)
+                            st.update(task=sl.get("id_task"), dec=0, proc=0, prompt_added=False, tps=0.0, p0=0, d0=0, started=time.time())
                         d_out = max(0, dec - st["dec"])
                         c["out"] += d_out
                         c["proc"] += max(0, pp - st["proc"])
@@ -218,7 +219,7 @@ class SlotWatcher:
         with self.lock:
             out = []
             for name, _ in self.servers:
-                slots = [dict(id=k[1], **{x: v[x] for x in ("n_ctx", "used", "prompt", "decoded", "processing", "last_active")},
+                slots = [dict(id=k[1], **{x: v[x] for x in ("n_ctx", "used", "prompt", "decoded", "processing", "last_active", "started")},
                               tps=round(v["tps"], 1))
                          for k, v in sorted(self.slots.items(), key=lambda kv: kv[0][1]) if k[0] == name]
                 out.append({"server": name, "up": self.up.get(name, False), "slots": slots})

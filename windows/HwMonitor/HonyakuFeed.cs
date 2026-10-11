@@ -69,7 +69,8 @@ public sealed class HonyakuFeed(Func<string> baseUrl)
 /// <summary>ターンの発信元 (Hermes・OpenCode など)・会話の札・コンテキスト量 (turn_ctx)・終わったか</summary>
 public sealed class TurnTracker
 {
-    public sealed record Turn(int N, string Source, string Who, bool Task, long Tokens, DateTime Started, bool Ended);
+    /// <summary>Ts = ターンが始まった時刻 (unix 秒、翻訳の中継 = llmsv の時計。hwmon の枠の時刻と比べられる)</summary>
+    public sealed record Turn(int N, string Source, string Who, bool Task, long Tokens, double Ts, bool Ended);
 
     readonly object gate = new();
     readonly Dictionary<int, Turn> turns = [];
@@ -91,7 +92,8 @@ public sealed class TurnTracker
             {
                 case "turn_start":
                     turns[n] = new Turn(n, HonyakuFeed.Str(ev, "source"), HonyakuFeed.Str(ev, "who"),
-                        ev.TryGetProperty("task", out var tk) && tk.ValueKind == JsonValueKind.True, 0, DateTime.Now, false);
+                        ev.TryGetProperty("task", out var tk) && tk.ValueKind == JsonValueKind.True, 0,
+                        ev.TryGetProperty("ts", out var ts) && ts.TryGetDouble(out var tv) ? tv : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0, false);
                     while (turns.Count > 60) turns.Remove(turns.Keys.Min());
                     break;
                 case "turn_ctx":
