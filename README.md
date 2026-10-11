@@ -392,6 +392,60 @@ p40 = http://127.0.0.1:18090
 OpenCode の provider の `baseURL` を `http://127.0.0.1:8081/p40/v1` にすると、その思考も「OpenCode」ラベルで流れます。
 起動ログに `route  : http://…:8081/p40/v1  ->  http://127.0.0.1:18090` と出れば有効です。
 
+## 4d. ハードウェアモニタ (Windows のアプリ)
+
+llmsv の温度・電力・使用率・メモリを、Windows の専用アプリで常に見ておくためのものです。履歴のグラフと電気代も出し、Hermes の思考の和訳も小さく流します。
+
+```
+[llmsv]  hwmon.py (honyaku-hwmon.service、:8766)  … 2 秒ごとに集めて JSON で配る。1 分ごとの平均を SQLite に残す
+         hermes_honyaku.py (:8765)               … 和訳 (/events)
+            │
+            └──(LAN / Tailscale)──> [Windows] windows/HwMonitor (WinForms、.NET 10)
+```
+
+- `hwmon.py` は翻訳の中継とは**別のプロセス**です。こちらを再起動しても、8081 の中継 (Hermes・OpenCode・Open WebUI) は止まりません。
+  値の集め方 (GPU・CPU の電力・温度・`[power]` の見込み) は `hermes_honyaku.py` と同じものを使うので、翻訳の画面と同じ値になります。
+- 記録は `~/.local/share/hermes-honyaku/hwmon.sqlite` (`[hwmon] db`)。1 分ごとの平均を 35 日 (`keep_days`)、日ごとの電力量はずっと残します。
+- API (読むだけ): `/api/now` (いまの値)・`/api/history?range=1h|3h|6h|24h|7d|30d`・`/api/energy` (今日・今月・日ごと・月ごと)。
+
+### llmsv 側 (一回だけ)
+
+```bash
+deploy honyaku main
+sudo cp /mnt/smb_data/htdocs/honyaku/honyaku-hwmon.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now honyaku-hwmon
+curl -s http://127.0.0.1:8766/api/now | head -c 200      # JSON が返れば OK
+# Windows (LAN・Tailscale) から読めるように 8766 を開ける (ufw を使っている場合)
+sudo ufw allow from 192.168.1.0/24 to any port 8766 proto tcp
+sudo ufw allow in on tailscale0 to any port 8766 proto tcp
+```
+
+電気代の単価は `config.local.ini` に書きます (既定 31 円/kWh = 家電の電気代表示の目安単価)。契約の単価 (燃料費調整額・再エネ賦課金を足したもの) が分かったら:
+
+```ini
+[hwmon]
+price_yen_kwh = 36.5
+```
+
+書き換えたら `sudo systemctl restart honyaku-hwmon` (過去の日の電気代も新しい単価で計算し直されます。記録しているのは電力量 Wh です)。
+
+### Windows 側
+
+1. VS2026 で `windows\HwMonitor\HwMonitor.csproj` を開き、F5 で起動します (.NET 10 のデスクトップ開発のワークロードが要ります)。
+   いつも使うなら「発行」で exe を作り、スタートアップに入れておきます。
+2. 初回は llmsv のアドレス `192.168.1.50`・モニタのポート 8766・翻訳の画面のポート 8765 で動きます。Tailscale から使うときは「設定…」でアドレスを変えます。
+3. 画面はコードだけで組んでいます (Designer のファイルはありません)。VS でフォームを開くとコードが開きます。
+
+画面:
+
+- **上**: いまの値。温度・電力 (推定)・使用率・メモリ (+ディスク) の 4 列 (翻訳の画面の「項目別」と同じ分け方、2 秒ごと)。行にマウスを乗せると説明が出ます。
+- **真ん中 (グラフ)**: 履歴の折れ線。上の段で期間 (1 時間〜30 日) と項目 (電力・温度・使用率・メモリ) を選びます。凡例を押すとその線を隠せます。マウスを乗せた時刻の値が出ます。
+  1 時間は 10 秒刻み、それより長い期間は 1 分の記録をまとめたものです (24 時間 = 4 分、7 日 = 30 分、30 日 = 2 時間刻み)。
+- **真ん中 (電気代)**: 今日・今月・月末の見込み (いまの平均の W がひと月続いたら)、日ごと 31 日の棒グラフ、月ごとの表。
+  電力はコンセント側の**推定** (`[power]`) を積み上げたものです。hwmon.py が止まっていた時間は数えないので、その日の棒は薄く出ます。
+- **下 (和訳)**: Hermes の思考の和訳を小さく流します (コマンドの行と、背景タスクは出しません)。境目をドラッグして高さを変えられ、上の「和訳」で隠せます。
+- 「最前面」で、ほかの窓より前に出しておけます。窓の位置・選んだ期間などは `%APPDATA%\HwMonitor\settings.json` に覚えておきます。
+
 ## 5. 設定 (config.ini)
 
 | セクション | 項目 | 意味 |
@@ -414,6 +468,10 @@ OpenCode の provider の `baseURL` を `http://127.0.0.1:8081/p40/v1` にする
 | power | psu_eff | 電源ユニットの効率 (既定 0.90)。コンセント側 = 部品の合計 ÷ この値 |
 | power | psu_w | 全体のバーの満杯にする電源の容量 (W)。0 (既定) なら GPU の電力上限の合計 + `cpu_max_w` + `other_w` を効率で割った値 |
 | power | cpu_max_w | CPU の電力の上限 (W、既定 88 = Ryzen 5 7600 の PPT)。`psu_w = 0` のときのバーの満杯に使う |
+| hwmon | listen_host / listen_port | ハードウェアモニタ (hwmon.py) の待ち受け (既定 0.0.0.0:8766) |
+| hwmon | db | 記録の SQLite (既定 `~/.local/share/hermes-honyaku/hwmon.sqlite`) |
+| hwmon | keep_days | 1 分ごとの記録 (履歴のグラフ) を残す日数 (既定 35)。日ごとの電力量はずっと残す |
+| hwmon | price_yen_kwh | 電気代の単価 (円/kWh、既定 31) |
 | hstop | path | GPU 行のボタン (黄 = hstop --list / --pid / 赤 = hstop --all) で実行する hstop の場所。空欄なら PATH → `~/.local/bin/hstop` の順に探す |
 | hstop | timeout | hstop がこの秒数 (既定 120) で終わらなければ打ち切ってエラー表示 |
 | log | dir | 原文と訳文、コンテキスト量 (`turn_ctx`)・テンション (`mood`) を JSONL で残すフォルダ (日付ごと 1 ファイル)。空欄で無効 |

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- llmsv のハードウェアモニタ (温度・電力・使用率・メモリ・履歴・電気代) と Hermes の和訳を小さく出す Windows アプリ。
+       画面はコードだけで組んでいる (Designer のファイルはない)。VS2026 で HwMonitor.csproj を開いて F5 で動く -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <RootNamespace>HwMonitor</RootNamespace>
+    <AssemblyName>HwMonitor</AssemblyName>
+    <Version>1.0.0</Version>
+    <!-- llmsv (Linux) でもビルドの確認ができるように -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+
+</Project>
