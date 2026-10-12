@@ -243,19 +243,24 @@ class SlotWatcher:
         now = time.time()
         with self.lock:
             for (name, _), st in self.slots.items():
-                if not (st["processing"] and st["decoded"] == 0 and st.get("pp_rate")):
-                    continue
-                if now - st["proc_t"] > max(2 * st.get("pp_span", 0), 15):
-                    continue
-                out.setdefault(name, []).append((st["proc_t"], st["pp_rate"]))
+                if self._reading(st, now):
+                    out.setdefault(name, []).append((st["proc_t"], st["pp_rate"]))
         return out
 
+    @staticmethod
+    def _reading(st, now):
+        """この枠がいま読み込みの最中か (reading() の説明の条件)。lock の中で呼ぶ"""
+        return bool(st["processing"] and st["decoded"] == 0 and st.get("pp_rate")
+                    and now - st["proc_t"] <= max(2 * st.get("pp_span", 0), 15))
+
     def view(self):
+        now = time.time()
         with self.lock:
             out = []
             for name, _ in self.servers:
+                # tps = 生成の速さ、pp_tps = 読み込みの速さ (読み込みの最中だけ、直前のバッチの速さ。ほかは 0)。アプリのバーの色に使う
                 slots = [dict(id=k[1], **{x: v[x] for x in ("n_ctx", "used", "prompt", "decoded", "processing", "last_active", "started")},
-                              tps=round(v["tps"], 1))
+                              tps=round(v["tps"], 1), pp_tps=round(v["pp_rate"], 1) if self._reading(v, now) else 0.0)
                          for k, v in sorted(self.slots.items(), key=lambda kv: kv[0][1]) if k[0] == name]
                 out.append({"server": name, "up": self.up.get(name, False), "slots": slots})
             return out

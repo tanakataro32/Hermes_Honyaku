@@ -35,6 +35,7 @@ public sealed class SlotInfo
     public double? LastActive { get; set; }
     public double? Started { get; set; }  // いまの要求を受けた時刻 (unix 秒、llmsv の時計)
     public double Tps { get; set; }      // 生成の速さ (トークン/秒)
+    public double PpTps { get; set; }    // 読み込みの速さ (トークン/秒、読み込みの最中だけ。ほかは 0)
 }
 
 public sealed class PowerData
