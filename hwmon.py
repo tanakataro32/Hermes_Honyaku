@@ -214,6 +214,10 @@ class SlotWatcher:
                                   decoded=dec, processing=True, last_active=time.time())
                     else:
                         st.update(processing=False, tps=0.0)  # 使っていた量 (used) は残しておく
+                        if not st["used"] and npt > 0:
+                            # 起動し直した直後で、まだ動いているところを見ていない枠。止まっている枠も n_prompt_tokens に
+                            # 前の要求の量 (この版は生成分も入る) が残っているので、それを初めの値にする
+                            st["used"] = npt
                 if busy:
                     c["busy"] += dt
                     any_busy = True
