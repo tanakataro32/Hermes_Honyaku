@@ -122,9 +122,11 @@ public sealed class HistoryChart : Control
             if (top <= 0) top = 1;
             float Y(double v) => pr.Bottom - (float)(v / top * pr.Height);
 
-            // 横線の数: 上限が 1.5・3・6 の系なら 3 等分 (20・40・60 のように切りよく)、それ以外は 4 等分 (低い段は 2 等分)
+            // 横線の数は、上限の頭の数字で決めて目盛りを切りのよい値にする:
+            // 2.5・5 は 5 等分 (10・20…50)、1.5・3・6 は 3 等分 (20・40・60)、1・2・4・8 は 4 等分 (低い段は 2 等分)
             double mant = top / Math.Pow(10, Math.Floor(Math.Log10(top)));
-            int div = new[] { 1.5, 3, 6 }.Any(m => Math.Abs(mant - m) < 1e-9) ? 3 : pr.Height >= 120 ? 4 : 2;
+            bool Is(params double[] ms) => ms.Any(m => Math.Abs(mant - m) < 1e-9);
+            int div = Is(2.5, 5) ? 5 : Is(1.5, 3, 6) ? 3 : pr.Height >= 120 ? 4 : 2;
             for (int i = 0; i <= div; i++)
             {
                 // 2 段目からは一番上の値を出さない (上の段の 0 と重なるので)
