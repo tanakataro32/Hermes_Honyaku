@@ -19,6 +19,8 @@ public sealed class Settings
     public long DeepLCap { get; set; }                   // 自分で決めた月の上限 (文字)。0 = DeepL の上限まで
     // OpenCode は「使っている量 ≥ 枠の上限 − 予約」で圧縮を始める (予約は既定 2 万トークン = 20k)。3 段目の圧縮ラインの位置
     public int CompactReserveK { get; set; } = 20;
+    // 枠のメーターの色の基準にする平均: "graph" = グラフの期間の ▶AVE と同じ、"1h" = 直近 1 時間 (グラフの期間を変えても変わらない)
+    public string MeterAvg { get; set; } = "graph";
     public string Range { get; set; } = "1h";
     public string Group { get; set; } = "p";
     public string Tab { get; set; } = "graph";
