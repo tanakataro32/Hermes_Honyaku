@@ -59,27 +59,54 @@ public sealed class HistoryChart : Control
     static string CtxKey(string server, int id) => $"r:{server} 枠{id} 文脈";
     static bool IsCtx(string key) => key.EndsWith(" 文脈");
 
+    // 見た値の無い刻みを、直前に見た値で埋めてよい間隔 (秒)。/api/now は 2 秒ごとだが、タイマーのずれや応答待ちで
+    // 2 秒の刻みに 1 つも入らないことがあり、そこで線が切れて欠けて見える。使っている量は段のように動くので前の値のままでよい
+    const double CtxHoldMax = 12;
+
     void FillCtx(HistoryData? d)
     {
         if (d == null || d.T.Count == 0 || ctxSeen.Count == 0) return;
         var index = new Dictionary<long, int>();
         for (int i = 0; i < d.T.Count; i++) index[d.T[i]] = i;
         var sums = new Dictionary<string, (double[] sum, int[] n)>();
+        (double[] sum, int[] n) Acc(string k) =>
+            sums.TryGetValue(k, out var a) ? a : sums[k] = (new double[d.T.Count], new int[d.T.Count]);
         foreach (var (t, v) in ctxSeen)
         {
             if (!index.TryGetValue((long)t / d.Step * d.Step, out int i)) continue;   // 記録の刻みに入らない所は捨てる
             foreach (var (k, x) in v)
             {
-                if (!sums.TryGetValue(k, out var a)) sums[k] = a = (new double[d.T.Count], new int[d.T.Count]);
+                var a = Acc(k);
                 a.sum[i] += x;
                 a.n[i]++;
+            }
+        }
+        // 1 つも見ていない刻みは、その刻みの終わりより前に最後に見た値で埋める。
+        // ただし前後に見た時刻が CtxHoldMax 秒より空いていたら (アプリを閉じていた・つながらなかった) 埋めずに線を切る
+        var hold = new Dictionary<string, double?[]>();
+        int j = -1;
+        for (int i = 0; i < d.T.Count; i++)
+        {
+            long end = d.T[i] + d.Step;
+            while (j + 1 < ctxSeen.Count && ctxSeen[j + 1].t < end) j++;
+            if (j < 0) continue;
+            var (pt, pv) = ctxSeen[j];
+            double next = j + 1 < ctxSeen.Count ? ctxSeen[j + 1].t : Math.Max(d.To, d.T[i]);   // 右端はいまの時刻まで
+            if (next - pt > CtxHoldMax) continue;
+            foreach (var (k, x) in pv)
+            {
+                if (!hold.TryGetValue(k, out var h)) hold[k] = h = new double?[d.T.Count];
+                h[i] = x;
+                Acc(k);
             }
         }
         foreach (var (k, (sum, n)) in sums)
         {
             if (!d.Series.TryGetValue(k, out var vals)) d.Series[k] = vals = Enumerable.Repeat<double?>(null, d.T.Count).ToList();
+            hold.TryGetValue(k, out var h);
             for (int i = 0; i < d.T.Count && i < vals.Count; i++)
-                if (vals[i] == null && n[i] > 0) vals[i] = Math.Round(sum[i] / n[i], 1);
+                if (vals[i] == null)
+                    vals[i] = n[i] > 0 ? Math.Round(sum[i] / n[i], 1) : h?[i];
         }
     }
 
