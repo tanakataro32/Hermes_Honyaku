@@ -169,7 +169,8 @@ public sealed class HistoryChart : Control
                     var nz = data.Series[k].Where(v => v is > 0).Select(v => v!.Value).ToList();
                     if (nz.Count == 0) continue;
                     double avg = nz.Average();
-                    float y = Math.Clamp(Y(avg), pr.Y + 8, pr.Bottom - 8);
+                    // 文字が段からはみ出さないように寄せる。段が 16px より低いと Math.Clamp は例外になるので Min・Max で
+                    float y = Math.Min(Math.Max(Y(avg), pr.Y + 8), pr.Bottom - 8);
                     var col = ColorOf(k, 0);
                     using (var p = new Pen(Color.FromArgb(110, col)) { DashStyle = DashStyle.Dash }) g.DrawLine(p, pr.X, Y(avg), pr.Right, Y(avg));
                     string text = $"AVE {avg:0.#}{unit}";
