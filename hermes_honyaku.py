@@ -1431,9 +1431,9 @@ class SysMonitor:
     絶対値が出せないため、初期値は 0.0)。/proc がない・読めない環境 (非 Linux 等) では
     各項目を None にして送る (UI は "-" 表示)。
 
-    ディスクは /proc/mounts の NVMe マウントごとに statvfs を取り、モデル名
-    (/sys/class/block/*/device/model) を短縮した名前 (例: 'WD SN5100') をラベルにして
-    disks リストで送る。非 NVMe 環境では空リスト (UI は従来どおり disk_* フィールドで 1 行)。
+    ディスクは /proc/mounts の NVMe・SATA (/dev/sdX) マウントごとに statvfs を取り、モデル名
+    (/sys/class/block/*/device/model) を短縮した名前 (例: 'WD SN5100'、HDD は 'WD HDD 2T') をラベルにして
+    disks リストで送る。該当なしの環境では空リスト (UI は従来どおり disk_* フィールドで 1 行)。
     """
 
     def __init__(self, interval=5.0, power=None):
@@ -1479,8 +1479,8 @@ class SysMonitor:
 
     @staticmethod
     def _read_disk_label(device):
-        """NVMe デバイスのモデル名 (例: 'WD Blue SN5100 500GB')。読めなければ None。
-        device は '/dev/nvme0n1' のようなパスなので、/sys/class/block 配下は
+        """ディスクのモデル名 (例: 'WD Blue SN5100 500GB'、'WDC WD20EZRX-00D8PB0')。読めなければ None。
+        device は '/dev/nvme0n1'・'/dev/sda' のようなパスなので、/sys/class/block 配下は
         裸のブロック名 (nvme0n1) を使う"""
         try:
             with open(f"/sys/class/block/{device.split('/')[-1]}/device/model") as f:
@@ -1489,10 +1489,24 @@ class SysMonitor:
             return None
 
     @staticmethod
+    def _read_disk_hdd_size(device):
+        """回るディスク (HDD) なら容量の表記 ('2T' '500G')、SSD・読めなければ None"""
+        name = device.split("/")[-1]
+        try:
+            with open(f"/sys/class/block/{name}/queue/rotational") as f:
+                if f.read().strip() != "1":
+                    return None
+            with open(f"/sys/class/block/{name}/size") as f:
+                gb = int(f.read()) * 512 / 1e9
+        except Exception:
+            return None
+        return f"{round(gb / 1000)}T" if gb >= 1000 else f"{round(gb)}G"
+
+    @staticmethod
     def _read_disks():
-        """/proc/mounts の NVMe マウントごとに statvfs で使用量を読む。
+        """/proc/mounts の NVMe・SATA (/dev/sdX) マウントごとに statvfs で使用量を読む。
         戻り値: [{device, label, label_short, total, used}, ...]
-        (非 NVMe 環境では空リスト → UI は従来どおり disk_total/disk_used で 1 行表示)"""
+        (該当なしの環境では空リスト → UI は従来どおり disk_total/disk_used で 1 行表示)"""
         disks = []
         try:
             with open("/proc/mounts") as f:
@@ -1503,9 +1517,10 @@ class SysMonitor:
             if len(fields) < 2:
                 continue
             dev, mp = fields[0], fields[1]
-            if not re.match(r"^/dev/nvme\d+n\d+p\d+$", dev):
+            m = re.match(r"^(/dev/nvme\d+n\d+)p\d+$", dev) or re.match(r"^(/dev/sd[a-z]+)\d+$", dev)
+            if not m:
                 continue
-            base = re.match(r"^(/dev/nvme\d+n\d+)", dev).group(1)
+            base = m.group(1)
             try:
                 st = os.statvfs(mp)
             except OSError:
@@ -1529,7 +1544,13 @@ class SysMonitor:
         disks = list(best.values())
         seen = {}
         for d in disks:
-            name = SysMonitor._short_disk_name(d["label"], d["device"])
+            hdd = SysMonitor._read_disk_hdd_size(d["device"])
+            if hdd:  # 型番 (WD20EZRX-00D8PB0 など) は長くて分かりにくいので「WD HDD 2T」に
+                brand = (d["label"] or "").split()[:1]
+                brand = {"WDC": "WD"}.get(brand[0].upper(), brand[0]) if brand else ""
+                name = f"{brand} HDD {hdd}".strip()
+            else:
+                name = SysMonitor._short_disk_name(d["label"], d["device"])
             n = seen.get(name, 0)
             seen[name] = n + 1
             d["label_short"] = name if n == 0 else f"{name} ({n + 1})"
