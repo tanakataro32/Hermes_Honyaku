@@ -111,6 +111,7 @@ public sealed class MainForm : Form
 
         chart.Range = settings.Range;
         chart.Group = settings.Group;
+        chart.CompactReserveK = settings.CompactReserveK;
         chart.SelectionChanged += (_, _) =>
         {
             settings.Range = chart.Range;
@@ -251,7 +252,7 @@ public sealed class MainForm : Form
         using var f = new Form
         {
             Text = "設定", FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
-            StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(360, 300), Font = Theme.Ui, TopMost = TopMost,
+            StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(360, 338), Font = Theme.Ui, TopMost = TopMost,
         };
         var host = new TextBox { Text = settings.Host, Left = 150, Top = 14, Width = 190 };
         var hw = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = settings.HwmonPort, Left = 150, Top = 46, Width = 90 };
@@ -262,8 +263,9 @@ public sealed class MainForm : Form
         var cap = new NumericUpDown { Minimum = 0, Maximum = 10000, Value = Math.Min(10000, settings.DeepLCap / 10000), Left = 150, Top = 182, Width = 90 };
         var note = new Label { Left = 16, Top = 214, Width = 330, Height = 32, ForeColor = SystemColors.GrayText,
             Text = "DeepL API Free (月 50 万字まで無料) のキー。上限 0 = DeepL の上限まで。\nキーはこの PC の設定ファイルにだけ保存します" };
-        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 180, Top = 258, Width = 80 };
-        var cancel = new Button { Text = "キャンセル", DialogResult = DialogResult.Cancel, Left = 266, Top = 258, Width = 80 };
+        var reserve = new NumericUpDown { Minimum = 0, Maximum = 200, Value = Math.Clamp(settings.CompactReserveK, 0, 200), Left = 150, Top = 250, Width = 90 };
+        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 180, Top = 296, Width = 80 };
+        var cancel = new Button { Text = "キャンセル", DialogResult = DialogResult.Cancel, Left = 266, Top = 296, Width = 80 };
         f.Controls.AddRange([
             new Label { Text = "llmsv のアドレス", Left = 16, Top = 17, Width = 130 }, host,
             new Label { Text = "モニタのポート", Left = 16, Top = 49, Width = 130 }, hw,
@@ -271,7 +273,9 @@ public sealed class MainForm : Form
             hide,
             new Label { Text = "DeepL API のキー", Left = 16, Top = 153, Width = 130 }, key,
             new Label { Text = "月の上限 (万字)", Left = 16, Top = 185, Width = 130 }, cap,
-            note, ok, cancel]);
+            note,
+            new Label { Text = "圧縮の余裕 (k)", Left = 16, Top = 252, Width = 130 }, reserve,
+            ok, cancel]);
         if (message != null) { f.Text = "設定 — " + message; key.Select(); }
         f.AcceptButton = ok;
         f.CancelButton = cancel;
@@ -282,6 +286,8 @@ public sealed class MainForm : Form
         settings.HideTasks = hide.Checked;
         settings.DeepLKey = key.Text.Trim();
         settings.DeepLCap = (long)cap.Value * 10000;
+        settings.CompactReserveK = (int)reserve.Value;
+        chart.CompactReserveK = settings.CompactReserveK;
         _ = deepl.RefreshUsage();
         settings.Save();
         ApplyTranslation();
