@@ -105,8 +105,16 @@ public sealed class HistoryChart : Control
         BackColor = Theme.Back;
     }
 
-    List<string> Keys() => data == null ? [] :
-        data.Series.Keys.Where(k => k.StartsWith(Group + ":")).ToList();
+    List<string> Keys()
+    {
+        if (data == null) return [];
+        var keys = data.Series.Keys.Where(k => k.StartsWith(Group + ":")).ToList();
+        if (Group != "r") return keys;
+        // トークンは凡例・マウスを乗せたときの値を段の順 (生成・読込・文脈) に並べる。
+        // 色は並べ替える前の記録の順で決める (読込が青・生成が橙のまま)
+        foreach (var k in keys) ColorOf(k, 0);
+        return keys.OrderBy(k => k.EndsWith(" 読込") ? 1 : IsCtx(k) ? 2 : 0).ToList();
+    }
 
     Color ColorOf(string key, int i)
     {
@@ -199,7 +207,12 @@ public sealed class HistoryChart : Control
             }
             foreach (var (t, _) in TimeTicks(t0, t1)) g.DrawLine(gridPen, X(t), pr.Y, X(t), pr.Bottom);
             using (var edge = new Pen(Theme.Edge)) g.DrawRectangle(edge, pr);
-            if (title != null) TextRenderer.DrawText(g, title, Theme.Small, new Point(pr.X + 4, pr.Y + 3), Theme.Muted);
+            if (title != null)   // 後ろを塗って、目盛りや上限の線と重なっても読めるように
+            {
+                var tsz = TextRenderer.MeasureText(title, Theme.Small);
+                using (var b = new SolidBrush(Color.FromArgb(220, Theme.Back))) g.FillRectangle(b, pr.X + 1, pr.Y + 1, tsz.Width + 6, tsz.Height + 3);
+                TextRenderer.DrawText(g, title, Theme.Small, new Point(pr.X + 4, pr.Y + 3), Theme.Muted);
+            }
 
             g.SmoothingMode = SmoothingMode.AntiAlias;
             foreach (var k in pkeys)
