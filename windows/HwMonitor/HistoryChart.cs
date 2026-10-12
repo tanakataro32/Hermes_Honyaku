@@ -4,7 +4,7 @@ using System.Drawing.Drawing2D;
 namespace HwMonitor;
 
 /// <summary>履歴の折れ線グラフ。上の段で期間 (1 時間〜30 日) と項目 (電力・温度・使用率・メモリ) を選ぶ。
-/// 凡例を押すとその線を隠す / 出す。マウスを乗せた時刻の値を出す</summary>
+/// 凡例を押すとその線を隠す / 出す。マウスを乗せた時刻の値を出す。トークンは生成と読込で上下 2 段に分ける</summary>
 [DesignerCategory("Code")]
 public sealed class HistoryChart : Control
 {
@@ -107,54 +107,58 @@ public sealed class HistoryChart : Control
 
         var unit = Groups.First(x => x.key == Group).unit;
         var shown = keys.Where(k => !hidden.Contains(k)).ToList();
-        double max = 0;
-        foreach (var k in shown) foreach (var v in data.Series[k]) if (v is double d && d > max) max = d;
-        double top = Group == "u" ? 100 : Nice(max * 1.08);
-        if (top <= 0) top = 1;
         long t0 = data.From, t1 = data.To;
         float X(long t) => plot.X + (float)((t - t0) / (double)Math.Max(1, t1 - t0) * plot.Width);
-        float Y(double v) => plot.Bottom - (float)(v / top * plot.Height);
 
-        // 目盛り (横線 5 本と、時刻)
+        // 段ごとに、目盛り (横線と値・時刻の縦線) と線を描く。目盛りの上限は段に出ている線だけで決める
         using var gridPen = new Pen(Theme.Grid);
-        for (int i = 0; i <= 4; i++)
+        long gap = data.MaxGap > 0 ? data.MaxGap : (long)(data.Step * 2.5);   // 途中で記録が無い所 (null や max_gap より空いた所) は線を切る
+        var panes = Panes(shown, plot);
+        foreach (var (pr, pkeys, title) in panes)
         {
-            double v = top * i / 4;
-            float y = Y(v);
-            g.DrawLine(gridPen, plot.X, y, plot.Right, y);
-            TextRenderer.DrawText(g, v.ToString(v >= 10 || v == 0 ? "0" : "0.#") + unit, Theme.Small,
-                new Rectangle(0, (int)y - 8, PadL - 4, 16), Theme.Muted, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
-        }
-        foreach (var (t, label) in TimeTicks(t0, t1))
-        {
-            float xx = X(t);
-            g.DrawLine(gridPen, xx, plot.Y, xx, plot.Bottom);
-            TextRenderer.DrawText(g, label, Theme.Small, new Point((int)xx - 20, plot.Bottom + 4), Theme.Muted);
-        }
-        using (var edge = new Pen(Theme.Edge)) g.DrawRectangle(edge, plot);
+            double max = 0;
+            foreach (var k in pkeys) foreach (var v in data.Series[k]) if (v is double d && d > max) max = d;
+            double top = Group == "u" ? 100 : Nice(max * 1.08);
+            if (top <= 0) top = 1;
+            float Y(double v) => pr.Bottom - (float)(v / top * pr.Height);
 
-        // 線。途中で記録が無い所 (null や max_gap より空いた所) は切る
-        long gap = data.MaxGap > 0 ? data.MaxGap : (long)(data.Step * 2.5);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        foreach (var k in shown)
-        {
-            using var pen = new Pen(ColorOf(k, 0), k == "p:全体" ? 2f : 1.4f);
-            var vals = data.Series[k];
-            var pts = new List<PointF>();
-            long prev = 0;
-            for (int i = 0; i < data.T.Count; i++)
+            int div = pr.Height >= 120 ? 4 : 2;
+            for (int i = 0; i <= div; i++)
             {
-                if (vals[i] is not double v || (pts.Count > 0 && data.T[i] - prev > gap))
-                {
-                    Flush(g, pen, pts);
-                    if (vals[i] is not double) continue;
-                }
-                pts.Add(new PointF(X(data.T[i] + data.Step / 2), Y(vals[i]!.Value)));
-                prev = data.T[i];
+                double v = top * i / div;
+                float y = Y(v);
+                g.DrawLine(gridPen, pr.X, y, pr.Right, y);
+                TextRenderer.DrawText(g, v.ToString(v >= 10 || v == 0 ? "0" : "0.#") + unit, Theme.Small,
+                    new Rectangle(0, (int)y - 8, PadL - 4, 16), Theme.Muted, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
             }
-            Flush(g, pen, pts);
+            foreach (var (t, _) in TimeTicks(t0, t1)) g.DrawLine(gridPen, X(t), pr.Y, X(t), pr.Bottom);
+            using (var edge = new Pen(Theme.Edge)) g.DrawRectangle(edge, pr);
+            if (title != null) TextRenderer.DrawText(g, title, Theme.Small, new Point(pr.X + 4, pr.Y + 3), Theme.Muted);
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            foreach (var k in pkeys)
+            {
+                using var pen = new Pen(ColorOf(k, 0), k == "p:全体" ? 2f : 1.4f);
+                var vals = data.Series[k];
+                var pts = new List<PointF>();
+                long prev = 0;
+                for (int i = 0; i < data.T.Count; i++)
+                {
+                    if (vals[i] is not double v || (pts.Count > 0 && data.T[i] - prev > gap))
+                    {
+                        Flush(g, pen, pts);
+                        if (vals[i] is not double) continue;
+                    }
+                    pts.Add(new PointF(X(data.T[i] + data.Step / 2), Y(vals[i]!.Value)));
+                    prev = data.T[i];
+                }
+                Flush(g, pen, pts);
+            }
+            g.SmoothingMode = SmoothingMode.None;
         }
-        g.SmoothingMode = SmoothingMode.None;
+        // 時刻は一番下の段の下に 1 回だけ
+        foreach (var (t, label) in TimeTicks(t0, t1))
+            TextRenderer.DrawText(g, label, Theme.Small, new Point((int)X(t) - 20, plot.Bottom + 4), Theme.Muted);
 
         // マウスを乗せた時刻の値
         if (hoverX >= plot.X && hoverX <= plot.Right)
@@ -165,7 +169,8 @@ public sealed class HistoryChart : Control
             // 近くに記録が無い所 (記録を始める前など) では値を出さない
             if (Math.Abs(data.T[idx] + data.Step / 2 - th) > gap) return;
             float hx = X(data.T[idx] + data.Step / 2);
-            using (var p = new Pen(Theme.Muted) { DashStyle = DashStyle.Dot }) g.DrawLine(p, hx, plot.Y, hx, plot.Bottom);
+            using (var p = new Pen(Theme.Muted) { DashStyle = DashStyle.Dot })
+                foreach (var (pr, _, _) in panes) g.DrawLine(p, hx, pr.Y, hx, pr.Bottom);
             var lines = new List<(string, Color)> { (FormatTime(data.T[idx] + data.Step / 2, t1 - t0), Theme.Head) };
             foreach (var k in shown)
                 if (data.Series[k][idx] is double v) lines.Add(($"{k[2..]}  {v:0.#}{unit}", ColorOf(k, 0)));
@@ -177,6 +182,34 @@ public sealed class HistoryChart : Control
             for (int i = 0; i < lines.Count; i++)
                 TextRenderer.DrawText(g, lines[i].Item1, Theme.Small, new Point(box.X + 6, box.Y + 4 + i * 15), lines[i].Item2);
         }
+    }
+
+    const int PaneGap = 10;
+
+    /// <summary>グラフの段。トークンは生成 (上・高さ 2/3) と読込 (下・1/3) に分け、段ごとの目盛りで描く。
+    /// 読込は何百 t/s の山になるので、同じ目盛りだと数十 t/s の生成がつぶれる。凡例で片方を全部隠すと、もう片方が全体を使う</summary>
+    List<(Rectangle r, List<string> keys, string? title)> Panes(List<string> shown, Rectangle plot)
+    {
+        var parts = new List<(List<string> keys, string? title, int weight)>();
+        if (Group == "r")
+        {
+            var gen = shown.Where(k => !k.EndsWith(" 読込")).ToList();
+            var read = shown.Where(k => k.EndsWith(" 読込")).ToList();
+            if (gen.Count > 0) parts.Add((gen, "生成", 2));
+            if (read.Count > 0) parts.Add((read, "読込", 1));
+        }
+        if (parts.Count == 0) parts.Add((shown, null, 1));
+        if (parts.Count == 1) return [(plot, parts[0].keys, parts[0].title)];
+
+        var list = new List<(Rectangle, List<string>, string?)>();
+        int usable = plot.Height - PaneGap * (parts.Count - 1), sum = parts.Sum(p => p.weight), y = plot.Y;
+        for (int i = 0; i < parts.Count; i++)
+        {
+            int h = i == parts.Count - 1 ? plot.Bottom - y : usable * parts[i].weight / sum;
+            list.Add((new Rectangle(plot.X, y, plot.Width, h), parts[i].keys, parts[i].title));
+            y += h + PaneGap;
+        }
+        return list;
     }
 
     static void Flush(Graphics g, Pen pen, List<PointF> pts)
