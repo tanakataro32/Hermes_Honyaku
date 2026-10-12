@@ -379,6 +379,11 @@ class HwMonitor:
                 flat[f"r:{name} 読込"] = 0.0
                 flat[f"r:{name} 生成"] = round(c["out"] / dt_tok, 1)
         view["slots"] = self.slots.view()
+        # 枠が使っている量 (文脈、k トークン)。使ったことのある枠だけ (待機中は最後に使っていた量のまま)。アプリのトークンの 3 段目
+        for srv in view["slots"]:
+            for sl in srv["slots"]:
+                if sl["used"] > 0:
+                    flat[f"r:{srv['server']} 枠{sl['id']} 文脈"] = round(sl["used"] / 1000.0, 1)
         m = int(t // 60 * 60)
         with self.lock:
             if self.minute is not None and m != self.minute:

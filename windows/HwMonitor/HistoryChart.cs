@@ -4,7 +4,7 @@ using System.Drawing.Drawing2D;
 namespace HwMonitor;
 
 /// <summary>履歴の折れ線グラフ。上の段で期間 (1 時間〜30 日) と項目 (電力・温度・使用率・メモリ) を選ぶ。
-/// 凡例を押すとその線を隠す / 出す。マウスを乗せた時刻の値を出す。トークンは生成と読込で上下 2 段に分ける</summary>
+/// 凡例を押すとその線を隠す / 出す。マウスを乗せた時刻の値を出す。トークンは生成・読込・文脈 (枠が使っている量) の 3 段に分ける</summary>
 [DesignerCategory("Code")]
 public sealed class HistoryChart : Control
 {
@@ -29,7 +29,56 @@ public sealed class HistoryChart : Control
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string Group { get; set; } = "p";
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public HistoryData? Data { get => data; set { data = value; ApplyLive(value); error = null; Invalidate(); } }
+    public HistoryData? Data { get => data; set { data = value; ApplyLive(value); FillCtx(value); error = null; Invalidate(); } }
+
+    // 枠が使っている量 (文脈) をアプリが見た分だけ覚えておく (/api/now の 2 秒ごと、24 時間まで)。
+    // hwmon.py が記録していない間 (反映前・起動し直す前) は、これで 3 段目を描く。記録があればそちらを使い、無い刻みだけ埋める
+    readonly List<(double t, Dictionary<string, double> v)> ctxSeen = [];
+    double ctxLimit;   // 枠の上限 (k トークン、いちばん大きい枠)。3 段目に線を引く
+
+    public void AddSlots(NowData now)
+    {
+        var v = new Dictionary<string, double>();
+        double lim = 0;
+        foreach (var srv in now.Slots)
+            foreach (var s in srv.Slots)
+            {
+                lim = Math.Max(lim, s.NCtx / 1000.0);
+                if (s.Used > 0) v[CtxKey(srv.Server, s.Id)] = Math.Round(s.Used / 1000.0, 1);   // hwmon.py と同じ (使ったことのある枠だけ)
+            }
+        if (lim > 0) ctxLimit = lim;
+        if (v.Count == 0 || now.Ts <= 0) return;
+        ctxSeen.Add((now.Ts, v));
+        int old = ctxSeen.FindIndex(x => x.t >= now.Ts - 86400);
+        if (old > 0) ctxSeen.RemoveRange(0, old);
+    }
+
+    static string CtxKey(string server, int id) => $"r:{server} 枠{id} 文脈";
+    static bool IsCtx(string key) => key.EndsWith(" 文脈");
+
+    void FillCtx(HistoryData? d)
+    {
+        if (d == null || d.T.Count == 0 || ctxSeen.Count == 0) return;
+        var index = new Dictionary<long, int>();
+        for (int i = 0; i < d.T.Count; i++) index[d.T[i]] = i;
+        var sums = new Dictionary<string, (double[] sum, int[] n)>();
+        foreach (var (t, v) in ctxSeen)
+        {
+            if (!index.TryGetValue((long)t / d.Step * d.Step, out int i)) continue;   // 記録の刻みに入らない所は捨てる
+            foreach (var (k, x) in v)
+            {
+                if (!sums.TryGetValue(k, out var a)) sums[k] = a = (new double[d.T.Count], new int[d.T.Count]);
+                a.sum[i] += x;
+                a.n[i]++;
+            }
+        }
+        foreach (var (k, (sum, n)) in sums)
+        {
+            if (!d.Series.TryGetValue(k, out var vals)) d.Series[k] = vals = Enumerable.Repeat<double?>(null, d.T.Count).ToList();
+            for (int i = 0; i < d.T.Count && i < vals.Count; i++)
+                if (vals[i] == null && n[i] > 0) vals[i] = Math.Round(sum[i] / n[i], 1);
+        }
+    }
 
     // 読み込みの最中の見込みで、右端 (まだ数が増えていない刻み) を埋める。見込みより記録が大きければ記録のまま
     static void ApplyLive(HistoryData? d)
@@ -116,9 +165,12 @@ public sealed class HistoryChart : Control
         var panes = Panes(shown, plot);
         foreach (var (pr, pkeys, title) in panes)
         {
+            bool ctx = pkeys.Count > 0 && pkeys.All(IsCtx);   // 3 段目 (文脈、k トークン)
+            string pu = ctx ? "k" : unit;
             double max = 0;
             foreach (var k in pkeys) foreach (var v in data.Series[k]) if (v is double d && d > max) max = d;
-            double top = Group == "u" ? 100 : Nice(max * 1.08);
+            if (ctx) max = Math.Max(max, ctxLimit);   // 枠の上限まで入るように
+            double top = Group == "u" ? 100 : Nice(max * (ctx ? 1.0 : 1.08));
             if (top <= 0) top = 1;
             float Y(double v) => pr.Bottom - (float)(v / top * pr.Height);
 
@@ -134,8 +186,16 @@ public sealed class HistoryChart : Control
                 double v = top * i / div;
                 float y = Y(v);
                 g.DrawLine(gridPen, pr.X, y, pr.Right, y);
-                TextRenderer.DrawText(g, v.ToString(v >= 10 || v == 0 ? "0" : "0.#") + unit, Theme.Small,
+                TextRenderer.DrawText(g, v.ToString(v >= 10 || v == 0 ? "0" : "0.#") + pu, Theme.Small,
                     new Rectangle(0, (int)y - 8, PadL - 4, 16), Theme.Muted, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+            }
+            // 文脈の段は、枠の上限に線を引く (ここに届くと llama-server がそれ以上入れられない)
+            if (ctx && ctxLimit > 0)
+            {
+                using (var p = new Pen(Color.FromArgb(160, Theme.Warn)) { DashStyle = DashStyle.Dash }) g.DrawLine(p, pr.X, Y(ctxLimit), pr.Right, Y(ctxLimit));
+                string lt = $"上限 {ctxLimit:0}k";
+                var lsz = TextRenderer.MeasureText(lt, Theme.Small);
+                TextRenderer.DrawText(g, lt, Theme.Small, new Point(pr.Right - lsz.Width - 4, (int)Y(ctxLimit) - lsz.Height), Theme.Warn);
             }
             foreach (var (t, _) in TimeTicks(t0, t1)) g.DrawLine(gridPen, X(t), pr.Y, X(t), pr.Bottom);
             using (var edge = new Pen(Theme.Edge)) g.DrawRectangle(edge, pr);
@@ -163,7 +223,7 @@ public sealed class HistoryChart : Control
             g.SmoothingMode = SmoothingMode.None;
 
             // トークンは、0 でない所だけの平均 (止まっている間を除いた、動いているときの速さ) を軸のところに ▶AVE で出す
-            if (Group == "r")
+            if (Group == "r" && !ctx)
                 foreach (var k in pkeys)
                 {
                     var nz = data.Series[k].Where(v => v is > 0).Select(v => v!.Value).ToList();
@@ -198,7 +258,7 @@ public sealed class HistoryChart : Control
                 foreach (var (pr, _, _) in panes) g.DrawLine(p, hx, pr.Y, hx, pr.Bottom);
             var lines = new List<(string, Color)> { (FormatTime(data.T[idx] + data.Step / 2, t1 - t0), Theme.Head) };
             foreach (var k in shown)
-                if (data.Series[k][idx] is double v) lines.Add(($"{k[2..]}  {v:0.#}{unit}", ColorOf(k, 0)));
+                if (data.Series[k][idx] is double v) lines.Add(($"{k[2..]}  {v:0.#}{(IsCtx(k) ? "k" : unit)}", ColorOf(k, 0)));
             int bw = lines.Max(l => TextRenderer.MeasureText(l.Item1, Theme.Small).Width) + 12, bh = lines.Count * 15 + 8;
             int bx = hx + 12 + bw > plot.Right ? (int)hx - 12 - bw : (int)hx + 12;
             var box = new Rectangle(bx, plot.Y + 6, bw, bh);
@@ -211,17 +271,20 @@ public sealed class HistoryChart : Control
 
     const int PaneGap = 10;
 
-    /// <summary>グラフの段。トークンは生成 (上・高さ 2/3) と読込 (下・1/3) に分け、段ごとの目盛りで描く。
-    /// 読込は何百 t/s の山になるので、同じ目盛りだと数十 t/s の生成がつぶれる。凡例で片方を全部隠すと、もう片方が全体を使う</summary>
+    /// <summary>グラフの段。トークンは生成 (上・高さ 2/4)・読込 (1/4)・文脈 (1/4) に分け、段ごとの目盛りで描く。
+    /// 読込は何百 t/s の山になるので、同じ目盛りだと数十 t/s の生成がつぶれる。文脈は単位が違う (k トークン)。
+    /// 凡例で段の線を全部隠すと、残りの段が全体を使う</summary>
     List<(Rectangle r, List<string> keys, string? title)> Panes(List<string> shown, Rectangle plot)
     {
         var parts = new List<(List<string> keys, string? title, int weight)>();
         if (Group == "r")
         {
-            var gen = shown.Where(k => !k.EndsWith(" 読込")).ToList();
+            var gen = shown.Where(k => !k.EndsWith(" 読込") && !IsCtx(k)).ToList();
             var read = shown.Where(k => k.EndsWith(" 読込")).ToList();
+            var ctx = shown.Where(IsCtx).ToList();
             if (gen.Count > 0) parts.Add((gen, "生成", 2));
             if (read.Count > 0) parts.Add((read, "読込", 1));
+            if (ctx.Count > 0) parts.Add((ctx, "文脈 (枠が使っている量)", 1));
         }
         if (parts.Count == 0) parts.Add((shown, null, 1));
         if (parts.Count == 1) return [(plot, parts[0].keys, parts[0].title)];

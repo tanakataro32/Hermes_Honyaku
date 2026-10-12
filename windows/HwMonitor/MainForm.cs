@@ -181,6 +181,7 @@ public sealed class MainForm : Form
             int h = meters.WantedHeight();
             if (meters.Height != h) meters.Height = h;
             slots.Data = now?.Slots ?? [];
+            if (now != null) chart.AddSlots(now);   // 文脈の段 (hwmon.py が記録していない間は、アプリが見た分で描く)
             int sh = slots.WantedHeight();
             if (slots.Height != sh) slots.Height = sh;
             if (now?.Energy is { } en)
