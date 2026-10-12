@@ -161,6 +161,24 @@ public sealed class HistoryChart : Control
                 Flush(g, pen, pts);
             }
             g.SmoothingMode = SmoothingMode.None;
+
+            // トークンは、0 でない所だけの平均 (止まっている間を除いた、動いているときの速さ) を軸のところに ▶AVE で出す
+            if (Group == "r")
+                foreach (var k in pkeys)
+                {
+                    var nz = data.Series[k].Where(v => v is > 0).Select(v => v!.Value).ToList();
+                    if (nz.Count == 0) continue;
+                    double avg = nz.Average();
+                    float y = Math.Clamp(Y(avg), pr.Y + 8, pr.Bottom - 8);
+                    var col = ColorOf(k, 0);
+                    using (var p = new Pen(Color.FromArgb(110, col)) { DashStyle = DashStyle.Dash }) g.DrawLine(p, pr.X, Y(avg), pr.Right, Y(avg));
+                    string text = $"AVE {avg:0.#}{unit}";
+                    var sz = TextRenderer.MeasureText(text, Theme.Small);
+                    var box = new Rectangle(pr.X + 10, (int)y - sz.Height / 2, sz.Width, sz.Height);
+                    using (var b = new SolidBrush(Color.FromArgb(220, Theme.Back))) g.FillRectangle(b, box);
+                    using (var b = new SolidBrush(col)) g.FillPolygon(b, [new PointF(pr.X + 1, y - 5), new PointF(pr.X + 9, y), new PointF(pr.X + 1, y + 5)]);
+                    TextRenderer.DrawText(g, text, Theme.Small, box.Location, col);
+                }
         }
         // 時刻は一番下の段の下に 1 回だけ
         foreach (var (t, label) in TimeTicks(t0, t1))
