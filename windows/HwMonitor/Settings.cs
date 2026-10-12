@@ -17,6 +17,8 @@ public sealed class Settings
     public string DeepLKey { get; set; } = "";
     public bool AutoTranslate { get; set; }              // 押している間、新しく届いた英文を訳す
     public long DeepLCap { get; set; }                   // 自分で決めた月の上限 (文字)。0 = DeepL の上限まで
+    // OpenCode は「使っている量 ≥ 枠の上限 − 予約」で圧縮を始める (予約は既定 2 万トークン = 20k)。3 段目の圧縮ラインの位置
+    public int CompactReserveK { get; set; } = 20;
     public string Range { get; set; } = "1h";
     public string Group { get; set; } = "p";
     public string Tab { get; set; } = "graph";

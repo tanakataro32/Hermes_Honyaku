@@ -28,6 +28,9 @@ public sealed class HistoryChart : Control
     public string Range { get; set; } = "1h";
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string Group { get; set; } = "p";
+    /// <summary>OpenCode が圧縮を始める余裕 (k トークン)。枠の上限 − これ の高さに 3 段目の圧縮ラインを引く</summary>
+    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public int CompactReserveK { get; set; } = 20;
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public HistoryData? Data { get => data; set { data = value; ApplyLive(value); FillCtx(value); error = null; Invalidate(); } }
 
@@ -197,13 +200,17 @@ public sealed class HistoryChart : Control
                 TextRenderer.DrawText(g, v.ToString(v >= 10 || v == 0 ? "0" : "0.#") + pu, Theme.Small,
                     new Rectangle(0, (int)y - 8, PadL - 4, 16), Theme.Muted, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
             }
-            // 文脈の段は、枠の上限に線を引く (ここに届くと llama-server がそれ以上入れられない)
+            // 文脈の段は、OpenCode が圧縮を始める高さ (枠の上限 − 予約) に線を引く。
+            // OpenCode は「使っている量 ≥ 枠の上限 − 予約 (既定 2 万)」で古いやり取りをまとめ直す
             if (ctx && ctxLimit > 0)
             {
-                using (var p = new Pen(Color.FromArgb(160, Theme.Warn)) { DashStyle = DashStyle.Dash }) g.DrawLine(p, pr.X, Y(ctxLimit), pr.Right, Y(ctxLimit));
-                string lt = $"上限 {ctxLimit:0}k";
+                double compact = Math.Max(0, ctxLimit - CompactReserveK);
+                using (var p = new Pen(Color.FromArgb(160, Theme.Warn)) { DashStyle = DashStyle.Dash }) g.DrawLine(p, pr.X, Y(compact), pr.Right, Y(compact));
+                string lt = $"圧縮 {compact:0}k";
                 var lsz = TextRenderer.MeasureText(lt, Theme.Small);
-                TextRenderer.DrawText(g, lt, Theme.Small, new Point(pr.Right - lsz.Width - 4, (int)Y(ctxLimit) - lsz.Height), Theme.Warn);
+                var lp = new Point(pr.Right - lsz.Width - 4, (int)Y(compact) - lsz.Height);
+                using (var b = new SolidBrush(Color.FromArgb(220, Theme.Back))) g.FillRectangle(b, lp.X - 2, lp.Y, lsz.Width + 4, lsz.Height);
+                TextRenderer.DrawText(g, lt, Theme.Small, lp, Theme.Warn);
             }
             foreach (var (t, _) in TimeTicks(t0, t1)) g.DrawLine(gridPen, X(t), pr.Y, X(t), pr.Bottom);
             using (var edge = new Pen(Theme.Edge)) g.DrawRectangle(edge, pr);
