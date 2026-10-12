@@ -122,9 +122,13 @@ public sealed class HistoryChart : Control
             if (top <= 0) top = 1;
             float Y(double v) => pr.Bottom - (float)(v / top * pr.Height);
 
-            int div = pr.Height >= 120 ? 4 : 2;
+            // 横線の数: 上限が 1.5・3・6 の系なら 3 等分 (20・40・60 のように切りよく)、それ以外は 4 等分 (低い段は 2 等分)
+            double mant = top / Math.Pow(10, Math.Floor(Math.Log10(top)));
+            int div = new[] { 1.5, 3, 6 }.Any(m => Math.Abs(mant - m) < 1e-9) ? 3 : pr.Height >= 120 ? 4 : 2;
             for (int i = 0; i <= div; i++)
             {
+                // 2 段目からは一番上の値を出さない (上の段の 0 と重なるので)
+                if (i == div && pr.Y > plot.Y) continue;   // 上の線は段の枠で描かれる
                 double v = top * i / div;
                 float y = Y(v);
                 g.DrawLine(gridPen, pr.X, y, pr.Right, y);
@@ -234,7 +238,7 @@ public sealed class HistoryChart : Control
     {
         if (v <= 0) return 0;
         double p = Math.Pow(10, Math.Floor(Math.Log10(v)));
-        foreach (var m in new[] { 1, 2, 2.5, 5, 10 }) if (m * p >= v) return m * p;
+        foreach (var m in new[] { 1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10 }) if (m * p >= v) return m * p;   // 刻みを細かくして、上の空きを小さく
         return 10 * p;
     }
 
