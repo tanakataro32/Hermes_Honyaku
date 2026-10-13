@@ -9,6 +9,9 @@ GpuMonitor・SysMonitor (CpuPower・TempSensors) をそのまま使い回すの�
   GET /api/history?range=24h      履歴 (2m / 10m / 30m / 1h / 3h / 6h / 24h / 7d / 30d)。1h までは 2〜10 秒刻み、ほかは 1 分の記録をまとめたもの
   GET /api/energy                 電気代 (今日・今月・日ごと 31 日・月ごと 13 か月) と、トークン数・レンタルとの比べ (compare)
   GET /api/speed?days=7           要求ごとの速さと文脈の量 (llama-server のログから。アプリの「速度と文脈」の散布図)
+  GET /                           スマホ版 (mobile/ の index.html。iPhone の Safari で開いてホーム画面に追加する)
+  GET /events                     翻訳の画面 (8765) の /events (SSE) の中継 (スマホ版の「思考」と枠の札に使う)
+  GET /api                        この一覧
   GET /health
 
 トークン数は llama-server の /slots ([hwmon] llama_servers) を 0.5 秒ごとに読んで数える
@@ -21,6 +24,7 @@ GpuMonitor・SysMonitor (CpuPower・TempSensors) をそのまま使い回すの�
 
 import bisect
 import calendar
+import gzip
 import collections
 import datetime
 import json
@@ -40,6 +44,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hermes_honyaku as hh
 
 log = logging.getLogger("hwmon")
+
+# スマホ版の画面 (index.html・app.js など)。/ と /m/<名前> で配る
+MOBILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mobile")
+MOBILE_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+                ".webmanifest": "application/manifest+json", ".png": "image/png", ".svg": "image/svg+xml"}
 
 # 温度の色の境目 (満杯・黄・赤、℃)。翻訳の画面 (TEMPK) と同じ
 TEMPK = {"cpu": (100, 85, 95), "gpu": (90, 75, 85), "ddr": (90, 70, 80), "ssd": (85, 65, 75),
@@ -550,6 +559,8 @@ class HwMonitor:
         except Exception:
             units = []
         self.reqlog = ReqLog(db, units)
+        # スマホ版の「思考」は翻訳の画面の /events を中継する (同じ llmsv の中なので 127.0.0.1 で)
+        self.honyaku_url = f"http://127.0.0.1:{cfg.getint('ui', 'listen_port')}"
         if units:
             log.info("要求の記録: %s のログから", ", ".join(f"{n}={u}" for n, u in units))
         self.lock = threading.Lock()
@@ -849,15 +860,72 @@ class Handler(BaseHTTPRequestHandler):
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        # 大きいもの (速度と文脈・履歴) は縮めて送る (スマホで Tailscale 越しに読むとき用)
+        if len(data) > 4096 and "gzip" in (self.headers.get("Accept-Encoding") or ""):
+            data = gzip.compress(data, compresslevel=5)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")  # 読むだけの値なので、ほかの画面からも読めるように
         self.end_headers()
         self.wfile.write(data)
 
+    def _file(self, name):
+        """スマホ版のファイル (mobile/ の直下だけ。名前に / を含むものは配らない)"""
+        ext = os.path.splitext(name)[1]
+        path = os.path.join(MOBILE_DIR, name)
+        if "/" in name or "\\" in name or name.startswith(".") or ext not in MOBILE_TYPES or not os.path.isfile(path):
+            return self._json(404, {"error": "not found"})
+        with open(path, "rb") as f:
+            data = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", MOBILE_TYPES[ext])
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")   # deploy したらすぐ新しい版に
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _events(self):
+        """翻訳の画面の /events (SSE) をそのまま流す。スマホが離れたら (書き込みに失敗したら) 上流も閉じる"""
+        url = self.mon.honyaku_url + "/events"
+        hdr = {"Accept": "text/event-stream"}
+        if self.headers.get("Last-Event-ID"):
+            hdr["Last-Event-ID"] = self.headers["Last-Event-ID"]
+        try:
+            up = urllib.request.urlopen(urllib.request.Request(url, headers=hdr), timeout=60)   # 上流は 15 秒ごとに ping
+        except Exception as e:
+            return self._json(502, {"error": f"翻訳の画面 ({url}) につながりません: {e}"})
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            # このサーバーは HTTP/1.1 (つなぎっぱなし) なので、長さの無い流れは「切れるまで」と明示する。無いとブラウザが開き始めない
+            self.send_header("Connection", "close")
+            self.send_header("X-Accel-Buffering", "no")
+            self.close_connection = True
+            self.end_headers()
+            while True:
+                line = up.readline()
+                if not line:
+                    break
+                self.wfile.write(line)
+                if line in (b"\n", b"\r\n"):
+                    self.wfile.flush()
+        except (OSError, ValueError):
+            pass   # スマホが離れた・上流が止まった
+        finally:
+            up.close()
+
     def do_GET(self):
         u = urllib.parse.urlsplit(self.path)
         qs = urllib.parse.parse_qs(u.query)
+        if u.path == "/":
+            return self._file("index.html")
+        if u.path.startswith("/m/"):
+            return self._file(u.path[3:])
+        if u.path == "/events":
+            return self._events()
         if u.path == "/api/now":
             now = self.mon.current()
             return self._json(200 if now else 503, now or {"error": "集計の準備中です (起動して数秒)"})
@@ -876,7 +944,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, self.mon.reqlog.speed(days))
         if u.path == "/health":
             return self._json(200, {"ok": True, "version": hh.APP_VERSION})
-        if u.path == "/":
+        if u.path == "/api":
             return self._json(200, {"name": "llmsv hwmon", "version": hh.APP_VERSION,
                                     "api": ["/api/now", "/api/history?range=" + "|".join(RANGES), "/api/energy", "/api/speed?days=7"]})
         return self._json(404, {"error": "not found"})

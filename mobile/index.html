@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<!-- llmsv ハードウェアモニタのスマホ版 (hwmon.py が / で配る)。Windows アプリ (windows/HwMonitor) と同じ API を読む。
+     iPhone の Safari で開き、共有 → ホーム画面に追加 で全画面のアプリとして使える -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#131a1f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="llmsv">
+<link rel="apple-touch-icon" href="/m/icon-180.png">
+<link rel="icon" href="/m/icon-180.png">
+<link rel="manifest" href="/m/manifest.webmanifest">
+<link rel="stylesheet" href="/m/style.css">
+<title>llmsv モニタ</title>
+</head>
+<body>
+<header id="top">
+  <div class="row">
+    <span class="title">llmsv</span>
+    <span id="conn" class="dot" title="つながり"></span>
+    <span id="power" class="num"></span>
+    <span class="grow"></span>
+    <span class="iv"><button id="slower" aria-label="更新の間隔を長く">−</button><span id="ivLabel" class="num">2秒</span><button id="faster" aria-label="更新の間隔を短く">＋</button></span>
+  </div>
+  <div class="row sub"><span id="energy"></span><span class="grow"></span><span id="err" class="warn"></span></div>
+</header>
+
+<main>
+  <section id="tab-meter" class="tab">
+    <div id="slots"></div>
+    <div id="devices"></div>
+    <div class="card"><div class="cardhead"><span>🧵 スレッド</span><span id="coreSum" class="num muted"></span></div><div id="cores" class="cores"></div></div>
+    <div id="chips" class="chips"></div>
+  </section>
+
+  <section id="tab-graph" class="tab">
+    <div class="seg" id="ranges"></div>
+    <div class="seg" id="groups"></div>
+    <div class="legend" id="legend"></div>
+    <div class="canvasbox"><canvas id="hist"></canvas></div>
+    <p class="hint">グラフを指でなぞると、その時刻の値が出ます。凡例を押すと線を隠せます。</p>
+  </section>
+
+  <section id="tab-speed" class="tab">
+    <div class="seg" id="spY"></div>
+    <div class="seg" id="spColor"></div>
+    <div class="seg" id="spDays"></div>
+    <div class="legend list" id="spLegend"></div>
+    <div class="canvasbox"><canvas id="speed"></canvas></div>
+    <div id="spInfo" class="info"></div>
+    <p class="hint" id="spNote"></p>
+  </section>
+
+  <section id="tab-think" class="tab">
+    <div class="seg" id="thinkOpts"></div>
+    <div id="thinkHead" class="muted small"></div>
+    <pre id="think" class="think"></pre>
+    <div id="feed" class="feed"></div>
+  </section>
+</main>
+
+<nav id="tabs">
+  <button data-tab="meter"><span>📟</span>メーター</button>
+  <button data-tab="graph"><span>📈</span>グラフ</button>
+  <button data-tab="speed"><span>⏱</span>速度と文脈</button>
+  <button data-tab="think"><span>💭</span>思考</button>
+</nav>
+<script src="/m/app.js"></script>
+</body>
+</html>
