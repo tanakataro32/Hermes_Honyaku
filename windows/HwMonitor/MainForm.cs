@@ -44,9 +44,7 @@ public sealed class MainForm : Form
     readonly System.Windows.Forms.Timer nowTimer = new() { Interval = 2000 };
     readonly System.Windows.Forms.Timer slowTimer = new() { Interval = 2000 };   // 履歴・電気代 (間隔は RefreshSlow で期間ごとに)
     DateTime lastHistory = DateTime.MinValue, lastEnergy = DateTime.MinValue, lastSpeed = DateTime.MinValue;
-    bool busyNow, busyHist, busyEnergy, busyAvg, busySpeed;
-    DateTime lastAvg = DateTime.MinValue;
-    string lastAvgRange = "";
+    bool busyNow, busyHist, busyEnergy, busySpeed;
 
     public MainForm(Settings settings)
     {
@@ -247,7 +245,6 @@ public sealed class MainForm : Form
         if (chart.Visible && (force || DateTime.Now - lastHistory >= due)) await RefreshHistory();
         if ((energy.Visible || cost.Visible) && (force || DateTime.Now - lastEnergy >= TimeSpan.FromSeconds(60))) await RefreshEnergy();
         await RefreshSpeed(force);
-        await RefreshAverages(force);
     }
 
     async Task RefreshSpeed(bool force = false)
@@ -281,31 +278,6 @@ public sealed class MainForm : Form
         intervalLabel.Text = $"{iv}秒";
         slower.Enabled = iv < Intervals[^1];
         faster.Enabled = iv > Intervals[0];
-    }
-
-    // 枠のメーターの色の基準 (サーバーごとの生成・読込の平均)。「グラフの期間」ならグラフの ▶AVE と同じ値、「直近 1 時間」なら 1 時間の記録から。
-    // グラフに出ている記録が同じ期間ならそれを使い、違えば (またはグラフを隠しているときは) 1 分ごとに取りに行く
-    async Task RefreshAverages(bool force = false)
-    {
-        string rng = settings.MeterAvg == "1h" ? "1h" : chart.Range;
-        string label = settings.MeterAvg == "1h" ? "直近 1 時間" : "グラフの期間 " + HistoryChart.Ranges.FirstOrDefault(r => r.key == rng).label;
-        if (chart.Visible && chart.Data?.Range == rng)
-        {
-            slots.Averages = HistoryChart.TokenAverages(chart.Data);
-            slots.AverageLabel = label;
-            return;
-        }
-        if (busyAvg || (!force && rng == lastAvgRange && DateTime.Now - lastAvg < TimeSpan.FromSeconds(60))) return;
-        busyAvg = true;
-        try
-        {
-            slots.Averages = HistoryChart.TokenAverages(await api.History(rng));
-            slots.AverageLabel = label;
-            lastAvg = DateTime.Now;
-            lastAvgRange = rng;
-        }
-        catch { }   // 読めなければ前の平均のまま (メーターの色だけなので知らせない)
-        finally { busyAvg = false; }
     }
 
     async Task RefreshHistory()
@@ -354,7 +326,7 @@ public sealed class MainForm : Form
         using var f = new Form
         {
             Text = "設定", FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
-            StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(360, 372), Font = Theme.Ui, TopMost = TopMost,
+            StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(360, 340), Font = Theme.Ui, TopMost = TopMost,
         };
         var host = new TextBox { Text = settings.Host, Left = 150, Top = 14, Width = 190 };
         var hw = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = settings.HwmonPort, Left = 150, Top = 46, Width = 90 };
@@ -366,12 +338,8 @@ public sealed class MainForm : Form
         var note = new Label { Left = 16, Top = 214, Width = 330, Height = 32, ForeColor = SystemColors.GrayText,
             Text = "DeepL API Free (月 50 万字まで無料) のキー。上限 0 = DeepL の上限まで。\nキーはこの PC の設定ファイルにだけ保存します" };
         var reserve = new NumericUpDown { Minimum = 0, Maximum = 200, Value = Math.Clamp(settings.CompactReserveK, 0, 200), Left = 150, Top = 250, Width = 90 };
-        // 枠のメーターの色 (速さ) の基準にする平均
-        var meterAvg = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Left = 150, Top = 282, Width = 190 };
-        meterAvg.Items.AddRange(["グラフの期間 (▶AVE)", "直近 1 時間"]);
-        meterAvg.SelectedIndex = settings.MeterAvg == "1h" ? 1 : 0;
-        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 180, Top = 330, Width = 80 };
-        var cancel = new Button { Text = "キャンセル", DialogResult = DialogResult.Cancel, Left = 266, Top = 330, Width = 80 };
+        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 180, Top = 298, Width = 80 };
+        var cancel = new Button { Text = "キャンセル", DialogResult = DialogResult.Cancel, Left = 266, Top = 298, Width = 80 };
         f.Controls.AddRange([
             new Label { Text = "llmsv のアドレス", Left = 16, Top = 17, Width = 130 }, host,
             new Label { Text = "モニタのポート", Left = 16, Top = 49, Width = 130 }, hw,
@@ -381,7 +349,6 @@ public sealed class MainForm : Form
             new Label { Text = "月の上限 (万字)", Left = 16, Top = 185, Width = 130 }, cap,
             note,
             new Label { Text = "圧縮の余裕 (k)", Left = 16, Top = 252, Width = 130 }, reserve,
-            new Label { Text = "メーターの色の平均", Left = 16, Top = 285, Width = 130 }, meterAvg,
             ok, cancel]);
         if (message != null) { f.Text = "設定 — " + message; key.Select(); }
         f.AcceptButton = ok;
@@ -396,7 +363,6 @@ public sealed class MainForm : Form
         settings.CompactReserveK = (int)reserve.Value;
         chart.CompactReserveK = slots.CompactReserveK = speed.CompactReserveK = settings.CompactReserveK;
         speed.Invalidate();
-        settings.MeterAvg = meterAvg.SelectedIndex == 1 ? "1h" : "graph";
         _ = deepl.RefreshUsage();
         settings.Save();
         ApplyTranslation();

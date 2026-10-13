@@ -132,28 +132,11 @@ public sealed class HistoryChart : Control
 
     public void ShowError(string message) { error = message; Invalidate(); }
 
-    /// <summary>0 でない所だけの平均 (止まっている間を除いた、動いているときの速さ)。▶AVE と枠のメーターの色に使う</summary>
+    /// <summary>0 でない所だけの平均 (止まっている間を除いた、動いているときの速さ)。▶AVE に使う</summary>
     public static double? NonZeroAverage(IEnumerable<double?> vals)
     {
         var nz = vals.Where(v => v is > 0).Select(v => v!.Value).ToList();
         return nz.Count == 0 ? null : nz.Average();
-    }
-
-    /// <summary>サーバーごとの生成・読込の平均 (▶AVE と同じ値)。記録が無ければ null</summary>
-    public static Dictionary<string, (double? gen, double? read)> TokenAverages(HistoryData? d)
-    {
-        var avgs = new Dictionary<string, (double? gen, double? read)>();
-        if (d == null) return avgs;
-        foreach (var (k, vals) in d.Series)
-        {
-            if (!k.StartsWith("r:") || IsCtx(k)) continue;
-            bool read = k.EndsWith(" 読込");
-            if (!read && !k.EndsWith(" 生成")) continue;
-            string server = k[2..k.LastIndexOf(' ')];
-            avgs.TryGetValue(server, out var a);
-            avgs[server] = read ? (a.gen, NonZeroAverage(vals)) : (NonZeroAverage(vals), a.read);
-        }
-        return avgs;
     }
 
     public HistoryChart()
