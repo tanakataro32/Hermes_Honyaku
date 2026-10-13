@@ -223,15 +223,18 @@ public sealed class SlotPanel : Control
     // 上の行の右に出す「読込 +12.3k」「生成 +1.2k」。数字は次に増えるまで出しておく。
     // 増えた瞬間はランプのようにパッと白っぽく光り、残光を引きながら (LampTau 秒で減る) 落ち着いた暗めの色に戻る
     const double LampTau = 0.9, LampDim = 0.45;
-    (string text, Color color)[] FlashTexts(Track? tr, double now) =>
+    (bool read, string text, Color color)[] FlashTexts(Track? tr, double now) =>
         tr == null ? [] : new[] { tr.LastRead, tr.LastGen }.OfType<Flash>()
             .Select(f =>
             {
                 double age = Math.Max(0, now - f.At);
                 var c = Mix(Theme.Back, f.Read ? ReadColor : GenColor, LampDim + (1 - LampDim) * Math.Exp(-age / LampTau));
-                return ((f.Read ? "読込 +" : "生成 +") + K(f.To - f.From), Mix(c, Color.White, 0.7 * Math.Max(0, 1 - age / 0.25)));
+                return (f.Read, LampNum(f.To - f.From), Mix(c, Color.White, 0.7 * Math.Max(0, 1 - age / 0.25)));
             })
             .ToArray();
+
+    // 右の数字は k トークン・小数 1 桁にそろえる (0.8k・12.3k・123.4k)。欄の幅は 999.9k が入る分
+    static string LampNum(long v) => $"{Math.Min(v, 999_949) / 1000.0:0.0}k";
 
     static string K(double v) => v >= 100_000 ? $"{v / 1000:0}k" : v >= 1000 ? $"{v / 1000:0.0}k" : $"{v:0}";
 
@@ -263,13 +266,21 @@ public sealed class SlotPanel : Control
                 tracks.TryGetValue((srv.Server, s.Id), out var tr);
                 double pct = s.NCtx > 0 ? s.Used * 100.0 / s.NCtx : 0;
                 // 上の行: 枠の番号と札 (OpenCode は緑)。右に、光らせている増えた分
-                int fx = cell.Right;
-                foreach (var (ft, fc) in FlashTexts(tr, now).Reverse())
+                // 位置と桁は固定: 右端から「読込 +___._k」「生成 +___._k」の 2 つの欄を必ず取り、数字は欄の中で右に寄せる
+                // (まだ出ていない欄も場所だけ取る。札の長さや数字の大きさで動かない)
+                var lampFont = Theme.Num;
+                int labW = TextRenderer.MeasureText("読込 +", lampFont, Size.Empty, TextFormatFlags.NoPadding).Width;
+                int numW = TextRenderer.MeasureText(LampNum(999_900), lampFont, Size.Empty, TextFormatFlags.NoPadding).Width;
+                int fieldW = labW + numW, fx = cell.Right - fieldW * 2 - 8;
+                var lamps = FlashTexts(tr, now);
+                for (int li = 0; li < 2; li++)
                 {
-                    int w = TextRenderer.MeasureText(ft, Theme.Num).Width;
-                    fx -= w;
-                    TextRenderer.DrawText(g, ft, Theme.Num, new Point(fx, cell.Y), fc);
-                    fx -= 4;
+                    int lx = fx + 4 + li * (fieldW + 4);
+                    var lamp = lamps.FirstOrDefault(x => x.read == (li == 0));
+                    if (lamp.text == null) continue;
+                    TextRenderer.DrawText(g, li == 0 ? "読込 +" : "生成 +", lampFont, new Point(lx, cell.Y), lamp.color, TextFormatFlags.NoPadding);
+                    TextRenderer.DrawText(g, lamp.text, lampFont, new Rectangle(lx + labW, cell.Y, numW, 15), lamp.color,
+                        TextFormatFlags.Right | TextFormatFlags.NoPadding);
                 }
                 string head = $"枠{s.Id}" + (lb.label != null ? "  " + lb.label : s.Processing ? "  推論中" : "");
                 TextRenderer.DrawText(g, head, Theme.Small, new Rectangle(cell.X, cell.Y, Math.Max(0, fx - cell.X), 15),
