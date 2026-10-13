@@ -189,7 +189,7 @@ class SlotWatcher:
                     key = (name, sl.get("id"))
                     st = self.slots.setdefault(key, {"task": None, "dec": 0, "proc": 0, "prompt_added": False, "used": 0,
                                                      "prompt": 0, "decoded": 0, "tps": 0.0, "processing": False, "p0": 0, "d0": 0, "started": None,
-                                                     "last_active": None, "n_ctx": 0})
+                                                     "last_active": None, "n_ctx": 0, "npt": 0})
                     nt = sl.get("next_token") or {}
                     if isinstance(nt, list):
                         nt = nt[0] if nt else {}
@@ -199,10 +199,21 @@ class SlotWatcher:
                     st["n_ctx"] = int(sl.get("n_ctx") or 0)
                     if sl.get("is_processing"):
                         busy = True
-                        if sl.get("id_task") != st["task"]:  # 新しい要求
+                        # 新しい要求: id_task が変わったときのほか、n_prompt_tokens が前より大きく減ったときも (1 つの要求の
+                        # 中では減らない。MTP の下書きの出し入れ程度の揺れは見逃す)。flashnext は長い読み込みの初めの数分、
+                        # 前の要求の id_task のまま返すことがあり、id_task だけで見ると前の要求の p0・生成数を持ち越して、
+                        # 文脈が前の量に張り付く (読み込みが前の量を超えるまで動かない)
+                        task = sl.get("id_task")
+                        stale = task == st["task"] and npt < st["npt"] - 1024
+                        if stale or (task != st["task"] and not st.get("stale")):
                             # started = 新しい要求を初めて見た時刻 (アプリが翻訳の中継のターンの始まりと時刻で結ぶのに使う。0.5 秒ほど遅れる)
-                            st.update(task=sl.get("id_task"), dec=0, proc=0, prompt_added=False, tps=0.0, p0=0, d0=0,
-                                      started=time.time(), proc_t=time.time(), pp_rate=0.0, pp_span=0.0)
+                            # 古い id_task のときは n_decoded も前の要求のままのことがあるので、今の値から数える (二重に数えない)
+                            st.update(task=task, dec=dec if stale else 0, proc=0, prompt_added=False, tps=0.0, p0=0, d0=0,
+                                      started=time.time(), proc_t=time.time(), pp_rate=0.0, pp_span=0.0, stale=stale)
+                        elif task != st["task"]:
+                            # 古い id_task の間に新しい要求として数え始めた分。本当の id_task が届いただけなので数え直さない
+                            # (前の要求のままだった n_decoded がここで戻っていれば、そこから数える)
+                            st.update(task=task, stale=False, dec=min(dec, st["dec"]))
                         d_out = max(0, dec - st["dec"])
                         c["out"] += d_out
                         d_proc = max(0, pp - st["proc"])
@@ -224,9 +235,9 @@ class SlotWatcher:
                         # 枠が使っている量: n_prompt_tokens に生成分が入る版でも入らない版でも合うように
                         used = max(npt, st["p0"] + dec - st["d0"]) if st["prompt_added"] else npt + dec
                         st.update(dec=max(dec, st["dec"]), proc=max(pp, st["proc"]), used=used, prompt=max(0, st["p0"] - st["d0"]),
-                                  decoded=dec, processing=True, last_active=time.time())
+                                  decoded=dec, processing=True, last_active=time.time(), npt=npt)
                     else:
-                        st.update(processing=False, tps=0.0)  # 使っていた量 (used) は残しておく
+                        st.update(processing=False, tps=0.0, stale=False)  # 使っていた量 (used) は残しておく
                         if not st["used"] and npt > 0:
                             # 起動し直した直後で、まだ動いているところを見ていない枠。止まっている枠も n_prompt_tokens に
                             # 前の要求の量 (この版は生成分も入る) が残っているので、それを初めの値にする
