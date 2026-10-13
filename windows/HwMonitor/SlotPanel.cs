@@ -44,6 +44,13 @@ public sealed class SlotPanel : Control
         set { data = value ?? []; Match(); Follow(); Invalidate(); }
     }
 
+    /// <summary>いま渡す Data を hwmon.py が読んだ時刻 (unix 秒、llmsv の時計)。Flashed で渡す</summary>
+    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public double Ts { get; set; }
+
+    /// <summary>増えた分を光らせ始めたとき (サーバー, 枠, 読込か, 始まりの量, 終わりの量, 時刻)。グラフの文脈の段に ● を置くのに使う</summary>
+    public event Action<string, int, bool, long, long, double>? Flashed;
+
     /// <summary>OpenCode が圧縮を始める余裕 (k トークン)。明るさの満杯 = 枠の上限 − これ</summary>
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int CompactReserveK { get; set; } = 20;
@@ -133,7 +140,7 @@ public sealed class SlotPanel : Control
                 if (s.Started != null && s.Started != tr.Started)
                 {
                     // 新しい要求。前の要求の生成を見届けていなければ、前に見た量で締める
-                    if (tr.Phase == 2) Add(tr, false, tr.GenFrom, tr.Used, now);
+                    if (tr.Phase == 2) Add(srv.Server, s.Id, tr, false, tr.GenFrom, tr.Used, now);
                     tr.Started = s.Started;
                     tr.ReadFrom = tr.Used;
                     tr.Phase = 1;
@@ -141,14 +148,14 @@ public sealed class SlotPanel : Control
                 if (tr.Phase == 1 && phase != 1)
                 {
                     // 読込が終わった (生成に入った、または生成を見ないうちに要求が終わった)
-                    Add(tr, true, tr.ReadFrom, s.Prompt, now);
+                    Add(srv.Server, s.Id, tr, true, tr.ReadFrom, s.Prompt, now);
                     tr.GenFrom = s.Prompt;
                     tr.Phase = phase;
-                    if (phase == 0) Add(tr, false, s.Prompt, s.Used, now);
+                    if (phase == 0) Add(srv.Server, s.Id, tr, false, s.Prompt, s.Used, now);
                 }
                 else if (tr.Phase == 2 && phase == 0)
                 {
-                    Add(tr, false, tr.GenFrom, s.Used, now);
+                    Add(srv.Server, s.Id, tr, false, tr.GenFrom, s.Used, now);
                     tr.Phase = 0;
                 }
                 else if (tr.Phase == 0 && phase == 2)
@@ -163,9 +170,11 @@ public sealed class SlotPanel : Control
     }
 
     // 増えていないとき (圧縮・ほかの会話で量が減った) は光らせない
-    static void Add(Track tr, bool read, long from, long to, double now)
+    void Add(string server, int id, Track tr, bool read, long from, long to, double now)
     {
-        if (to > from) tr.Flashes.Add(new Flash(read, from, to, now));
+        if (to <= from) return;
+        tr.Flashes.Add(new Flash(read, from, to, now));
+        Flashed?.Invoke(server, id, read, from, to, Ts);
     }
 
     bool Flashing()

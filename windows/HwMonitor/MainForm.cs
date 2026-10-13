@@ -135,6 +135,8 @@ public sealed class MainForm : Form
         chart.Range = settings.Range;
         chart.Group = settings.Group;
         chart.CompactReserveK = slots.CompactReserveK = speed.CompactReserveK = settings.CompactReserveK;
+        // 枠のメーターが増えた分を光らせたら、グラフの文脈の段にも ● を置く
+        slots.Flashed += (server, id, read, from, to, ts) => { chart.AddMark(server, id, read, from, to, ts); if (chart.Visible) chart.Invalidate(); };
         speed.Y = settings.SpeedY;
         speed.ColorBy = settings.SpeedColor;
         speed.Days = settings.SpeedDays;
@@ -219,6 +221,7 @@ public sealed class MainForm : Form
             meters.Data = now;
             int h = meters.WantedHeight();
             if (meters.Height != h) meters.Height = h;
+            slots.Ts = now?.Ts ?? 0;
             slots.Data = now?.Slots ?? [];
             if (now != null) chart.AddSlots(now);   // 文脈の段 (hwmon.py が記録していない間は、アプリが見た分で描く)
             int sh = slots.WantedHeight();

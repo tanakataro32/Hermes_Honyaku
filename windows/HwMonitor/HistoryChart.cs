@@ -56,6 +56,18 @@ public sealed class HistoryChart : Control
         if (old > 0) ctxSeen.RemoveRange(0, old);
     }
 
+    // 枠のメーターが増えた分を光らせた所 (読込・生成が終わった時刻と量)。文脈の段に小さな ● で置く (アプリが見た分だけ、24 時間まで)
+    readonly List<(double t, string key, bool read, long from, long to)> marks = [];
+    const long MarkMaxRange = 6 * 3600;   // これより長い期間では ● が詰まるので出さない
+
+    public void AddMark(string server, int id, bool read, long from, long to, double ts)
+    {
+        if (ts <= 0) return;
+        marks.Add((ts, CtxKey(server, id), read, from, to));
+        int old = marks.FindIndex(x => x.t >= ts - 86400);
+        if (old > 0) marks.RemoveRange(0, old);
+    }
+
     static string CtxKey(string server, int id) => $"r:{server} 枠{id} 文脈";
     static bool IsCtx(string key) => key.EndsWith(" 文脈");
 
@@ -277,6 +289,14 @@ public sealed class HistoryChart : Control
                 }
                 Flush(g, pen, pts);
             }
+            // 文脈の段に、枠のメーターが光った所 (読込の終わり = 青・生成の終わり = 橙) を目立たない小さな ● で
+            if (ctx && t1 - t0 <= MarkMaxRange)
+                foreach (var m in marks)
+                {
+                    if (m.t < t0 || m.t > t1 || !pkeys.Contains(m.key)) continue;
+                    using var b = new SolidBrush(Color.FromArgb(150, m.read ? Theme.Series[0] : Theme.Series[1]));
+                    g.FillEllipse(b, X((long)m.t) - 2.5f, Y(m.to / 1000.0) - 2.5f, 5, 5);
+                }
             g.SmoothingMode = SmoothingMode.None;
 
             // トークンは、0 でない所だけの平均 (止まっている間を除いた、動いているときの速さ) を軸のところに ▶AVE で出す
@@ -314,6 +334,11 @@ public sealed class HistoryChart : Control
             var lines = new List<(string, Color)> { (FormatTime(data.T[idx] + data.Step / 2, t1 - t0), Theme.Head) };
             foreach (var k in shown)
                 if (data.Series[k][idx] is double v) lines.Add(($"{k[2..]}  {v:0.#}{(IsCtx(k) ? "k" : unit)}", ColorOf(k, 0)));
+            // その刻みに入る ● (光った所) の増えた分
+            if (Group == "r" && t1 - t0 <= MarkMaxRange)
+                foreach (var m in marks.Where(m => m.t >= data.T[idx] && m.t < data.T[idx] + data.Step && shown.Contains(m.key)).TakeLast(4))
+                    lines.Add(($"● {(m.read ? "読込" : "生成")} +{(m.to - m.from) / 1000.0:0.0}k ({m.from / 1000.0:0.0}k → {m.to / 1000.0:0.0}k)",
+                               m.read ? Theme.Series[0] : Theme.Series[1]));
             int bw = lines.Max(l => TextRenderer.MeasureText(l.Item1, Theme.Small).Width) + 12, bh = lines.Count * 15 + 8;
             int bx = hx + 12 + bw > plot.Right ? (int)hx - 12 - bw : (int)hx + 12;
             var box = new Rectangle(bx, plot.Y + 6, bw, bh);
