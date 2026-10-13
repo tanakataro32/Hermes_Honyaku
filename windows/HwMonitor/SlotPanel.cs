@@ -270,10 +270,11 @@ public sealed class SlotPanel : Control
         var ink = on ? Color.White : Mix(Mix(Theme.Back, c, LampDim + (1 - LampDim) * heat), Color.White, 0.5 * heat);
         TextRenderer.DrawText(g, lab, LampLabFont, new Rectangle(r.X + 5, r.Y, labW, r.Height), ink,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-        // 数字は図形にして描く (拡大して弾ませる・縁を光らせるため)。右に寄せ、数字のまん中を中心に拡大する
+        // 数字は図形にして描く (拡大して弾ませる・縁を光らせるため)。右に寄せ、数字のまん中を中心に拡大する。
+        // 図形の字は TextRenderer で測った幅より少し広いので、折り返さない (折り返すと末尾の k が次の行に落ちてバーに隠れる)
         var nr = new Rectangle(r.X + 5 + labW, r.Y, r.Width - labW - 10, r.Height);
         using (var tp = new GraphicsPath())
-        using (var sf = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center })
+        using (var sf = new StringFormat(StringFormatFlags.NoWrap | StringFormatFlags.NoClip) { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center })
         {
             tp.AddString(LampNum(f.To - f.From), LampNumFont.FontFamily, (int)LampNumFont.Style, LampNumFont.SizeInPoints * g.DpiY / 72f, nr, sf);
             double s = Math.Max(0.85, 1 + 0.6 * Math.Exp(-age / 0.2) * Math.Cos(2 * Math.PI * age / 0.35));
@@ -344,7 +345,7 @@ public sealed class SlotPanel : Control
                 // (まだ出ていない欄も場所だけ取る。札の長さや数字の大きさで動かない)
                 int labW = TextRenderer.MeasureText("読込 +", LampLabFont, Size.Empty, TextFormatFlags.NoPadding).Width;
                 int numW = TextRenderer.MeasureText(LampNum(999_900), LampNumFont, Size.Empty, TextFormatFlags.NoPadding).Width;
-                int fieldW = labW + numW + 10, fx = cell.Right - fieldW * 2 - 8;
+                int fieldW = labW + numW + 18, fx = cell.Right - fieldW * 2 - 8;
                 for (int li = 0; li < 2; li++)
                     if ((li == 0 ? tr?.LastRead : tr?.LastGen) is Flash lf)
                         DrawLamp(g, new Rectangle(fx + 2 + li * (fieldW + 6), cell.Y + 1, fieldW, LampH - 2), labW, li == 0 ? "読込 +" : "生成 +", lf, now);
