@@ -115,6 +115,7 @@ public sealed class SlotPanel : Control
         public long Used;           // 前に見たときの使っている量
         public long ReadFrom, GenFrom;
         public readonly List<Flash> Flashes = [];
+        public Flash? LastRead, LastGen;   // 上の行の右の数字 (次に増えるまで出しておく)
     }
 
     sealed record Flash(bool Read, long From, long To, double At);
@@ -173,7 +174,9 @@ public sealed class SlotPanel : Control
     void Add(string server, int id, Track tr, bool read, long from, long to, double now)
     {
         if (to <= from) return;
-        tr.Flashes.Add(new Flash(read, from, to, now));
+        var f = new Flash(read, from, to, now);
+        tr.Flashes.Add(f);
+        if (read) tr.LastRead = f; else tr.LastGen = f;
         Flashed?.Invoke(server, id, read, from, to, Ts);
     }
 
@@ -217,11 +220,17 @@ public sealed class SlotPanel : Control
         }
     }
 
-    // 上の行の右に出す「読込 +12.3k」「生成 +1.2k」(薄れていく)
+    // 上の行の右に出す「読込 +12.3k」「生成 +1.2k」。数字は次に増えるまで出しておく。
+    // 増えた瞬間はランプのようにパッと白っぽく光り、残光を引きながら (LampTau 秒で減る) 落ち着いた暗めの色に戻る
+    const double LampTau = 0.9, LampDim = 0.45;
     (string text, Color color)[] FlashTexts(Track? tr, double now) =>
-        tr == null ? [] : tr.Flashes.Where(f => now - f.At <= FlashSec)
-            .Select(f => ((f.Read ? "読込 +" : "生成 +") + K(f.To - f.From),
-                          Mix(Theme.Back, f.Read ? ReadColor : GenColor, Math.Clamp(1 - Math.Max(0, now - f.At - 2) / (FlashSec - 2), 0, 1))))
+        tr == null ? [] : new[] { tr.LastRead, tr.LastGen }.OfType<Flash>()
+            .Select(f =>
+            {
+                double age = Math.Max(0, now - f.At);
+                var c = Mix(Theme.Back, f.Read ? ReadColor : GenColor, LampDim + (1 - LampDim) * Math.Exp(-age / LampTau));
+                return ((f.Read ? "読込 +" : "生成 +") + K(f.To - f.From), Mix(c, Color.White, 0.7 * Math.Max(0, 1 - age / 0.25)));
+            })
             .ToArray();
 
     static string K(double v) => v >= 100_000 ? $"{v / 1000:0}k" : v >= 1000 ? $"{v / 1000:0.0}k" : $"{v:0}";
