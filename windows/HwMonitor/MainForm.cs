@@ -134,7 +134,7 @@ public sealed class MainForm : Form
 
         chart.Range = settings.Range;
         chart.Group = settings.Group;
-        chart.Smooth = settings.Smooth;
+        chart.Smooth = [.. settings.SmoothOn];
         chart.CompactReserveK = slots.CompactReserveK = speed.CompactReserveK = settings.CompactReserveK;
         // 枠のメーターが増えた分を光らせたら、グラフの文脈の段にも ● を置く
         slots.Flashed += (server, id, read, from, to, ts) => { chart.AddMark(server, id, read, from, to, ts); if (chart.Visible) chart.Invalidate(); };
@@ -156,7 +156,7 @@ public sealed class MainForm : Form
         {
             settings.Range = chart.Range;
             settings.Group = chart.Group;
-            settings.Smooth = chart.Smooth;
+            settings.SmoothOn = [.. chart.Smooth];
             settings.Save();
             lastHistory = DateTime.MinValue;
             _ = RefreshHistory();

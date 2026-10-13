@@ -29,7 +29,8 @@ public sealed class Settings
     public List<string> SpeedHidden { get; set; } = [];  // 凡例で隠したもの
     public string Range { get; set; } = "1h";
     public string Group { get; set; } = "p";
-    public bool Smooth { get; set; }                     // グラフの「なめらか」(電力・使用率・トークンを前後の平均で均す)
+    public List<string> SmoothOn { get; set; } = [];     // グラフの「なめらか」にしている項目 (p = 電力・u = 使用率・r = トークン。項目ごとに覚える)。
+                                                         // v1.3.0 の Smooth (true/false) と型が違うので名前を変えた (同じ名前だと読めずに設定が全部消える)
     public string Tab { get; set; } = "graph";
     public int[]? Bounds { get; set; }
 

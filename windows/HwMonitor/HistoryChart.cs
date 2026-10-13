@@ -32,9 +32,9 @@ public sealed class HistoryChart : Control
     /// <summary>OpenCode が圧縮を始める余裕 (k トークン)。枠の上限 − これ の高さに 3 段目の圧縮ラインを引く</summary>
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int CompactReserveK { get; set; } = 20;
-    /// <summary>なめらか: 線を前後 SmoothWindow 秒の平均で均して描く (描くときだけ。記録や電気代は変えない)</summary>
+    /// <summary>なめらかにしている項目 (Groups の key)。項目ごとに覚える。線を前後 SmoothWindow 秒の平均で均して描く (描くときだけ。記録や電気代は変えない)</summary>
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public bool Smooth { get; set; }
+    public HashSet<string> Smooth { get; set; } = [];
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public HistoryData? Data { get => data; set { data = value; ApplyLive(value); FillCtx(value); error = null; Invalidate(); } }
 
@@ -148,7 +148,7 @@ public sealed class HistoryChart : Control
 
     // なめらかにする項目: 電力・使用率・トークン。温度はもともとなめらか、メモリと文脈は段のように動くので均さない
     static readonly HashSet<string> SmoothGroups = ["p", "u", "r"];
-    bool SmoothOn => Smooth && SmoothGroups.Contains(Group);
+    bool SmoothOn => Smooth.Contains(Group) && SmoothGroups.Contains(Group);
 
     // 平均する幅 (秒): 表示している期間の 1/20 (2 分なら 6 秒、10 分なら 30 秒、1 時間なら 3 分、24 時間なら 72 分)。少なくとも記録 3 つ分
     long SmoothWindow => data == null ? 0 : Math.Max((data.To - data.From) / 20, data.Step * 3L);
@@ -228,7 +228,7 @@ public sealed class HistoryChart : Control
             x = Button(g, x, label, Group == key, () => { Group = key; Invalidate(); SelectionChanged?.Invoke(this, EventArgs.Empty); }) + 2;
         if (SmoothGroups.Contains(Group))
             Button(g, x + 14, SmoothOn && data != null ? $"なめらか {SpanText(SmoothWindow)}" : "なめらか", SmoothOn,
-                () => { Smooth = !Smooth; Invalidate(); SelectionChanged?.Invoke(this, EventArgs.Empty); });
+                () => { if (!Smooth.Remove(Group)) Smooth.Add(Group); Invalidate(); SelectionChanged?.Invoke(this, EventArgs.Empty); });
 
         var plot = new Rectangle(PadL, BarH + LegendH + 6, Width - PadL - PadR, Height - BarH - LegendH - 6 - PadB);
         if (plot.Width < 40 || plot.Height < 30) return;
