@@ -213,7 +213,7 @@ class SlotWatcher:
                         elif task != st["task"]:
                             # 古い id_task の間に新しい要求として数え始めた分。本当の id_task が届いただけなので数え直さない
                             # (前の要求のままだった n_decoded がここで戻っていれば、そこから数える)
-                            st.update(task=task, stale=False, dec=min(dec, st["dec"]))
+                            st.update(task=task, stale=False, dec=min(dec, st["dec"]), d0=min(dec, st["d0"]))
                         d_out = max(0, dec - st["dec"])
                         c["out"] += d_out
                         d_proc = max(0, pp - st["proc"])
@@ -230,6 +230,12 @@ class SlotWatcher:
                             # そのとき生成済みの分 (d0) を引いて「要求の入力」にする (API の入力に当たる量。キャッシュの分も含む)
                             st.update(prompt_added=True, p0=npt, d0=dec)
                             c["in"] += max(0, npt - dec)
+                        elif st["prompt_added"] and dec <= st["d0"] and npt > st["p0"]:
+                            # 生成が始まるまでは入力の量を追いかける。flashnext は読み込みの間、n_prompt_tokens が全長ではなく
+                            # 読み進んだ所 (1 バッチ先) として伸びるので、初めて見えた量のままだと、キャッシュに無い長い読み込みの
+                            # 入力 (と in の数) が最初の 1 バッチ分になり、アプリが読み込んだ分を生成に数えてしまう
+                            c["in"] += npt - st["p0"]
+                            st["p0"] = npt
                         if dt > 0:
                             st["tps"] = st["tps"] * 0.6 + d_out / dt * 0.4 if st["tps"] else d_out / dt
                         # 枠が使っている量: n_prompt_tokens に生成分が入る版でも入らない版でも合うように
