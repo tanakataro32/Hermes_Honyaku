@@ -17,6 +17,7 @@ public sealed class SlotPanel : Control
     static readonly Font LampLabFont = new("Yu Gothic UI", 11f, FontStyle.Bold);   // 「読込 +」「生成 +」
     static readonly Font LampNumFont = new("Consolas", 15f, FontStyle.Bold);       // その右の数字
     static readonly Font ValFont = new("Consolas", 12f, FontStyle.Bold);           // バーの右の「207k/262k 24.9t/s」
+    const string ValTemplate = "888k/888k 88.8t/s";   // その欄の幅 (いちばん長くなるとき。Consolas は数字の幅が同じ)
     readonly TurnTracker turns;
     readonly Dictionary<(string, int), (string label, bool openCode, string tip)> labels = [];
     readonly Dictionary<(string, int), double> labelAt = [];                 // 札を最後に結べた時刻 (この PC の時計)
@@ -352,9 +353,11 @@ public sealed class SlotPanel : Control
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
                 // 下の行: バーと「使っている量/上限 速さ」
                 string val = s.Used > 0 ? $"{K(s.Used)}/{K(s.NCtx)}" + (s.Processing && s.Tps > 0 ? $" {s.Tps:0.#}t/s" : "") : $"空き/{K(s.NCtx)}";
+                // 欄の幅は固定 (速さの桁や待機中で数字の長さが変わっても、バーの幅を変えない)。数字は欄の右に寄せる
                 var vs = TextRenderer.MeasureText(val, ValFont);
                 int vw = vs.Width;
-                var br = new Rectangle(cell.X, cell.Y + LampH + 8, Math.Max(10, cell.Width - vw - 4), BarH);
+                int vField = Math.Max(vw, TextRenderer.MeasureText(ValTemplate, ValFont).Width);
+                var br = new Rectangle(cell.X, cell.Y + LampH + 8, Math.Max(10, cell.Width - vField - 6), BarH);
                 using (var b = new SolidBrush(Theme.BarBack)) g.FillRectangle(b, br);
                 double compact = Math.Max(1, s.NCtx - CompactReserveK * 1000.0);   // 明るさの満杯 (OpenCode が圧縮を始める量)
                 var fill = s.Processing ? Hsv(120, 0.8, 0.3 + 0.7 * Math.Clamp(s.Used / compact, 0, 1)) : Theme.Grid;
