@@ -14,6 +14,7 @@ public sealed class NowData
     public List<DiskItem> Disks { get; set; } = [];
     public EnergyBrief? Energy { get; set; }
     public List<SlotServer> Slots { get; set; } = [];
+    public List<double> Cores { get; set; } = [];   // スレッド (論理 CPU) ごとの使用率 %
 }
 
 /// <summary>llama-server 1 台の枠 (/slots)</summary>
@@ -233,6 +234,40 @@ public sealed class EnergyMonthRow
     public double Yen { get; set; }
 }
 
+/// <summary>速度と文脈の散布図 (/api/speed)。llama-server のログから拾った要求ごとの速さ</summary>
+public sealed class SpeedData
+{
+    public List<SpeedRun> Runs { get; set; } = [];
+    public List<SpeedPoint> Points { get; set; } = [];
+}
+
+/// <summary>llama-server を起動したときの設定 (モデルのファイル名・枠の数・MTP)</summary>
+public sealed class SpeedRun
+{
+    public string Server { get; set; } = "";
+    public double Start { get; set; }
+    public string Model { get; set; } = "";
+    public int NSlots { get; set; }
+    public long NCtx { get; set; }
+    public bool Mtp { get; set; }
+}
+
+public sealed class SpeedPoint
+{
+    public double T { get; set; }          // 要求が終わった時刻 (unix 秒)
+    public string Server { get; set; } = "";
+    public int Slot { get; set; }
+    public double? Run { get; set; }       // SpeedRun.Start
+    public int Par { get; set; }           // 生成の間に同じサーバーで動いていた要求の数 (自分を含む)
+    public long Ctx { get; set; }          // 終わったときの文脈の量
+    public long GenN { get; set; }
+    public double? GenTps { get; set; }
+    public long PpN { get; set; }
+    public double? PpTps { get; set; }
+    public long PpFrom { get; set; }       // 読み込みを始めたときの文脈の量
+    public double? Draft { get; set; }     // MTP の当たり率 (0〜1)
+}
+
 public sealed class HwmonClient(Func<string> baseUrl)
 {
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(5) };
@@ -251,4 +286,5 @@ public sealed class HwmonClient(Func<string> baseUrl)
     public Task<NowData?> Now() => Get<NowData>("/api/now");
     public Task<HistoryData?> History(string range) => Get<HistoryData>("/api/history?range=" + range);
     public Task<EnergyData?> Energy() => Get<EnergyData>("/api/energy");
+    public Task<SpeedData?> Speed(double days) => Get<SpeedData>("/api/speed?days=" + days.ToString(System.Globalization.CultureInfo.InvariantCulture));
 }

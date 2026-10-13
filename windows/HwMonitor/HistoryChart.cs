@@ -61,7 +61,10 @@ public sealed class HistoryChart : Control
 
     // 見た値の無い刻みを、直前に見た値で埋めてよい間隔 (秒)。/api/now は 2 秒ごとだが、タイマーのずれや応答待ちで
     // 2 秒の刻みに 1 つも入らないことがあり、そこで線が切れて欠けて見える。使っている量は段のように動くので前の値のままでよい
-    const double CtxHoldMax = 12;
+    double CtxHoldMax => Math.Max(12, NowIntervalSec * 2.5);
+    /// <summary>アプリが /api/now を取りに行く間隔 (秒、上の帯の − ＋)。見た値で埋める間隔の上限に使う</summary>
+    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public int NowIntervalSec { get; set; } = 2;
 
     void FillCtx(HistoryData? d)
     {
@@ -387,7 +390,7 @@ public sealed class HistoryChart : Control
         return r.Right;
     }
 
-    static double Nice(double v)
+    internal static double Nice(double v)
     {
         if (v <= 0) return 0;
         double p = Math.Pow(10, Math.Floor(Math.Log10(v)));

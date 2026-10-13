@@ -15,12 +15,22 @@ public sealed class MainForm : Form
     readonly CostPanel cost = new() { Dock = DockStyle.Fill, Visible = false };
     readonly HistoryChart chart = new() { Dock = DockStyle.Fill };
     readonly EnergyPanel energy = new() { Dock = DockStyle.Fill, Visible = false };
+    readonly SpeedPanel speed = new() { Dock = DockStyle.Fill, Visible = false };
     readonly TranslationPanel translation;
     readonly SplitContainer split;
     readonly ToolStrip bar = new() { GripStyle = ToolStripGripStyle.Hidden, Renderer = new DarkRenderer(), BackColor = Theme.Panel, ForeColor = Theme.Ink, Padding = new Padding(4, 2, 4, 2) };
     readonly ToolStripButton tabGraph = new("グラフ") { CheckOnClick = false };
     readonly ToolStripButton tabEnergy = new("電気代") { CheckOnClick = false };
     readonly ToolStripButton tabCost = new("コスト比較") { CheckOnClick = false, ToolTipText = "電気代と、同じだけ推論したときのレンタル (GPU の時間貸し・API の従量) を比べる" };
+    readonly ToolStripButton tabSpeed = new("速度と文脈") { CheckOnClick = false,
+        ToolTipText = "要求ごとの生成・読み込みの速さを、文脈の量に対して点で描く (llama-server のログから)。\n設定 (モデル・枠の数) を変えたときの比べや、文脈が長くなるとどれだけ遅くなるかを見る" };
+    readonly ToolStripButton deviceView = new("部品別") { CheckOnClick = true,
+        ToolTipText = "上のメーターを部品別 (CPU・GPU ごとに 1 行、スレッドごとの使用率) にする。\n押していないときは項目別 (温度・電力・使用率・メモリの 4 列)" };
+    // 更新の間隔 (btop の − 2000ms ＋ と同じ)。hwmon.py が 2 秒ごとに読んでいるので 2 秒より短くはしない
+    static readonly int[] Intervals = [2, 5, 10, 30, 60];
+    readonly ToolStripButton slower = new("−") { ToolTipText = "更新の間隔を長くする" };
+    readonly ToolStripLabel intervalLabel = new() { ToolTipText = "上のメーター・枠と、グラフ (120 秒・10 分) を取りに行く間隔" };
+    readonly ToolStripButton faster = new("＋") { ToolTipText = "更新の間隔を短くする (2 秒まで)" };
     readonly ToolStripButton topMost = new("最前面") { CheckOnClick = true };
     readonly ToolStripButton showJa = new("和訳") { CheckOnClick = true };
     readonly ToolStripButton showSrc = new("原文を併記") { CheckOnClick = true, ToolTipText = "和訳の 1 区切りごとに、翻訳した英文を下に小さく出す" };
@@ -33,8 +43,8 @@ public sealed class MainForm : Form
     readonly ToolStripLabel status = new() { Alignment = ToolStripItemAlignment.Right };
     readonly System.Windows.Forms.Timer nowTimer = new() { Interval = 2000 };
     readonly System.Windows.Forms.Timer slowTimer = new() { Interval = 2000 };   // 履歴・電気代 (間隔は RefreshSlow で期間ごとに)
-    DateTime lastHistory = DateTime.MinValue, lastEnergy = DateTime.MinValue;
-    bool busyNow, busyHist, busyEnergy, busyAvg;
+    DateTime lastHistory = DateTime.MinValue, lastEnergy = DateTime.MinValue, lastSpeed = DateTime.MinValue;
+    bool busyNow, busyHist, busyEnergy, busyAvg, busySpeed;
     DateTime lastAvg = DateTime.MinValue;
     string lastAvgRange = "";
 
@@ -71,6 +81,17 @@ public sealed class MainForm : Form
         tabGraph.Click += (_, _) => SetTab("graph");
         tabEnergy.Click += (_, _) => SetTab("energy");
         tabCost.Click += (_, _) => SetTab("cost");
+        tabSpeed.Click += (_, _) => SetTab("speed");
+        deviceView.Checked = meters.DeviceView = settings.DeviceView;
+        deviceView.CheckedChanged += (_, _) =>
+        {
+            meters.DeviceView = settings.DeviceView = deviceView.Checked;
+            meters.Height = meters.WantedHeight();
+            settings.Save();
+        };
+        slower.Click += (_, _) => StepInterval(+1);
+        faster.Click += (_, _) => StepInterval(-1);
+        ApplyInterval();
         topMost.Checked = settings.TopMost;
         topMost.CheckedChanged += (_, _) => { TopMost = settings.TopMost = topMost.Checked; settings.Save(); };
         showJa.Checked = settings.ShowTranslation;
@@ -94,7 +115,8 @@ public sealed class MainForm : Form
         };
         var setup = new ToolStripButton("設定…");
         setup.Click += (_, _) => OpenSettings();
-        bar.Items.AddRange([tabGraph, tabEnergy, tabCost, new ToolStripSeparator(), topMost, showJa, showSrc, showThink, autoDeepL,
+        bar.Items.AddRange([tabGraph, tabEnergy, tabCost, tabSpeed, new ToolStripSeparator(), deviceView, slower, intervalLabel, faster,
+                            new ToolStripSeparator(), topMost, showJa, showSrc, showThink, autoDeepL,
                             new ToolStripSeparator(), setup, status, deeplUsage]);
 
         // 真ん中 (グラフ / 電気代) と下 (和訳) は境目をドラッグで動かせる
@@ -103,6 +125,7 @@ public sealed class MainForm : Form
         split.Panel1.Controls.Add(chart);
         split.Panel1.Controls.Add(energy);
         split.Panel1.Controls.Add(cost);
+        split.Panel1.Controls.Add(speed);
         split.Panel2.Controls.Add(translation);
 
         Controls.Add(split);
@@ -113,7 +136,21 @@ public sealed class MainForm : Form
 
         chart.Range = settings.Range;
         chart.Group = settings.Group;
-        chart.CompactReserveK = slots.CompactReserveK = settings.CompactReserveK;
+        chart.CompactReserveK = slots.CompactReserveK = speed.CompactReserveK = settings.CompactReserveK;
+        speed.Y = settings.SpeedY;
+        speed.ColorBy = settings.SpeedColor;
+        speed.Days = settings.SpeedDays;
+        speed.Hidden = [.. settings.SpeedHidden];
+        speed.SelectionChanged += (_, _) =>
+        {
+            bool reload = settings.SpeedDays != speed.Days;
+            settings.SpeedY = speed.Y;
+            settings.SpeedColor = speed.ColorBy;
+            settings.SpeedDays = speed.Days;
+            settings.SpeedHidden = [.. speed.Hidden];
+            settings.Save();
+            if (reload) _ = RefreshSpeed(force: true);
+        };
         chart.SelectionChanged += (_, _) =>
         {
             settings.Range = chart.Range;
@@ -157,11 +194,12 @@ public sealed class MainForm : Form
 
     void SetTab(string tab)
     {
-        settings.Tab = tab is "energy" or "cost" ? tab : "graph";
+        settings.Tab = tab is "energy" or "cost" or "speed" ? tab : "graph";
         settings.Save();
         chart.Visible = tabGraph.Checked = settings.Tab == "graph";
         energy.Visible = tabEnergy.Checked = settings.Tab == "energy";
         cost.Visible = tabCost.Checked = settings.Tab == "cost";
+        speed.Visible = tabSpeed.Checked = settings.Tab == "speed";
         _ = RefreshSlow(force: true);
     }
 
@@ -200,13 +238,49 @@ public sealed class MainForm : Form
         finally { busyNow = false; }
     }
 
-    // 履歴: 120 秒・10 分は 2 秒ごと、30 分は 5 秒ごと、1 時間は 10 秒ごと、それより長い期間は 1 分ごと。電気代は 1 分ごと
+    // 履歴: 120 秒・10 分は 2 秒ごと、30 分は 5 秒ごと、1 時間は 10 秒ごと、それより長い期間は 1 分ごと (更新の間隔より短くはしない)。
+    // 電気代と速度と文脈は 1 分ごと
     async Task RefreshSlow(bool force = false)
     {
-        var due = TimeSpan.FromSeconds(settings.Range switch { "2m" or "10m" => 2, "30m" => 5, "1h" => 10, _ => 60 });
+        int iv = settings.IntervalSec;
+        var due = TimeSpan.FromSeconds(Math.Max(iv, settings.Range switch { "2m" or "10m" => 2, "30m" => 5, "1h" => 10, _ => 60 }));
         if (chart.Visible && (force || DateTime.Now - lastHistory >= due)) await RefreshHistory();
         if ((energy.Visible || cost.Visible) && (force || DateTime.Now - lastEnergy >= TimeSpan.FromSeconds(60))) await RefreshEnergy();
+        await RefreshSpeed(force);
         await RefreshAverages(force);
+    }
+
+    async Task RefreshSpeed(bool force = false)
+    {
+        if (!speed.Visible || busySpeed || (!force && DateTime.Now - lastSpeed < TimeSpan.FromSeconds(60))) return;
+        busySpeed = true;
+        try
+        {
+            speed.Data = await api.Speed(speed.Days);
+            lastSpeed = DateTime.Now;
+        }
+        catch (Exception ex) { speed.ShowError("速度と文脈を読めません: " + ex.Message); }
+        finally { busySpeed = false; }
+    }
+
+    // 更新の間隔を 1 段変える (dir = +1 で長く、-1 で短く)
+    void StepInterval(int dir)
+    {
+        int i = Array.IndexOf(Intervals, settings.IntervalSec);
+        if (i < 0) i = 0;
+        settings.IntervalSec = Intervals[Math.Clamp(i + dir, 0, Intervals.Length - 1)];
+        settings.Save();
+        ApplyInterval();
+    }
+
+    void ApplyInterval()
+    {
+        int iv = Math.Max(2, settings.IntervalSec);
+        nowTimer.Interval = iv * 1000;
+        chart.NowIntervalSec = iv;
+        intervalLabel.Text = $"{iv}秒";
+        slower.Enabled = iv < Intervals[^1];
+        faster.Enabled = iv > Intervals[0];
     }
 
     // 枠のメーターの色の基準 (サーバーごとの生成・読込の平均)。「グラフの期間」ならグラフの ▶AVE と同じ値、「直近 1 時間」なら 1 時間の記録から。
@@ -320,7 +394,8 @@ public sealed class MainForm : Form
         settings.DeepLKey = key.Text.Trim();
         settings.DeepLCap = (long)cap.Value * 10000;
         settings.CompactReserveK = (int)reserve.Value;
-        chart.CompactReserveK = slots.CompactReserveK = settings.CompactReserveK;
+        chart.CompactReserveK = slots.CompactReserveK = speed.CompactReserveK = settings.CompactReserveK;
+        speed.Invalidate();
         settings.MeterAvg = meterAvg.SelectedIndex == 1 ? "1h" : "graph";
         _ = deepl.RefreshUsage();
         settings.Save();
