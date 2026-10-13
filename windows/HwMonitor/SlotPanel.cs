@@ -5,7 +5,9 @@ namespace HwMonitor;
 /// <summary>llama-server の枠のメーター。サーバーごとに 1 段、枠を横に並べる (使っている量 / 枠の上限、生成の速さ)。
 /// 推論中の枠は、翻訳の画面のターン (発信元・コンテキスト量) と入力の量が近いものを探して「OpenCode」などの札を付ける。
 /// 待機中の枠は、最後に使っていた量と札を薄く残す。
-/// 推論中のバーの色は、色相 = 速さ (生成・読込が平均の何倍か)、明るさ = 使っている量 (圧縮ラインで一番明るい)</summary>
+/// 推論中のバーは緑で、明るさ = 使っている量 (圧縮ラインで一番明るい)。
+/// 読込・生成が終わるたびに、その間に増えた分 (始まったときの位置 → 終わったときの位置) を
+/// 読込 = 青・生成 = 橙 (グラフの線と同じ色) で左から右へ伸ばして見せ、数秒点滅させて消す</summary>
 [DesignerCategory("Code")]
 public sealed class SlotPanel : Control
 {
@@ -14,7 +16,8 @@ public sealed class SlotPanel : Control
     readonly Dictionary<(string, int), (string label, bool openCode, string tip)> labels = [];
     readonly Dictionary<(string, int), double> labelAt = [];                 // 札を最後に結べた時刻 (この PC の時計)
     readonly Dictionary<(string, int), (double started, double seen)> startSeen = [];   // 枠が新しい要求を受けたのに気づいた時刻
-    readonly Dictionary<(string, int), double> lastRatio = [];               // 生成・読込が両方 0 の一瞬は、前の色のまま
+    readonly Dictionary<(string, int), Track> tracks = [];                  // 読込・生成の始まりの位置と、光らせている増えた分
+    readonly System.Windows.Forms.Timer anim = new() { Interval = 33 };     // 光らせている間だけ動かす
     readonly ToolTip tip = new() { InitialDelay = 300, AutoPopDelay = 15000 };
     readonly List<(Rectangle r, string text)> hits = [];
     string? shownTip;
@@ -25,24 +28,32 @@ public sealed class SlotPanel : Control
         this.turns = turns;
         DoubleBuffered = true;
         BackColor = Theme.Back;
+        anim.Tick += (_, _) => { Invalidate(); if (!Flashing()) anim.Stop(); };
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) anim.Dispose();
+        base.Dispose(disposing);
     }
 
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public List<SlotServer> Data
     {
         get => data;
-        set { data = value ?? []; Match(); Invalidate(); }
+        set { data = value ?? []; Match(); Follow(); Invalidate(); }
     }
+
+    /// <summary>いま渡す Data を hwmon.py が読んだ時刻 (unix 秒、llmsv の時計)。Flashed で渡す</summary>
+    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public double Ts { get; set; }
+
+    /// <summary>増えた分を光らせ始めたとき (サーバー, 枠, 読込か, 始まりの量, 終わりの量, 時刻)。グラフの文脈の段に ● を置くのに使う</summary>
+    public event Action<string, int, bool, long, long, double>? Flashed;
 
     /// <summary>OpenCode が圧縮を始める余裕 (k トークン)。明るさの満杯 = 枠の上限 − これ</summary>
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int CompactReserveK { get; set; } = 20;
-
-    /// <summary>色の基準にするサーバーごとの生成・読込の平均 (t/s) と、その説明 (「グラフの期間 30分」など)</summary>
-    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public Dictionary<string, (double? gen, double? read)> Averages { get; set; } = [];
-    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public string AverageLabel { get; set; } = "";
 
     public int WantedHeight() => data.Count == 0 ? 0 : Pad + data.Count * RowH + 2;
 
@@ -93,13 +104,86 @@ public sealed class SlotPanel : Control
 
     const double HoldSec = 10;
 
-    // 速さの色: 平均の何倍か (log2 で ±1 = 0.5 倍〜2 倍) を色相に。0.5 倍以下 赤 → 1 倍 緑 → 2 倍以上 水色。
-    // 明るさは使っている量 ÷ 圧縮ライン。空に近いと暗く、圧縮ラインで一番明るい
-    static Color SpeedColor(double ratio, double fill)
+    // 読込・生成で増えた分を光らせる。
+    //   読込: 新しい要求を受ける直前の位置 (前の要求が終わったときの量) → 入力の量 (読込が終わった位置)
+    //   生成: 入力の量 → 生成が終わったときの量
+    // 枠の様子は更新の間隔 (2 秒〜) ごとにしか見えないので、読込・生成を見ないうちに次へ進んでいたらその時点でまとめて光らせる
+    sealed class Track
     {
-        double x = Math.Clamp(Math.Log2(Math.Max(ratio, 1e-6)), -1, 1);
-        double hue = x < 0 ? 120 * (1 + x) : 120 + 70 * x;   // 0 = 赤、120 = 緑、190 = 水色
-        return Hsv(hue, 0.8, 0.3 + 0.7 * Math.Clamp(fill, 0, 1));
+        public double? Started;     // いまの要求を受けた時刻 (変わったら新しい要求)
+        public int Phase;           // 0 = 待機、1 = 読込、2 = 生成
+        public long Used;           // 前に見たときの使っている量
+        public long ReadFrom, GenFrom;
+        public readonly List<Flash> Flashes = [];
+        public Flash? LastRead, LastGen;   // 上の行の右の数字 (次に増えるまで出しておく)
+    }
+
+    sealed record Flash(bool Read, long From, long To, double At);
+
+    const double GrowSec = 0.6, FlashSec = 4;   // 左から右へ伸ばす時間、光らせておく時間
+    static readonly Color ReadColor = Theme.Series[0], GenColor = Theme.Series[1];   // グラフの読込 (青)・生成 (橙)
+
+    static double Clock() => Environment.TickCount64 / 1000.0;
+
+    void Follow()
+    {
+        double now = Clock();
+        foreach (var srv in data)
+            foreach (var s in srv.Slots)
+            {
+                int phase = !s.Processing ? 0 : s.Decoded > 0 ? 2 : 1;
+                if (!tracks.TryGetValue((srv.Server, s.Id), out var tr))
+                {
+                    // アプリを開いたとき (途中から見たとき) は光らせず、いまの様子だけ覚える
+                    tracks[(srv.Server, s.Id)] = new Track { Started = s.Started, Phase = phase, Used = s.Used, GenFrom = s.Prompt };
+                    continue;
+                }
+                if (s.Started != null && s.Started != tr.Started)
+                {
+                    // 新しい要求。前の要求の生成を見届けていなければ、前に見た量で締める
+                    if (tr.Phase == 2) Add(srv.Server, s.Id, tr, false, tr.GenFrom, tr.Used, now);
+                    tr.Started = s.Started;
+                    tr.ReadFrom = tr.Used;
+                    tr.Phase = 1;
+                }
+                if (tr.Phase == 1 && phase != 1)
+                {
+                    // 読込が終わった (生成に入った、または生成を見ないうちに要求が終わった)
+                    Add(srv.Server, s.Id, tr, true, tr.ReadFrom, s.Prompt, now);
+                    tr.GenFrom = s.Prompt;
+                    tr.Phase = phase;
+                    if (phase == 0) Add(srv.Server, s.Id, tr, false, s.Prompt, s.Used, now);
+                }
+                else if (tr.Phase == 2 && phase == 0)
+                {
+                    Add(srv.Server, s.Id, tr, false, tr.GenFrom, s.Used, now);
+                    tr.Phase = 0;
+                }
+                else if (tr.Phase == 0 && phase == 2)
+                {
+                    tr.GenFrom = s.Prompt;   // 要求の始まりを見ていないとき (hwmon を起動し直した直後など)
+                    tr.Phase = 2;
+                }
+                tr.Used = s.Used;
+                tr.Flashes.RemoveAll(f => now - f.At > FlashSec);
+            }
+        if (Flashing() && !anim.Enabled) anim.Start();
+    }
+
+    // 増えていないとき (圧縮・ほかの会話で量が減った) は光らせない
+    void Add(string server, int id, Track tr, bool read, long from, long to, double now)
+    {
+        if (to <= from) return;
+        var f = new Flash(read, from, to, now);
+        tr.Flashes.Add(f);
+        if (read) tr.LastRead = f; else tr.LastGen = f;
+        Flashed?.Invoke(server, id, read, from, to, Ts);
+    }
+
+    bool Flashing()
+    {
+        double now = Clock();
+        return tracks.Values.Any(t => t.Flashes.Any(f => now - f.At <= FlashSec));
     }
 
     static Color Hsv(double h, double s, double v)
@@ -109,28 +193,48 @@ public sealed class SlotPanel : Control
         return Color.FromArgb((int)Math.Round((r + m) * 255), (int)Math.Round((g + m) * 255), (int)Math.Round((b + m) * 255));
     }
 
-    /// <summary>この枠の速さが平均の何倍か (生成・読込の大きいほう) と、その説明。平均が無いときは 1 倍 (緑)</summary>
-    (double ratio, string text) SpeedRatio(string server, SlotInfo s)
+    static Color Mix(Color a, Color b, double t) =>
+        Color.FromArgb((int)(a.R + (b.R - a.R) * t), (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
+
+    // 光らせている増えた分を描く。0〜GrowSec 秒: 始まりの位置から終わりの位置へ伸ばす (先頭に白い線)。
+    // そのあと 0.8 秒ごとに 2〜3 回点滅しながら FlashSec 秒で薄れて、もとのバーに戻る
+    void DrawFlashes(Graphics g, Rectangle br, long nCtx, Track tr, double now)
     {
-        Averages.TryGetValue(server, out var avg);
-        double rg = avg.gen is > 0 && s.Tps > 0 ? s.Tps / avg.gen.Value : 0;
-        double rr = avg.read is > 0 && s.PpTps > 0 ? s.PpTps / avg.read.Value : 0;
-        var key = (server, s.Id);
-        string text;
-        double ratio;
-        if (rg == 0 && rr == 0)
+        if (nCtx <= 0) return;
+        foreach (var f in tr.Flashes)
         {
-            ratio = lastRatio.TryGetValue(key, out var lr) ? lr : 1;
-            text = avg.gen == null && avg.read == null ? "平均がまだ無いので緑" : "速さがまだ出ていないので前の色のまま";
+            double age = now - f.At;
+            if (age < 0 || age > FlashSec) continue;
+            int x0 = br.X + (int)(br.Width * Math.Min(1.0, f.From / (double)nCtx));
+            int x1 = br.X + (int)(br.Width * Math.Min(1.0, f.To / (double)nCtx));
+            if (x1 - x0 < 2) x1 = Math.Min(br.Right, x0 + 2);
+            double grow = Math.Min(1, age / GrowSec);
+            int xe = x0 + (int)Math.Round((x1 - x0) * (1 - Math.Pow(1 - grow, 3)));
+            double a = age < GrowSec ? 1 : (1 - (age - GrowSec) / (FlashSec - GrowSec)) * (0.6 + 0.4 * Math.Cos(2 * Math.PI * (age - GrowSec) / 0.8));
+            var c = f.Read ? ReadColor : GenColor;
+            using (var b = new SolidBrush(Color.FromArgb((int)(255 * Math.Clamp(a, 0, 1)), c)))
+                g.FillRectangle(b, x0, br.Y, Math.Max(1, xe - x0), br.Height);
+            using (var p = new Pen(Color.FromArgb((int)(200 * Math.Clamp(a, 0, 1)), c)))
+                g.DrawRectangle(p, x0, br.Y - 2, Math.Max(1, xe - x0), br.Height + 3);
+            if (grow < 1) using (var p = new Pen(Color.White, 2)) g.DrawLine(p, xe, br.Y - 2, xe, br.Bottom + 1);
         }
-        else
-        {
-            ratio = Math.Max(rg, rr);
-            lastRatio[key] = ratio;
-            text = rr > rg ? $"読込 {s.PpTps:0.#} t/s = 平均 {avg.read:0.#} の {rr:0.00} 倍" : $"生成 {s.Tps:0.#} t/s = 平均 {avg.gen:0.#} の {rg:0.00} 倍";
-        }
-        return (ratio, text + (AverageLabel != "" ? $" (平均: {AverageLabel})" : ""));
     }
+
+    // 上の行の右に出す「読込 +12.3k」「生成 +1.2k」。数字は次に増えるまで出しておく。
+    // 増えた瞬間はランプのようにパッと白っぽく光り、残光を引きながら (LampTau 秒で減る) 落ち着いた暗めの色に戻る
+    const double LampTau = 0.9, LampDim = 0.45;
+    (bool read, string text, Color color)[] FlashTexts(Track? tr, double now) =>
+        tr == null ? [] : new[] { tr.LastRead, tr.LastGen }.OfType<Flash>()
+            .Select(f =>
+            {
+                double age = Math.Max(0, now - f.At);
+                var c = Mix(Theme.Back, f.Read ? ReadColor : GenColor, LampDim + (1 - LampDim) * Math.Exp(-age / LampTau));
+                return (f.Read, LampNum(f.To - f.From), Mix(c, Color.White, 0.7 * Math.Max(0, 1 - age / 0.25)));
+            })
+            .ToArray();
+
+    // 右の数字は k トークン・小数 1 桁にそろえる (0.8k・12.3k・123.4k)。欄の幅は 999.9k が入る分
+    static string LampNum(long v) => $"{Math.Min(v, 999_949) / 1000.0:0.0}k";
 
     static string K(double v) => v >= 100_000 ? $"{v / 1000:0}k" : v >= 1000 ? $"{v / 1000:0.0}k" : $"{v:0}";
 
@@ -139,6 +243,7 @@ public sealed class SlotPanel : Control
         var g = e.Graphics;
         g.Clear(BackColor);
         hits.Clear();
+        double now = Clock();
         using (var p = new Pen(Theme.Grid)) g.DrawLine(p, Pad, 1, Width - Pad, 1);
         int y = Pad / 2 + 2;
         foreach (var srv in data)
@@ -158,10 +263,27 @@ public sealed class SlotPanel : Control
                 var s = srv.Slots[i];
                 var cell = new Rectangle(Pad + NameW + i * (cw + Gap), y, cw, RowH - 4);
                 labels.TryGetValue((srv.Server, s.Id), out var lb);
+                tracks.TryGetValue((srv.Server, s.Id), out var tr);
                 double pct = s.NCtx > 0 ? s.Used * 100.0 / s.NCtx : 0;
-                // 上の行: 枠の番号と札 (OpenCode は緑)
+                // 上の行: 枠の番号と札 (OpenCode は緑)。右に、光らせている増えた分
+                // 位置と桁は固定: 右端から「読込 +___._k」「生成 +___._k」の 2 つの欄を必ず取り、数字は欄の中で右に寄せる
+                // (まだ出ていない欄も場所だけ取る。札の長さや数字の大きさで動かない)
+                var lampFont = Theme.Num;
+                int labW = TextRenderer.MeasureText("読込 +", lampFont, Size.Empty, TextFormatFlags.NoPadding).Width;
+                int numW = TextRenderer.MeasureText(LampNum(999_900), lampFont, Size.Empty, TextFormatFlags.NoPadding).Width;
+                int fieldW = labW + numW, fx = cell.Right - fieldW * 2 - 8;
+                var lamps = FlashTexts(tr, now);
+                for (int li = 0; li < 2; li++)
+                {
+                    int lx = fx + 4 + li * (fieldW + 4);
+                    var lamp = lamps.FirstOrDefault(x => x.read == (li == 0));
+                    if (lamp.text == null) continue;
+                    TextRenderer.DrawText(g, li == 0 ? "読込 +" : "生成 +", lampFont, new Point(lx, cell.Y), lamp.color, TextFormatFlags.NoPadding);
+                    TextRenderer.DrawText(g, lamp.text, lampFont, new Rectangle(lx + labW, cell.Y, numW, 15), lamp.color,
+                        TextFormatFlags.Right | TextFormatFlags.NoPadding);
+                }
                 string head = $"枠{s.Id}" + (lb.label != null ? "  " + lb.label : s.Processing ? "  推論中" : "");
-                TextRenderer.DrawText(g, head, Theme.Small, new Rectangle(cell.X, cell.Y, cell.Width, 15),
+                TextRenderer.DrawText(g, head, Theme.Small, new Rectangle(cell.X, cell.Y, Math.Max(0, fx - cell.X), 15),
                     lb.openCode ? Theme.Good : s.Processing ? Theme.Ink : Theme.Muted, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
                 // 下の行: バーと「使っている量/上限 速さ」
                 string val = s.Used > 0 ? $"{K(s.Used)}/{K(s.NCtx)}" + (s.Processing && s.Tps > 0 ? $" {s.Tps:0.#}t/s" : "") : $"空き/{K(s.NCtx)}";
@@ -169,17 +291,19 @@ public sealed class SlotPanel : Control
                 var br = new Rectangle(cell.X, cell.Y + 19, Math.Max(10, cell.Width - vw - 4), 8);
                 using (var b = new SolidBrush(Theme.BarBack)) g.FillRectangle(b, br);
                 double compact = Math.Max(1, s.NCtx - CompactReserveK * 1000.0);   // 明るさの満杯 (OpenCode が圧縮を始める量)
-                var (ratio, speedText) = s.Processing ? SpeedRatio(srv.Server, s) : (1, "");
-                var fill = s.Processing ? SpeedColor(ratio, s.Used / compact) : Theme.Grid;
+                var fill = s.Processing ? Hsv(120, 0.8, 0.3 + 0.7 * Math.Clamp(s.Used / compact, 0, 1)) : Theme.Grid;
                 if (pct > 0) using (var b = new SolidBrush(fill)) g.FillRectangle(b, br.X, br.Y, Math.Max(1, (int)(br.Width * Math.Min(100, pct) / 100)), br.Height);
                 using (var p = new Pen(Theme.Edge)) g.DrawRectangle(p, br);
+                if (tr != null) DrawFlashes(g, br, s.NCtx, tr, now);
                 TextRenderer.DrawText(g, val, Theme.Num, new Point(cell.Right - vw, cell.Y + 14), s.Processing ? Theme.Ink : Theme.Muted);
                 string when = s.LastActive is double la ? DateTimeOffset.FromUnixTimeMilliseconds((long)(la * 1000)).LocalDateTime.ToString("HH:mm:ss") : "-";
                 hits.Add((cell, $"{srv.Server} 枠{s.Id}: {(s.Processing ? "推論中" : "待機中 (最後に使っていた量)")}\n" +
                                 $"使っている量 {s.Used:#,0} / {s.NCtx:#,0} トークン ({pct:0.0}%)\n" +
                                 $"入力 {s.Prompt:#,0}・生成 {s.Decoded:#,0}" + (s.Processing ? $"・{s.Tps:0.#} トークン/秒" : "") +
                                 $"\n最後に動いた時刻 {when}" + (lb.tip != null ? "\n" + lb.tip : "") +
-                                (s.Processing ? $"\nバーの色: {speedText}、明るさ: 圧縮ライン {compact / 1000:0}k の {s.Used * 100 / compact:0}%" : "")));
+                                (s.Processing ? $"\nバーの明るさ: 圧縮ライン {compact / 1000:0}k の {s.Used * 100 / compact:0}%" : "") +
+                                (tr != null && tr.Flashes.Any(f => now - f.At <= FlashSec) ? "\n" + string.Join("\n", tr.Flashes.Where(f => now - f.At <= FlashSec).Select(f =>
+                                    $"{(f.Read ? "読込" : "生成")} {f.From:#,0} → {f.To:#,0} (+{f.To - f.From:#,0})")) : "")));
             }
             y += RowH;
         }
