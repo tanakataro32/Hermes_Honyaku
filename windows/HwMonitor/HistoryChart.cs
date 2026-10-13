@@ -4,7 +4,8 @@ using System.Drawing.Drawing2D;
 namespace HwMonitor;
 
 /// <summary>履歴の折れ線グラフ。上の段で期間 (1 時間〜30 日) と項目 (電力・温度・使用率・メモリ) を選ぶ。
-/// 凡例を押すとその線を隠す / 出す。マウスを乗せた時刻の値を出す。トークンは生成・読込・文脈 (枠が使っている量) の 3 段に分ける</summary>
+/// 凡例を押すとその線を隠す / 出す。マウスを乗せた時刻の値を出す。トークンは生成・読込・文脈 (枠が使っている量) の 3 段に分ける。
+/// 「なめらか」で、電力・使用率・トークン (生成・読込) の線を前後の平均で均して描く</summary>
 [DesignerCategory("Code")]
 public sealed class HistoryChart : Control
 {
@@ -31,6 +32,9 @@ public sealed class HistoryChart : Control
     /// <summary>OpenCode が圧縮を始める余裕 (k トークン)。枠の上限 − これ の高さに 3 段目の圧縮ラインを引く</summary>
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int CompactReserveK { get; set; } = 20;
+    /// <summary>なめらか: 線を前後 SmoothWindow 秒の平均で均して描く (描くときだけ。記録や電気代は変えない)</summary>
+    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool Smooth { get; set; }
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public HistoryData? Data { get => data; set { data = value; ApplyLive(value); FillCtx(value); error = null; Invalidate(); } }
 
@@ -142,6 +146,40 @@ public sealed class HistoryChart : Control
         }
     }
 
+    // なめらかにする項目: 電力・使用率・トークン。温度はもともとなめらか、メモリと文脈は段のように動くので均さない
+    static readonly HashSet<string> SmoothGroups = ["p", "u", "r"];
+    bool SmoothOn => Smooth && SmoothGroups.Contains(Group);
+
+    // 平均する幅 (秒): 表示している期間の 1/20 (2 分なら 6 秒、10 分なら 30 秒、1 時間なら 3 分、24 時間なら 72 分)。少なくとも記録 3 つ分
+    long SmoothWindow => data == null ? 0 : Math.Max((data.To - data.From) / 20, data.Step * 3L);
+
+    static string SpanText(long sec) => sec < 60 ? $"{sec}秒" : sec < 3600 ? $"{sec / 60.0:0.#}分" : $"{sec / 3600.0:0.#}時間";
+
+    // 描く値。なめらかのときは、その時刻の前後 SmoothWindow / 2 秒にある記録の平均 (記録の無い所・途切れた所はまたがない。端は片側だけの平均)
+    List<double?> View(string key, long gap)
+    {
+        var vals = data!.Series[key];
+        if (!SmoothOn || IsCtx(key)) return vals;
+        int n = Math.Min(vals.Count, data.T.Count);
+        var outv = Enumerable.Repeat<double?>(null, vals.Count).ToList();
+        long half = SmoothWindow / 2;
+        for (int i = 0; i < n; i++)
+        {
+            if (vals[i] is null) continue;
+            int s = i;   // 途切れていない区間 s〜i
+            while (i + 1 < n && vals[i + 1] is double && data.T[i + 1] - data.T[i] <= gap) i++;
+            int lo = s, hi = s;
+            double sum = 0;
+            for (int j = s; j <= i; j++)
+            {
+                while (hi <= i && data.T[hi] - data.T[j] <= half) sum += vals[hi++]!.Value;
+                while (data.T[j] - data.T[lo] > half) sum -= vals[lo++]!.Value;
+                outv[j] = Math.Round(sum / (hi - lo), 1);
+            }
+        }
+        return outv;
+    }
+
     public void ShowError(string message) { error = message; Invalidate(); }
 
     /// <summary>0 でない所だけの平均 (止まっている間を除いた、動いているときの速さ)。▶AVE に使う</summary>
@@ -188,6 +226,9 @@ public sealed class HistoryChart : Control
         x += 16;
         foreach (var (key, label, _) in Groups)
             x = Button(g, x, label, Group == key, () => { Group = key; Invalidate(); SelectionChanged?.Invoke(this, EventArgs.Empty); }) + 2;
+        if (SmoothGroups.Contains(Group))
+            Button(g, x + 14, SmoothOn && data != null ? $"なめらか {SpanText(SmoothWindow)}" : "なめらか", SmoothOn,
+                () => { Smooth = !Smooth; Invalidate(); SelectionChanged?.Invoke(this, EventArgs.Empty); });
 
         var plot = new Rectangle(PadL, BarH + LegendH + 6, Width - PadL - PadR, Height - BarH - LegendH - 6 - PadB);
         if (plot.Width < 40 || plot.Height < 30) return;
@@ -222,13 +263,14 @@ public sealed class HistoryChart : Control
         // 段ごとに、目盛り (横線と値・時刻の縦線) と線を描く。目盛りの上限は段に出ている線だけで決める
         using var gridPen = new Pen(Theme.Grid);
         long gap = data.MaxGap > 0 ? data.MaxGap : (long)(data.Step * 2.5);   // 途中で記録が無い所 (null や max_gap より空いた所) は線を切る
+        var view = shown.ToDictionary(k => k, k => View(k, gap));
         var panes = Panes(shown, plot);
         foreach (var (pr, pkeys, title) in panes)
         {
             bool ctx = pkeys.Count > 0 && pkeys.All(IsCtx);   // 3 段目 (文脈、k トークン)
             string pu = ctx ? "k" : unit;
             double max = 0;
-            foreach (var k in pkeys) foreach (var v in data.Series[k]) if (v is double d && d > max) max = d;
+            foreach (var k in pkeys) foreach (var v in view[k]) if (v is double d && d > max) max = d;
             if (ctx) max = Math.Max(max, ctxLimit);   // 枠の上限まで入るように
             double top = Group == "u" ? 100 : Nice(max * (ctx ? 1.0 : 1.08));
             if (top <= 0) top = 1;
@@ -274,7 +316,7 @@ public sealed class HistoryChart : Control
             foreach (var k in pkeys)
             {
                 using var pen = new Pen(ColorOf(k, 0), k == "p:全体" ? 2f : 1.4f);
-                var vals = data.Series[k];
+                var vals = view[k];
                 var pts = new List<PointF>();
                 long prev = 0;
                 for (int i = 0; i < data.T.Count; i++)
@@ -299,7 +341,8 @@ public sealed class HistoryChart : Control
                 }
             g.SmoothingMode = SmoothingMode.None;
 
-            // トークンは、0 でない所だけの平均 (止まっている間を除いた、動いているときの速さ) を軸のところに ▶AVE で出す
+            // トークンは、0 でない所だけの平均 (止まっている間を除いた、動いているときの速さ) を軸のところに ▶AVE で出す。
+            // なめらかでも元の値で (均すと止まっている間の 0 が小さな値になって平均が下がる)
             if (Group == "r" && !ctx)
                 foreach (var k in pkeys)
                 {
@@ -331,9 +374,9 @@ public sealed class HistoryChart : Control
             float hx = X(data.T[idx] + data.Step / 2);
             using (var p = new Pen(Theme.Muted) { DashStyle = DashStyle.Dot })
                 foreach (var (pr, _, _) in panes) g.DrawLine(p, hx, pr.Y, hx, pr.Bottom);
-            var lines = new List<(string, Color)> { (FormatTime(data.T[idx] + data.Step / 2, t1 - t0), Theme.Head) };
+            var lines = new List<(string, Color)> { (FormatTime(data.T[idx] + data.Step / 2, t1 - t0) + (SmoothOn ? $"  ({SpanText(SmoothWindow)}の平均)" : ""), Theme.Head) };
             foreach (var k in shown)
-                if (data.Series[k][idx] is double v) lines.Add(($"{k[2..]}  {v:0.#}{(IsCtx(k) ? "k" : unit)}", ColorOf(k, 0)));
+                if (idx < view[k].Count && view[k][idx] is double v) lines.Add(($"{k[2..]}  {v:0.#}{(IsCtx(k) ? "k" : unit)}", ColorOf(k, 0)));
             // その刻みに入る ● (光った所) の増えた分
             if (Group == "r" && t1 - t0 <= MarkMaxRange)
                 foreach (var m in marks.Where(m => m.t >= data.T[idx] && m.t < data.T[idx] + data.Step && shown.Contains(m.key)).TakeLast(4))

@@ -29,6 +29,7 @@ public sealed class Settings
     public List<string> SpeedHidden { get; set; } = [];  // 凡例で隠したもの
     public string Range { get; set; } = "1h";
     public string Group { get; set; } = "p";
+    public bool Smooth { get; set; }                     // グラフの「なめらか」(電力・使用率・トークンを前後の平均で均す)
     public string Tab { get; set; } = "graph";
     public int[]? Bounds { get; set; }
 
