@@ -1,0 +1,12 @@
+{
+  "name": "llmsv ハードウェアモニタ",
+  "short_name": "llmsv",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#131a1f",
+  "theme_color": "#131a1f",
+  "icons": [
+    {"src": "/m/icon-180.png", "sizes": "180x180", "type": "image/png"},
+    {"src": "/m/icon-512.png", "sizes": "512x512", "type": "image/png"}
+  ]
+}
