@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Drawing.Drawing2D;
 
 namespace HwMonitor;
 
@@ -7,11 +8,15 @@ namespace HwMonitor;
 /// 待機中の枠は、最後に使っていた量と札を薄く残す。
 /// 推論中のバーは緑で、明るさ = 使っている量 (圧縮ラインで一番明るい)。
 /// 読込・生成が終わるたびに、その間に増えた分 (始まったときの位置 → 終わったときの位置) を
-/// 読込 = 青・生成 = 橙 (グラフの線と同じ色) で左から右へ伸ばして見せ、数秒点滅させて消す</summary>
+/// 読込 = 青・生成 = 橙 (グラフの線と同じ色) で左から右へ伸ばして見せ、数秒点滅させて消す。
+/// 上の行の右の「読込 +12.3k」「生成 +1.2k」は大きな字で、増えた瞬間に弾んで激しく点滅する</summary>
 [DesignerCategory("Code")]
 public sealed class SlotPanel : Control
 {
-    const int RowH = 36, NameW = 76, Pad = 8, Gap = 8;
+    const int RowH = 52, NameW = 76, Pad = 8, Gap = 8, LampH = 26, BarH = 12;
+    static readonly Font LampLabFont = new("Yu Gothic UI", 11f, FontStyle.Bold);   // 「読込 +」「生成 +」
+    static readonly Font LampNumFont = new("Consolas", 15f, FontStyle.Bold);       // その右の数字
+    static readonly Font ValFont = new("Consolas", 12f, FontStyle.Bold);           // バーの右の「207k/262k 24.9t/s」
     readonly TurnTracker turns;
     readonly Dictionary<(string, int), (string label, bool openCode, string tip)> labels = [];
     readonly Dictionary<(string, int), double> labelAt = [];                 // 札を最後に結べた時刻 (この PC の時計)
@@ -120,7 +125,8 @@ public sealed class SlotPanel : Control
 
     sealed record Flash(bool Read, long From, long To, double At);
 
-    const double GrowSec = 0.6, FlashSec = 4;   // 左から右へ伸ばす時間、光らせておく時間
+    const double GrowSec = 0.6, FlashSec = 5;   // 左から右へ伸ばす時間、光らせておく時間
+    const double StrobeSec = 1.2, StrobeHalf = 0.09;   // 増えた直後に激しく点滅する時間と、点いている・消えている時間
     static readonly Color ReadColor = Theme.Series[0], GenColor = Theme.Series[1];   // グラフの読込 (青)・生成 (橙)
 
     static double Clock() => Environment.TickCount64 / 1000.0;
@@ -196,8 +202,12 @@ public sealed class SlotPanel : Control
     static Color Mix(Color a, Color b, double t) =>
         Color.FromArgb((int)(a.R + (b.R - a.R) * t), (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
 
-    // 光らせている増えた分を描く。0〜GrowSec 秒: 始まりの位置から終わりの位置へ伸ばす (先頭に白い線)。
-    // そのあと 0.8 秒ごとに 2〜3 回点滅しながら FlashSec 秒で薄れて、もとのバーに戻る
+    // 増えた直後の点滅が「点いている」か (StrobeSec 秒の間、StrobeHalf 秒ごとに点いたり消えたり)
+    static bool StrobeOn(double age) => age < StrobeSec && (int)(age / StrobeHalf) % 2 == 0;
+
+    // 光らせている増えた分を描く。0〜GrowSec 秒: 始まりの位置から終わりの位置へ伸ばす (先頭に白く光る線)。
+    // 伸び切った瞬間に白く光り、StrobeSec 秒まで激しく点滅、そのあと 0.3 秒ごとに点滅しながら FlashSec 秒で薄れて、もとのバーに戻る。
+    // バーの上下にはみ出す光の帯も付ける
     void DrawFlashes(Graphics g, Rectangle br, long nCtx, Track tr, double now)
     {
         if (nCtx <= 0) return;
@@ -207,31 +217,94 @@ public sealed class SlotPanel : Control
             if (age < 0 || age > FlashSec) continue;
             int x0 = br.X + (int)(br.Width * Math.Min(1.0, f.From / (double)nCtx));
             int x1 = br.X + (int)(br.Width * Math.Min(1.0, f.To / (double)nCtx));
-            if (x1 - x0 < 2) x1 = Math.Min(br.Right, x0 + 2);
+            if (x1 - x0 < 3) x1 = Math.Min(br.Right, x0 + 3);
             double grow = Math.Min(1, age / GrowSec);
             int xe = x0 + (int)Math.Round((x1 - x0) * (1 - Math.Pow(1 - grow, 3)));
-            double a = age < GrowSec ? 1 : (1 - (age - GrowSec) / (FlashSec - GrowSec)) * (0.6 + 0.4 * Math.Cos(2 * Math.PI * (age - GrowSec) / 0.8));
+            int w = Math.Max(1, xe - x0);
+            double env = age < GrowSec ? 1 : 1 - (age - GrowSec) / (FlashSec - GrowSec);
+            double a = age < GrowSec ? 1 : env * (age < StrobeSec ? (StrobeOn(age) ? 1 : 0.15) : (int)((age - StrobeSec) / 0.3) % 2 == 0 ? 1 : 0.35);
+            a = Math.Clamp(a, 0, 1);
             var c = f.Read ? ReadColor : GenColor;
-            using (var b = new SolidBrush(Color.FromArgb((int)(255 * Math.Clamp(a, 0, 1)), c)))
-                g.FillRectangle(b, x0, br.Y, Math.Max(1, xe - x0), br.Height);
-            using (var p = new Pen(Color.FromArgb((int)(200 * Math.Clamp(a, 0, 1)), c)))
-                g.DrawRectangle(p, x0, br.Y - 2, Math.Max(1, xe - x0), br.Height + 3);
-            if (grow < 1) using (var p = new Pen(Color.White, 2)) g.DrawLine(p, xe, br.Y - 2, xe, br.Bottom + 1);
+            // 伸び切った直後 0.15 秒は白く光らせる
+            var fc = age >= GrowSec && age < GrowSec + 0.15 ? Mix(c, Color.White, 0.8) : c;
+            using (var b = new SolidBrush(Color.FromArgb((int)(110 * a), c)))   // 上下にはみ出す光の帯
+                g.FillRectangle(b, x0, br.Y - 5, w, br.Height + 10);
+            using (var b = new SolidBrush(Color.FromArgb((int)(255 * a), fc)))
+                g.FillRectangle(b, x0, br.Y, w, br.Height);
+            using (var p = new Pen(Color.FromArgb((int)(230 * a), c), 2))
+                g.DrawRectangle(p, x0, br.Y - 3, w, br.Height + 5);
+            if (grow < 1)
+            {
+                using (var p = new Pen(Color.FromArgb(120, Color.White), 7)) g.DrawLine(p, xe, br.Y - 6, xe, br.Bottom + 5);
+                using (var p = new Pen(Color.White, 3)) g.DrawLine(p, xe, br.Y - 6, xe, br.Bottom + 5);
+            }
         }
     }
 
     // 上の行の右に出す「読込 +12.3k」「生成 +1.2k」。数字は次に増えるまで出しておく。
-    // 増えた瞬間はランプのようにパッと白っぽく光り、残光を引きながら (LampTau 秒で減る) 落ち着いた暗めの色に戻る
-    const double LampTau = 0.9, LampDim = 0.45;
-    (bool read, string text, Color color)[] FlashTexts(Track? tr, double now) =>
-        tr == null ? [] : new[] { tr.LastRead, tr.LastGen }.OfType<Flash>()
-            .Select(f =>
+    // 増えた瞬間: 数字が 1.6 倍に跳ねて弾みながら戻り、StrobeSec 秒の間 白と色で激しく点滅、まわりに光の輪。
+    // そのあと FlashSec 秒かけて落ち着いた色 (LampDim。暗くしすぎず読める明るさ) に戻る
+    const double LampDim = 0.75;
+
+    void DrawLamp(Graphics g, Rectangle r, int labW, string lab, Flash f, double now)
+    {
+        double age = Math.Max(0, now - f.At);
+        var c = f.Read ? ReadColor : GenColor;
+        bool on = StrobeOn(age);
+        double heat = Math.Pow(Math.Max(0, 1 - age / FlashSec), 2);   // 1 → 0 (FlashSec 秒で落ち着く)
+        var state = g.Save();
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        if (heat > 0)
+        {
+            // 下地: 点いている間は色でべた塗り、そのあとは薄く残して消す。まわりに 3 重の光の輪
+            int a = on ? 210 : (int)(80 * heat);
+            using (var path = Round(r, 6))
+            using (var b = new SolidBrush(Color.FromArgb(a, c)))
+                g.FillPath(b, path);
+            for (int k = 1; k <= 3; k++)
+                using (var path = Round(Rectangle.Inflate(r, k * 2, k * 2), 6 + k * 2))
+                using (var p = new Pen(Color.FromArgb((int)(Math.Max(a, 140 * heat) * 0.6 / k), c), 2))
+                    g.DrawPath(p, path);
+        }
+        var ink = on ? Color.White : Mix(Mix(Theme.Back, c, LampDim + (1 - LampDim) * heat), Color.White, 0.5 * heat);
+        TextRenderer.DrawText(g, lab, LampLabFont, new Rectangle(r.X + 5, r.Y, labW, r.Height), ink,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        // 数字は図形にして描く (拡大して弾ませる・縁を光らせるため)。右に寄せ、数字のまん中を中心に拡大する
+        var nr = new Rectangle(r.X + 5 + labW, r.Y, r.Width - labW - 10, r.Height);
+        using (var tp = new GraphicsPath())
+        using (var sf = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center })
+        {
+            tp.AddString(LampNum(f.To - f.From), LampNumFont.FontFamily, (int)LampNumFont.Style, LampNumFont.SizeInPoints * g.DpiY / 72f, nr, sf);
+            double s = Math.Max(0.85, 1 + 0.6 * Math.Exp(-age / 0.2) * Math.Cos(2 * Math.PI * age / 0.35));
+            if (Math.Abs(s - 1) > 0.005)
             {
-                double age = Math.Max(0, now - f.At);
-                var c = Mix(Theme.Back, f.Read ? ReadColor : GenColor, LampDim + (1 - LampDim) * Math.Exp(-age / LampTau));
-                return (f.Read, LampNum(f.To - f.From), Mix(c, Color.White, 0.7 * Math.Max(0, 1 - age / 0.25)));
-            })
-            .ToArray();
+                var bb = tp.GetBounds();
+                using var m = new Matrix();
+                m.Translate(bb.X + bb.Width / 2, bb.Y + bb.Height / 2);
+                m.Scale((float)s, (float)s);
+                m.Translate(-(bb.X + bb.Width / 2), -(bb.Y + bb.Height / 2));
+                tp.Transform(m);
+            }
+            if (heat > 0.05)
+                using (var p = new Pen(Color.FromArgb((int)(200 * heat), on ? c : Color.White), 4) { LineJoin = LineJoin.Round })
+                    g.DrawPath(p, tp);
+            using (var b = new SolidBrush(ink)) g.FillPath(b, tp);
+        }
+        g.Restore(state);
+    }
+
+    static GraphicsPath Round(Rectangle r, int rad)
+    {
+        var p = new GraphicsPath();
+        int d = Math.Min(rad * 2, Math.Min(r.Width, r.Height));
+        if (d <= 0) { p.AddRectangle(r); return p; }
+        p.AddArc(r.X, r.Y, d, d, 180, 90);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
 
     // 右の数字は k トークン・小数 1 桁にそろえる (0.8k・12.3k・123.4k)。欄の幅は 999.9k が入る分
     static string LampNum(long v) => $"{Math.Min(v, 999_949) / 1000.0:0.0}k";
@@ -268,34 +341,31 @@ public sealed class SlotPanel : Control
                 // 上の行: 枠の番号と札 (OpenCode は緑)。右に、光らせている増えた分
                 // 位置と桁は固定: 右端から「読込 +___._k」「生成 +___._k」の 2 つの欄を必ず取り、数字は欄の中で右に寄せる
                 // (まだ出ていない欄も場所だけ取る。札の長さや数字の大きさで動かない)
-                var lampFont = Theme.Num;
-                int labW = TextRenderer.MeasureText("読込 +", lampFont, Size.Empty, TextFormatFlags.NoPadding).Width;
-                int numW = TextRenderer.MeasureText(LampNum(999_900), lampFont, Size.Empty, TextFormatFlags.NoPadding).Width;
-                int fieldW = labW + numW, fx = cell.Right - fieldW * 2 - 8;
-                var lamps = FlashTexts(tr, now);
+                int labW = TextRenderer.MeasureText("読込 +", LampLabFont, Size.Empty, TextFormatFlags.NoPadding).Width;
+                int numW = TextRenderer.MeasureText(LampNum(999_900), LampNumFont, Size.Empty, TextFormatFlags.NoPadding).Width;
+                int fieldW = labW + numW + 10, fx = cell.Right - fieldW * 2 - 8;
                 for (int li = 0; li < 2; li++)
-                {
-                    int lx = fx + 4 + li * (fieldW + 4);
-                    var lamp = lamps.FirstOrDefault(x => x.read == (li == 0));
-                    if (lamp.text == null) continue;
-                    TextRenderer.DrawText(g, li == 0 ? "読込 +" : "生成 +", lampFont, new Point(lx, cell.Y), lamp.color, TextFormatFlags.NoPadding);
-                    TextRenderer.DrawText(g, lamp.text, lampFont, new Rectangle(lx + labW, cell.Y, numW, 15), lamp.color,
-                        TextFormatFlags.Right | TextFormatFlags.NoPadding);
-                }
+                    if ((li == 0 ? tr?.LastRead : tr?.LastGen) is Flash lf)
+                        DrawLamp(g, new Rectangle(fx + 2 + li * (fieldW + 6), cell.Y + 1, fieldW, LampH - 2), labW, li == 0 ? "読込 +" : "生成 +", lf, now);
                 string head = $"枠{s.Id}" + (lb.label != null ? "  " + lb.label : s.Processing ? "  推論中" : "");
-                TextRenderer.DrawText(g, head, Theme.Small, new Rectangle(cell.X, cell.Y, Math.Max(0, fx - cell.X), 15),
-                    lb.openCode ? Theme.Good : s.Processing ? Theme.Ink : Theme.Muted, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+                TextRenderer.DrawText(g, head, Theme.Small, new Rectangle(cell.X, cell.Y, Math.Max(0, fx - cell.X), LampH), lb.openCode ? Theme.Good : s.Processing ? Theme.Ink : Theme.Muted,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
                 // 下の行: バーと「使っている量/上限 速さ」
                 string val = s.Used > 0 ? $"{K(s.Used)}/{K(s.NCtx)}" + (s.Processing && s.Tps > 0 ? $" {s.Tps:0.#}t/s" : "") : $"空き/{K(s.NCtx)}";
-                int vw = TextRenderer.MeasureText(val, Theme.Num).Width;
-                var br = new Rectangle(cell.X, cell.Y + 19, Math.Max(10, cell.Width - vw - 4), 8);
+                var vs = TextRenderer.MeasureText(val, ValFont);
+                int vw = vs.Width;
+                var br = new Rectangle(cell.X, cell.Y + LampH + 8, Math.Max(10, cell.Width - vw - 4), BarH);
                 using (var b = new SolidBrush(Theme.BarBack)) g.FillRectangle(b, br);
                 double compact = Math.Max(1, s.NCtx - CompactReserveK * 1000.0);   // 明るさの満杯 (OpenCode が圧縮を始める量)
                 var fill = s.Processing ? Hsv(120, 0.8, 0.3 + 0.7 * Math.Clamp(s.Used / compact, 0, 1)) : Theme.Grid;
                 if (pct > 0) using (var b = new SolidBrush(fill)) g.FillRectangle(b, br.X, br.Y, Math.Max(1, (int)(br.Width * Math.Min(100, pct) / 100)), br.Height);
                 using (var p = new Pen(Theme.Edge)) g.DrawRectangle(p, br);
                 if (tr != null) DrawFlashes(g, br, s.NCtx, tr, now);
-                TextRenderer.DrawText(g, val, Theme.Num, new Point(cell.Right - vw, cell.Y + 14), s.Processing ? Theme.Ink : Theme.Muted);
+                TextRenderer.DrawText(g, val, ValFont, new Point(cell.Right - vw, br.Y + br.Height / 2 - vs.Height / 2), s.Processing ? Theme.Ink : Theme.Muted);
+                // 増えた直後 0.6 秒は、枠のまわりも色の枠で光らせる
+                if (tr?.Flashes.Where(f => now - f.At is >= 0.0 and < 0.6).OrderBy(f => now - f.At).FirstOrDefault() is Flash nf)
+                    using (var p = new Pen(Color.FromArgb((int)(255 * (1 - (now - nf.At) / 0.6)), nf.Read ? ReadColor : GenColor), 2))
+                        g.DrawRectangle(p, Rectangle.Inflate(cell, 3, 2));
                 string when = s.LastActive is double la ? DateTimeOffset.FromUnixTimeMilliseconds((long)(la * 1000)).LocalDateTime.ToString("HH:mm:ss") : "-";
                 hits.Add((cell, $"{srv.Server} 枠{s.Id}: {(s.Processing ? "推論中" : "待機中 (最後に使っていた量)")}\n" +
                                 $"使っている量 {s.Used:#,0} / {s.NCtx:#,0} トークン ({pct:0.0}%)\n" +
