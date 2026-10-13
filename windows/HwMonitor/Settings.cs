@@ -21,6 +21,14 @@ public sealed class Settings
     public int CompactReserveK { get; set; } = 20;
     // 枠のメーターの色の基準にする平均: "graph" = グラフの期間の ▶AVE と同じ、"1h" = 直近 1 時間 (グラフの期間を変えても変わらない)
     public string MeterAvg { get; set; } = "graph";
+    // 更新の間隔 (秒、上の帯の − ＋)。hwmon.py が 2 秒ごとに読んでいるので 2 秒より短くはしない
+    public int IntervalSec { get; set; } = 2;
+    public bool DeviceView { get; set; }                 // メーターを部品別 (CPU・GPU ごとに 1 行) に
+    // 速度と文脈 (散布図)
+    public string SpeedY { get; set; } = "gen";          // gen = 生成 / pp = 読み込み / draft = MTP の当たり率
+    public string SpeedColor { get; set; } = "run";      // run = 設定ごと / par = 並列数
+    public int SpeedDays { get; set; } = 7;              // 0 = 全部
+    public List<string> SpeedHidden { get; set; } = [];  // 凡例で隠したもの
     public string Range { get; set; } = "1h";
     public string Group { get; set; } = "p";
     public string Tab { get; set; } = "graph";

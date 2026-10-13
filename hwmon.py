@@ -8,6 +8,7 @@ GpuMonitor・SysMonitor (CpuPower・TempSensors) をそのまま使い回すの�
   GET /api/now                    いまの値 (2 秒ごとに更新)
   GET /api/history?range=24h      履歴 (2m / 10m / 30m / 1h / 3h / 6h / 24h / 7d / 30d)。1h までは 2〜10 秒刻み、ほかは 1 分の記録をまとめたもの
   GET /api/energy                 電気代 (今日・今月・日ごと 31 日・月ごと 13 か月) と、トークン数・レンタルとの比べ (compare)
+  GET /api/speed?days=7           要求ごとの速さと文脈の量 (llama-server のログから。アプリの「速度と文脈」の散布図)
   GET /health
 
 トークン数は llama-server の /slots ([hwmon] llama_servers) を 0.5 秒ごとに読んで数える
@@ -18,14 +19,17 @@ GpuMonitor・SysMonitor (CpuPower・TempSensors) をそのまま使い回すの�
 1 分ごとの平均を keep_days 日 (既定 35) 残し、日ごとの電力量 (Wh) はずっと残す。
 """
 
+import bisect
 import calendar
 import collections
 import datetime
 import json
 import logging
 import os
+import re
 import signal
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -266,6 +270,188 @@ class SlotWatcher:
             return out
 
 
+class CoreStat:
+    """スレッド (論理 CPU) ごとの使用率 (/proc/stat の cpu0, cpu1, … の前回との差)。アプリの「スレッド」の欄"""
+
+    def __init__(self):
+        self.prev = self._read()
+
+    @staticmethod
+    def _read():
+        out = {}
+        try:
+            with open("/proc/stat") as f:
+                for line in f:
+                    if line.startswith("cpu") and line[3:4].isdigit():
+                        p = line.split()
+                        v = [int(x) for x in p[1:]]
+                        idle = v[3] + (v[4] if len(v) > 4 else 0)   # idle + iowait
+                        out[int(p[0][3:])] = (sum(v), idle)
+        except OSError:
+            pass
+        return out
+
+    def take(self):
+        cur = self._read()
+        pct = []
+        for i in sorted(cur):
+            a, b = self.prev.get(i), cur[i]
+            dt = b[0] - a[0] if a else 0
+            pct.append(round(max(0.0, min(100.0, (1 - (b[1] - a[1]) / dt) * 100)), 1) if dt > 0 else 0.0)
+        self.prev = cur
+        return pct
+
+
+class ReqLog:
+    """llama-server のログ (journalctl -u <ユニット>) から、要求ごとの速さと文脈の量を拾って SQLite に残す。
+    アプリの「速度と文脈」の散布図 (文脈が長くなると生成・読み込みがどれだけ遅くなるか) に使う。
+    1 件 = 1 要求: 読み込み (prompt eval time)・生成 (eval time)・MTP の当たり率 (draft acceptance)・終わったときの文脈の量 (stop processing: n_tokens)。
+    起動のたびに、モデルのファイル名と枠の数 (load_model) を「設定」として付ける (設定を変えたときの比べ用)。
+    ログは 30 秒ごとに続きを読む (読んだ所は meta に覚えておく。初めは journal に残っている全部)"""
+
+    RX = {
+        "load": re.compile(r"load_model: loading model '([^']+)'"),
+        "slots": re.compile(r"load_model: initializing, n_slots = (\d+), n_ctx_slot = (\d+)"),
+        "mtp": re.compile(r"creating MTP draft context|common_speculative_init"),
+        "prompt": re.compile(r"id\s+(\d+) \| task (\d+) \| prompt eval time =\s*([\d.]+) ms /\s*(\d+) tokens"),
+        "eval": re.compile(r"id\s+(\d+) \| task (\d+) \|\s+eval time =\s*([\d.]+) ms /\s*(\d+) tokens"),
+        "draft": re.compile(r"id\s+(\d+) \| task (\d+) \| draft acceptance = ([\d.]+)"),
+        "release": re.compile(r"id\s+(\d+) \| task (\d+) \| stop processing: n_(?:tokens|past) = (\d+)"),
+    }
+
+    def __init__(self, path, units, interval=30):
+        self.units = units          # [(名前, systemd のユニット)]
+        self.interval = interval
+        self.lock = threading.Lock()
+        self.db = sqlite3.connect(path, check_same_thread=False, timeout=30)
+        self.db.execute("CREATE TABLE IF NOT EXISTS requests (server TEXT, ts REAL, slot INTEGER, task INTEGER, run REAL,"
+                        " pp_n INTEGER, pp_ms REAL, gen_n INTEGER, gen_ms REAL, draft REAL, ctx INTEGER, PRIMARY KEY (server, ts, task))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS runs (server TEXT, start REAL, model TEXT, n_slots INTEGER, n_ctx INTEGER, mtp INTEGER,"
+                        " PRIMARY KEY (server, start))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        self.db.commit()
+        self.pending = {}           # (名前, 枠, 要求) -> 途中まで拾った値
+        if units:
+            threading.Thread(target=self._loop, name="reqlog", daemon=True).start()
+
+    def _meta(self, key, value=None):
+        if value is None:
+            r = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            return json.loads(r[0]) if r else None
+        self.db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (key, json.dumps(value)))
+
+    def _loop(self):
+        while True:
+            for name, unit in self.units:
+                try:
+                    self._read(name, unit)
+                except Exception:
+                    log.exception("reqlog: %s のログを読めません (続けます)", unit)
+            time.sleep(self.interval)
+
+    def _read(self, name, unit):
+        cur_key, run_key = f"cursor:{unit}", f"run:{name}"
+        with self.lock:
+            cursor = self._meta(cur_key)
+            run = self._meta(run_key) or {}
+        cmd = ["journalctl", "-u", unit, "-o", "json", "--output-fields=MESSAGE", "--no-pager"]
+        if cursor:
+            cmd += ["--after-cursor", cursor]
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        rows, runs, last = [], [], None
+        for line in p.stdout.splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            last = e.get("__CURSOR") or last
+            msg = e.get("MESSAGE")
+            if not isinstance(msg, str):
+                continue
+            ts = int(e.get("__REALTIME_TIMESTAMP", 0)) / 1e6
+            m = self.RX["load"].search(msg)
+            if m:   # 起動し直した: 新しい設定
+                model = os.path.basename(m.group(1))
+                model = re.sub(r"-\d{5}-of-\d{5}", "", model).removesuffix(".gguf")
+                run = {"start": ts, "model": model, "n_slots": 0, "n_ctx": 0, "mtp": 0}
+                self.pending = {k: v for k, v in self.pending.items() if k[0] != name}
+                continue
+            m = self.RX["slots"].search(msg)
+            if m and run:
+                run.update(n_slots=int(m.group(1)), n_ctx=int(m.group(2)))
+                runs.append(dict(run))
+                continue
+            if self.RX["mtp"].search(msg) and run:
+                run["mtp"] = 1
+                continue
+            for kind in ("prompt", "eval", "draft", "release"):
+                m = self.RX[kind].search(msg)
+                if not m:
+                    continue
+                key = (name, int(m.group(1)), int(m.group(2)))
+                r = self.pending.setdefault(key, {})
+                if kind == "prompt":
+                    r.update(pp_ms=float(m.group(3)), pp_n=int(m.group(4)))
+                elif kind == "eval":
+                    r.update(gen_ms=float(m.group(3)), gen_n=int(m.group(4)))
+                elif kind == "draft":
+                    r["draft"] = float(m.group(3))
+                else:   # 終わり: 1 件として残す
+                    self.pending.pop(key, None)
+                    if "gen_n" in r or "pp_n" in r:
+                        rows.append((name, ts, key[1], key[2], run.get("start"), r.get("pp_n"), r.get("pp_ms"), r.get("gen_n"),
+                                     r.get("gen_ms"), r.get("draft"), int(m.group(3))))
+                break
+        with self.lock:
+            for rn in runs:
+                self.db.execute("INSERT OR REPLACE INTO runs (server, start, model, n_slots, n_ctx, mtp) VALUES (?, ?, ?, ?, ?, ?)",
+                                (name, rn["start"], rn["model"], rn["n_slots"], rn["n_ctx"], rn["mtp"]))
+            if run.get("start") is not None:   # MTP は n_slots の後に分かるので、いまの設定は毎回書き直す
+                self.db.execute("UPDATE runs SET mtp = ? WHERE server = ? AND start = ?", (run.get("mtp", 0), name, run["start"]))
+            self.db.executemany("INSERT OR IGNORE INTO requests (server, ts, slot, task, run, pp_n, pp_ms, gen_n, gen_ms, draft, ctx)"
+                                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+            if last:
+                self._meta(cur_key, last)
+            self._meta(run_key, run)
+            self.db.commit()
+        if rows:
+            log.info("reqlog: %s の要求 %d 件を記録", name, len(rows))
+
+    def speed(self, days):
+        """散布図の点。並列数 (par) = 生成の間に同じサーバーで動いていたほかの要求の数 (+1)"""
+        since = time.time() - days * 86400 if days > 0 else 0
+        with self.lock:
+            runs = self.db.execute("SELECT server, start, model, n_slots, n_ctx, mtp FROM runs ORDER BY start").fetchall()
+            reqs = self.db.execute("SELECT server, ts, slot, run, pp_n, pp_ms, gen_n, gen_ms, draft, ctx FROM requests"
+                                   " WHERE ts >= ? ORDER BY server, ts", (since - 3600,)).fetchall()
+        # 要求ごとの [始まり, 終わり] (終わり − 読み込み − 生成)。並列数は生成の真ん中の時刻で数える
+        starts, ends = collections.defaultdict(list), collections.defaultdict(list)
+        for r in reqs:
+            starts[r[0]].append(r[1] - ((r[5] or 0) + (r[7] or 0)) / 1000.0)
+            ends[r[0]].append(r[1])
+        for d in (starts, ends):
+            for v in d.values():
+                v.sort()
+        points = []
+        for r in reqs:
+            server, ts, slot, run, pp_n, pp_ms, gen_n, gen_ms, draft, ctx = r
+            if ts < since:
+                continue
+            mid = ts - (gen_ms or 0) / 2000.0
+            # 始まりが mid 以前の数 − 終わりが mid より前の数 = mid に動いていた要求の数 (自分を含む)
+            par = max(1, bisect.bisect_right(starts[server], mid) - bisect.bisect_left(ends[server], mid))
+            gen_n, pp_n = gen_n or 0, pp_n or 0
+            points.append({
+                "t": round(ts, 1), "server": server, "slot": slot, "run": run, "par": par, "ctx": ctx,
+                "gen_n": gen_n, "gen_tps": round(gen_n / gen_ms * 1000, 2) if gen_n and gen_ms else None,
+                "pp_n": pp_n, "pp_tps": round(pp_n / pp_ms * 1000, 1) if pp_n and pp_ms else None,
+                "pp_from": max(0, ctx - gen_n - pp_n),   # 読み込みを始めたときの文脈の量 (前の要求から使い回した分)
+                "draft": draft})
+        return {"runs": [{"server": s, "start": st, "model": m, "n_slots": n, "n_ctx": c, "mtp": bool(mt)} for s, st, m, n, c, mt in runs],
+                "points": points}
+
+
 class Store:
     """SQLite の記録: minutes (1 分ごとの平均と電力量) と days (日ごとの電力量)"""
 
@@ -349,6 +535,7 @@ class HwMonitor:
             except ValueError:
                 log.warning("[rental] api の %s が読めません (入力/出力 の $ を / で区切る): %s", name, v)
         self.slots = SlotWatcher(parse_pairs(cfg.get("hwmon", "llama_servers")))
+        self.cores = CoreStat()
         self.interval = cfg.getfloat("sysmon", "interval")
         self.gpu = hh.GpuMonitor(interval=cfg.getfloat("gpu", "interval"), power_max=cfg.getfloat("gpu", "power_max"))
         self.sys = hh.SysMonitor(interval=self.interval, power={
@@ -358,6 +545,13 @@ class HwMonitor:
         db = os.path.expanduser(cfg.get("hwmon", "db"))
         self.store = Store(db, cfg.getint("hwmon", "keep_days"))
         log.info("記録: %s (1 分ごとの記録は %d 日残す)", db, self.store.keep_days)
+        try:
+            units = parse_pairs(cfg.get("hwmon", "llama_units"))
+        except Exception:
+            units = []
+        self.reqlog = ReqLog(db, units)
+        if units:
+            log.info("要求の記録: %s のログから", ", ".join(f"{n}={u}" for n, u in units))
         self.lock = threading.Lock()
         self.now = None
         self.ring = collections.deque(maxlen=1800)  # 2 秒 × 1 時間
@@ -388,6 +582,7 @@ class HwMonitor:
                 flat[f"r:{name} 読込"] = 0.0
                 flat[f"r:{name} 生成"] = round(c["out"] / dt_tok, 1)
         view["slots"] = self.slots.view()
+        view["cores"] = self.cores.take()   # スレッドごとの使用率 (記録には入れない)
         # 枠が使っている量 (文脈、k トークン)。使ったことのある枠だけ (待機中は最後に使っていた量のまま)。アプリのトークンの 3 段目
         for srv in view["slots"]:
             for sl in srv["slots"]:
@@ -673,11 +868,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, self.mon.history(rng))
         if u.path == "/api/energy":
             return self._json(200, self.mon.energy())
+        if u.path == "/api/speed":
+            try:
+                days = float((urllib.parse.parse_qs(u.query).get("days") or ["7"])[0])
+            except ValueError:
+                return self._json(400, {"error": "days は数 (0 = 全部)"})
+            return self._json(200, self.mon.reqlog.speed(days))
         if u.path == "/health":
             return self._json(200, {"ok": True, "version": hh.APP_VERSION})
         if u.path == "/":
             return self._json(200, {"name": "llmsv hwmon", "version": hh.APP_VERSION,
-                                    "api": ["/api/now", "/api/history?range=" + "|".join(RANGES), "/api/energy"]})
+                                    "api": ["/api/now", "/api/history?range=" + "|".join(RANGES), "/api/energy", "/api/speed?days=7"]})
         return self._json(404, {"error": "not found"})
 
 
