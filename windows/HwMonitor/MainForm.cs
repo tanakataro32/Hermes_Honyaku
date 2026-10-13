@@ -60,7 +60,7 @@ public sealed class MainForm : Form
         deepl.Changed += ShowUsage;
         slots = new SlotPanel(feed.Turns) { Dock = DockStyle.Top, Height = 0 };
 
-        Text = "llmsv ハードウェアモニタ";
+        Text = "llmsv ハードウェアモニタ  " + VersionText();
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);   // exe に入れたアイコン (app.ico) をタイトルバーとタスクバーにも
         BackColor = Theme.Back;
         ForeColor = Theme.Ink;
@@ -209,6 +209,17 @@ public sealed class MainForm : Form
         showSrc.Enabled = showThink.Enabled = settings.ShowTranslation;   // 和訳を隠しているときは原文の 2 つも押せない
         translation.ShowSource = settings.ShowSource;
         translation.ShowThink = settings.ShowThink;
+    }
+
+    // タイトルバーの版: csproj の <Version> と、ビルドしたときのコミット (SDK が InformationalVersion の + の後ろに入れる) の頭 7 桁。
+    // 例「v1.1.0 (1d353f4)」。VS で pull してビルドし直したかを見分けられる
+    static string VersionText()
+    {
+        string v = System.Reflection.Assembly.GetExecutingAssembly()
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion ?? Application.ProductVersion;
+        int plus = v.IndexOf('+');
+        return plus < 0 ? "v" + v : $"v{v[..plus]} ({v[(plus + 1)..][..Math.Min(7, v.Length - plus - 1)]})";
     }
 
     async Task RefreshNow()
