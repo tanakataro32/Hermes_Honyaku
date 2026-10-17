@@ -78,8 +78,11 @@ public sealed class SpeedPanel : Control
         return runs.GroupBy(r => RunKey(r.Start)).ToDictionary(gr => gr.Key, gr =>
         {
             var r = gr.First();
+            // ファイル名の末尾の -MTP は「・MTP」と重なるので省く (Qwen3.8-Flash-Next-V100x2-D2-MTP → V100x2-D2 1枠・MTP)
+            var name = r.Model[prefix.Length..];
+            if (r.Mtp && name.EndsWith("-MTP")) name = name[..^4];
             return
-                $"{r.Model[prefix.Length..]} {r.NSlots}枠{(r.Mtp ? "・MTP" : "")} {Local(r.Start):M/d HH:mm}〜";
+                $"{name} {r.NSlots}枠{(r.Mtp ? "・MTP" : "")} {Local(r.Start):M/d HH:mm}〜";
         });
     }
 
