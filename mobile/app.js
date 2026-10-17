@@ -30,7 +30,7 @@ const st = {
   sp: { y: store.get('spY', 'gen'), color: store.get('spColor', 'run'), days: store.get('spDays', 7), server: store.get('spServer', 'flashnext'),
         hidden: new Set(store.get('spHidden', [])) },
   hideTasks: store.get('hideTasks', true), showSrc: store.get('showSrc', false), compactK: 20,
-  now: null, hist: null, avg: {}, speed: null, spark: new Map(), colors: new Map(),
+  now: null, hist: null, avg: {}, speed: null, spark: new Map(), colors: new Map(), order: new Map(),
   last: { now: 0, hist: 0, avg: 0, speed: 0 }, busy: {}, hoverX: null, spHit: null,
 };
 
@@ -56,7 +56,7 @@ async function pump() {
   const t = nowSec();
   const jobs = [];
   if (t - st.last.now >= st.iv - 0.2) jobs.push(load('now', async () => { st.now = await getJSON('/api/now'); pushSpark(st.now); renderTop(); if (st.tab === 'meter') renderMeter(); if (st.tab === 'graph' && st.hist && !st.ctxDrawn) { st.ctxDrawn = true; drawHistory(); } }));
-  if (st.tab === 'graph' && t - st.last.hist >= histDue() - 0.2) jobs.push(load('hist', async () => { st.hist = await getJSON('/api/history?range=' + st.range); applyLive(st.hist); drawHistory(); }));
+  if (st.tab === 'graph' && t - st.last.hist >= histDue() - 0.2) jobs.push(load('hist', async () => { st.hist = await getJSON('/api/history?range=' + st.range); applyLive(st.hist); assignColors(st.hist); drawHistory(); }));
   // 枠の色の基準 (直近 1 時間の生成・読込の平均)
   if (t - st.last.avg >= 60) jobs.push(load('avg', async () => { st.avg = tokenAverages(await getJSON('/api/history?range=1h')); }));
   if (st.tab === 'speed' && t - st.last.speed >= 60) jobs.push(load('speed', async () => { st.speed = await getJSON('/api/speed?days=' + st.sp.days); drawSpeed(); }));
@@ -332,16 +332,37 @@ function colorOf(k) {
     const kind = k.endsWith(' 読込') ? 0 : isCtx(k) ? 2 : 1;
     return SERIES[(st.rServers.indexOf(srv) * 3 + kind) % SERIES.length];
   }
-  if (!st.colors.has(k)) st.colors.set(k, SERIES[st.colors.size % SERIES.length]);
-  return st.colors.get(k);
+  // ほかは部品の名前 (頭文字を除いた部分) で決める。同じ部品はどのタブでも同じ色 (assignColors で全タブぶんまとめて決める)
+  const name = k.slice(2);
+  if (!st.colors.has(name)) st.colors.set(name, SERIES[st.colors.size % SERIES.length]);
+  return st.colors.get(name);
+}
+
+const rankOf = (name) => (name === '全体' || name === 'RAM' ? 0 : name === 'CPU' ? 1 : 2);
+const baseOf = (name) => name.replace(/ \(\d+\)$/, '');   // "V100 (2)" → "V100"
+
+// 部品の名前ごとに、凡例の並び (st.order) と色 (st.colors) を全タブ共通で決める。電力・温度・使用率・メモリの全部の記録から名前を集める。
+// 並び: 全体・RAM → CPU → ほかは記録に現れた順。「V100 (2)」のような同じ型の 2 枚目は、記録に後から現れても 1 枚目のすぐ後ろ。
+// 色: CPU を先頭 (SERIES の 1 色目) にして、あとは並びの順に当てる。全体は白なので数えない。
+// 履歴を受け取るたびに決め直すので、どのタブを先に開いても同じ色になる (Windows アプリと同じ決め方)
+function assignColors(d) {
+  st.colors = new Map(); st.order = new Map();
+  if (!d) return;
+  const names = [...new Set(Object.keys(d.series).filter((k) => !k.startsWith('r:')).map((k) => k.slice(2)))];
+  const seen = new Map();   // 型名 -> 記録に現れた順
+  for (const n of names) if (!seen.has(baseOf(n))) seen.set(baseOf(n), seen.size);
+  names.sort((a, b) => rankOf(a) - rankOf(b) || seen.get(baseOf(a)) - seen.get(baseOf(b)) || a.length - b.length || (a < b ? -1 : a > b ? 1 : 0));
+  names.forEach((n, i) => st.order.set(n, i));
+  let c = 0;
+  for (const n of [...names.filter((n) => n === 'CPU'), ...names.filter((n) => n !== 'CPU' && n !== '全体')]) st.colors.set(n, SERIES[c++ % SERIES.length]);
 }
 
 function histKeys() {
   const d = st.hist;
   if (!d) return [];
   const keys = Object.keys(d.series).filter((k) => k.startsWith(st.group + ':'));
-  keys.forEach(colorOf);   // 色は記録の順で決める (読込が青・生成が橙のまま)
-  if (st.group !== 'r') return keys;
+  if (st.group !== 'r') return keys.sort((a, b) => (st.order.get(a.slice(2)) ?? 1e9) - (st.order.get(b.slice(2)) ?? 1e9));
+  // トークンは凡例・指を乗せたときの値を段の順 (生成・読込・文脈) に並べる
   return keys.sort((a, b) => (a.endsWith(' 読込') ? 1 : isCtx(a) ? 2 : 0) - (b.endsWith(' 読込') ? 1 : isCtx(b) ? 2 : 0));
 }
 

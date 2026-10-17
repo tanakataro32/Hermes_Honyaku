@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Drawing.Drawing2D;
+using System.Text.RegularExpressions;
 
 namespace HwMonitor;
 
@@ -18,7 +19,11 @@ public sealed class HistoryChart : Control
     readonly List<(Rectangle r, Action act)> buttons = [];
     readonly List<(Rectangle r, string key)> legend = [];
     readonly HashSet<string> hidden = [];
+    // 部品の名前 (キーの頭文字 "t:" などを除いた部分) -> 色。データを読むたびに全タブぶんまとめて決め直すので、
+    // 同じ部品はどのタブでも同じ色、どのタブを先に開いても同じ色になる
     readonly Dictionary<string, Color> colors = [];
+    readonly Dictionary<string, int> order = [];   // 部品の名前 -> 凡例の並び (全タブ共通)
+    readonly List<string> rServers = [];   // トークンのサーバー (現れた順)。読込 青・生成 橙・文脈 緑、2 つ目のサーバーは次の 3 色
     HistoryData? data;
     string? error;
     int hoverX = -1;
@@ -36,7 +41,7 @@ public sealed class HistoryChart : Control
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public HashSet<string> Smooth { get; set; } = [];
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public HistoryData? Data { get => data; set { data = value; ApplyLive(value); FillCtx(value); error = null; Invalidate(); } }
+    public HistoryData? Data { get => data; set { data = value; ApplyLive(value); FillCtx(value); AssignColors(value); error = null; Invalidate(); } }
 
     // 枠が使っている量 (文脈) をアプリが見た分だけ覚えておく (/api/now の 2 秒ごと、24 時間まで)。
     // hwmon.py が記録していない間 (反映前・起動し直す前) は、これで 3 段目を描く。記録があればそちらを使い、無い刻みだけ埋める
@@ -195,21 +200,50 @@ public sealed class HistoryChart : Control
         BackColor = Theme.Back;
     }
 
+    static string NameOf(string key) => key[2..];
+    static string BaseOf(string name) => Regex.Replace(name, @" \(\d+\)$", "");   // "V100 (2)" → "V100"
+    static int Rank(string name) => name is "全体" or "RAM" ? 0 : name == "CPU" ? 1 : 2;
+
     List<string> Keys()
     {
         if (data == null) return [];
         var keys = data.Series.Keys.Where(k => k.StartsWith(Group + ":")).ToList();
-        if (Group != "r") return keys;
-        // トークンは凡例・マウスを乗せたときの値を段の順 (生成・読込・文脈) に並べる。
-        // 色は並べ替える前の記録の順で決める (読込が青・生成が橙のまま)
-        foreach (var k in keys) ColorOf(k, 0);
+        if (Group != "r") return keys.OrderBy(k => order.GetValueOrDefault(NameOf(k), int.MaxValue)).ToList();
+        // トークンは凡例・マウスを乗せたときの値を段の順 (生成・読込・文脈) に並べる
         return keys.OrderBy(k => k.EndsWith(" 読込") ? 1 : IsCtx(k) ? 2 : 0).ToList();
     }
 
-    Color ColorOf(string key, int i)
+    /// <summary>部品の名前ごとに、凡例の並び (order) と色 (colors) を全タブ共通で決める。電力・温度・使用率・メモリの全部の記録から名前を集める。
+    /// 並び: 全体・RAM → CPU → ほかは記録に現れた順。「V100 (2)」のような同じ型の 2 枚目は、記録に後から現れても 1 枚目のすぐ後ろ。
+    /// 色: CPU を先頭 (Theme.Series の 1 色目) にして、あとは並びの順に当てる。全体は白なので数えない</summary>
+    void AssignColors(HistoryData? d)
+    {
+        colors.Clear();
+        order.Clear();
+        if (d == null) return;
+        var names = d.Series.Keys.Where(k => !k.StartsWith("r:")).Select(NameOf).Distinct().ToList();
+        var seen = new Dictionary<string, int>();   // 型名 -> 記録に現れた順
+        foreach (var n in names) seen.TryAdd(BaseOf(n), seen.Count);
+        names = names.OrderBy(Rank).ThenBy(n => seen[BaseOf(n)]).ThenBy(n => n.Length).ThenBy(n => n, StringComparer.Ordinal).ToList();
+        for (int i = 0; i < names.Count; i++) order[names[i]] = i;
+        int c = 0;
+        foreach (var n in names.Where(n => n != "全体").OrderBy(n => n == "CPU" ? 0 : 1)) colors[n] = Theme.Series[c++ % Theme.Series.Length];
+    }
+
+    Color ColorOf(string key)
     {
         if (key == "p:全体") return Color.White;
-        if (!colors.TryGetValue(key, out var c)) colors[key] = c = Theme.Series[colors.Count % Theme.Series.Length];
+        if (key.StartsWith("r:"))
+        {
+            // トークン: 読込 青・生成 橙・文脈 緑 (サーバーが増えたら次の 3 色)。スマホ版と同じ
+            string srv = NameOf(key).Split(' ')[0];
+            int si = rServers.IndexOf(srv);
+            if (si < 0) { rServers.Add(srv); si = rServers.Count - 1; }
+            int kind = key.EndsWith(" 読込") ? 0 : IsCtx(key) ? 2 : 1;
+            return Theme.Series[(si * 3 + kind) % Theme.Series.Length];
+        }
+        string name = NameOf(key);
+        if (!colors.TryGetValue(name, out var c)) colors[name] = c = Theme.Series[colors.Count % Theme.Series.Length];
         return c;
     }
 
@@ -244,7 +278,7 @@ public sealed class HistoryChart : Control
         for (int i = 0; i < keys.Count; i++)
         {
             string name = keys[i][2..];
-            var col = ColorOf(keys[i], i);
+            var col = ColorOf(keys[i]);
             var sz = TextRenderer.MeasureText(name, Theme.Small);
             var r = new Rectangle(lx, BarH + 2, sz.Width + 18, LegendH - 2);
             bool off = hidden.Contains(keys[i]);
@@ -315,7 +349,7 @@ public sealed class HistoryChart : Control
             g.SmoothingMode = SmoothingMode.AntiAlias;
             foreach (var k in pkeys)
             {
-                using var pen = new Pen(ColorOf(k, 0), k == "p:全体" ? 2f : 1.4f);
+                using var pen = new Pen(ColorOf(k), k == "p:全体" ? 2f : 1.4f);
                 var vals = view[k];
                 var pts = new List<PointF>();
                 long prev = 0;
@@ -349,7 +383,7 @@ public sealed class HistoryChart : Control
                     if (NonZeroAverage(data.Series[k]) is not double avg) continue;
                     // 文字が段からはみ出さないように寄せる。段が 16px より低いと Math.Clamp は例外になるので Min・Max で
                     float y = Math.Min(Math.Max(Y(avg), pr.Y + 8), pr.Bottom - 8);
-                    var col = ColorOf(k, 0);
+                    var col = ColorOf(k);
                     using (var p = new Pen(Color.FromArgb(110, col)) { DashStyle = DashStyle.Dash }) g.DrawLine(p, pr.X, Y(avg), pr.Right, Y(avg));
                     string text = $"AVE {avg:0.#}{unit}";
                     var sz = TextRenderer.MeasureText(text, Theme.Small);
@@ -376,7 +410,7 @@ public sealed class HistoryChart : Control
                 foreach (var (pr, _, _) in panes) g.DrawLine(p, hx, pr.Y, hx, pr.Bottom);
             var lines = new List<(string, Color)> { (FormatTime(data.T[idx] + data.Step / 2, t1 - t0) + (SmoothOn ? $"  ({SpanText(SmoothWindow)}の平均)" : ""), Theme.Head) };
             foreach (var k in shown)
-                if (idx < view[k].Count && view[k][idx] is double v) lines.Add(($"{k[2..]}  {v:0.#}{(IsCtx(k) ? "k" : unit)}", ColorOf(k, 0)));
+                if (idx < view[k].Count && view[k][idx] is double v) lines.Add(($"{k[2..]}  {v:0.#}{(IsCtx(k) ? "k" : unit)}", ColorOf(k)));
             // その刻みに入る ● (光った所) の増えた分
             if (Group == "r" && t1 - t0 <= MarkMaxRange)
                 foreach (var m in marks.Where(m => m.t >= data.T[idx] && m.t < data.T[idx] + data.Step && shown.Contains(m.key)).TakeLast(4))
