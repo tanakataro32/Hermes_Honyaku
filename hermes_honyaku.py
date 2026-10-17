@@ -51,7 +51,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.11.1"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -1172,7 +1172,9 @@ def short_gpu_label(name):
     """GPU 名を型名に省略する。
     'Tesla V100-PCIE-32GB' → 'V100'、'NVIDIA RTX A5000 24GB' → 'RTX A5000'、
     'NVIDIA CMP 170HX' → 'CMP 170HX'。
-    複数カード (V100 + 改造 CMP 170HX など) でも型名で区別がつく。"""
+    複数カード (V100 + 改造 CMP 170HX など) でも型名で区別がつく。
+    同じ型が 2 枚以上のとき (V100 × 2 など) は GpuMonitor が 2 枚目以降に「 (2)」を付けて区別する
+    (ラベルは hwmon の記録・グラフ・部品別の行のキーなので、重なると片方が消える)。"""
     n = name.strip()
     n = re.sub(r"^NVIDIA\s+", "", n, flags=re.I)
     for prefix in ("Tesla ", "GeForce ", "Quadro "):
@@ -1244,6 +1246,14 @@ class GpuMonitor:
                     g["idle"] = bool(bits & 0x1)
                     g["throttle"] = [{"kind": k, "text": t} for b, k, t in GPU_THROTTLE_BITS if bits & b]
                 out.append(g)
+        # 同じ型が 2 枚以上なら 2 枚目以降を「V100 (2)」のように区別する (ディスクの label_short と同じやり方)。
+        # ラベルは hwmon の記録・グラフ・部品別の行のキーに使われるので、重なると 2 枚目が 1 枚目に上書きされて消える
+        seen = {}
+        for g in out:
+            n = seen.get(g["label"], 0)
+            seen[g["label"]] = n + 1
+            if n:
+                g["label"] = f"{g['label']} ({n + 1})"
         # 電力バーの最大値 = 既定値と観測高水位の大きい方 (超えたらリアルタイムで最大値が上がる)
         for g in out:
             i = g["index"]
