@@ -405,6 +405,8 @@ llmsv の温度・電力・使用率・メモリを、Windows の専用アプリ
 
 - `hwmon.py` は翻訳の中継とは**別のプロセス**です。こちらを再起動しても、8081 の中継 (Hermes・OpenCode・Open WebUI) は止まりません。
   値の集め方 (GPU・CPU の電力・温度・`[power]` の見込み) は `hermes_honyaku.py` と同じものを使うので、翻訳の画面と同じ値になります。
+- GPU の名前は型名に省略します (`Tesla V100-PCIE-32GB` → `V100`)。同じ型が 2 枚以上あるときは 2 枚目以降に `V100 (2)` のように番号を付けます
+  (2026-10-17 より前は同じ名前のまま重なり、2 枚目の線が履歴のグラフに出ず、部品別の行も 1 枚目の値になっていました)。
 - 記録は `~/.local/share/hermes-honyaku/hwmon.sqlite` (`[hwmon] db`)。1 分ごとの平均を 35 日 (`keep_days`)、日ごとの電力量はずっと残します。
 - API (読むだけ): `/api/now` (いまの値・llama-server の枠)・`/api/history?range=2m|10m|30m|1h|3h|6h|24h|7d|30d`・`/api/energy` (今日・今月・日ごと・月ごと・コスト比較)。
 - **トークン数**: `[hwmon] llama_servers` の llama-server の `/slots` を 0.5 秒ごとに読み、枠ごとの入力・生成の増え方を数えます
