@@ -563,7 +563,8 @@ class HwMonitor:
         self.slots = SlotWatcher(parse_pairs(cfg.get("hwmon", "llama_servers")))
         self.cores = CoreStat()
         self.interval = cfg.getfloat("sysmon", "interval")
-        self.gpu = hh.GpuMonitor(interval=cfg.getfloat("gpu", "interval"), power_max=cfg.getfloat("gpu", "power_max"))
+        self.gpu = hh.GpuMonitor(interval=cfg.getfloat("gpu", "interval"), power_max=cfg.getfloat("gpu", "power_max"),
+                                 labels=cfg.get("gpu", "labels"))
         self.sys = hh.SysMonitor(interval=self.interval, power={
             "cpu_source": cfg.get("power", "cpu_source").lower(),
             "other_w": cfg.getfloat("power", "other_w"), "psu_eff": cfg.getfloat("power", "psu_eff"),
