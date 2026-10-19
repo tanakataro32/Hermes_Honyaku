@@ -339,7 +339,7 @@ function colorOf(k) {
 }
 
 const rankOf = (name) => (name === '全体' || name === 'RAM' ? 0 : name === 'CPU' ? 1 : 2);
-const baseOf = (name) => name.replace(/ \(\d+\)$/, '');   // "V100 (2)" → "V100"
+const baseOf = (name) => name.replace(/( \(\d+\)|-\d+)$/, '');   // "V100 (2)" → "V100"、"V100-2" → "V100"（[gpu] labels）
 
 // 部品の名前ごとに、凡例の並び (st.order) と色 (st.colors) を全タブ共通で決める。電力・温度・使用率・メモリの全部の記録から名前を集める。
 // 並び: 全体・RAM → CPU → ほかは記録に現れた順。「V100 (2)」のような同じ型の 2 枚目は、記録に後から現れても 1 枚目のすぐ後ろ。

@@ -201,7 +201,8 @@ public sealed class HistoryChart : Control
     }
 
     static string NameOf(string key) => key[2..];
-    static string BaseOf(string name) => Regex.Replace(name, @" \(\d+\)$", "");   // "V100 (2)" → "V100"
+    // "V100 (2)" → "V100"、"V100-2" → "V100"（[gpu] labels でカードに付けた名前。2026-10-19）
+    static string BaseOf(string name) => Regex.Replace(name, @"( \(\d+\)|-\d+)$", "");
     static int Rank(string name) => name is "全体" or "RAM" ? 0 : name == "CPU" ? 1 : 2;
 
     List<string> Keys()

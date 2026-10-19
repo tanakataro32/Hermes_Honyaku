@@ -51,7 +51,7 @@ log = logging.getLogger("honyaku")
 # ブラウザが再起動前の値と混同しないようにイベントに添える
 BOOT_ID = int(time.time())
 # バージョン (タイトルの横に表示)。リリースのたびに手で上げる
-APP_VERSION = "1.11.2"
+APP_VERSION = "1.11.3"
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -147,7 +147,7 @@ class Config:
                            "timeout": "120", "temperature": "0.2",
                            "deepl_key": "", "deepl_url": "https://api-free.deepl.com/v2/translate"},
             "segment": {"max_chars": "500", "min_chars": "120", "idle_flush_sec": "2.0", "code_words": ""},
-            "gpu": {"interval": "2", "power_max": "250"},
+            "gpu": {"interval": "2", "power_max": "250", "labels": ""},
             "power": {"cpu_source": "auto", "other_w": "50", "psu_eff": "0.90", "psu_w": "0", "cpu_max_w": "88"},
             "hwmon": {"listen_host": "0.0.0.0", "listen_port": "8766", "db": "~/.local/share/hermes-honyaku/hwmon.sqlite",
                       "keep_days": "35", "price_yen_kwh": "31", "llama_servers": ""},
@@ -1149,11 +1149,12 @@ class TokenMeter:
 # --------------------------------------------------------------------------
 # GPU 温度モニター (ヘッダーのメータ用)
 # --------------------------------------------------------------------------
-GPU_SMI_QUERY = ["--query-gpu=index,name,temperature.gpu,power.draw,memory.used,memory.total", "--format=csv,noheader,nounits"]
+# 最後の列の uuid は [gpu] labels でカードに名前を付けるため (2026-10-19)
+GPU_SMI_QUERY = ["--query-gpu=index,name,temperature.gpu,power.draw,memory.used,memory.total,uuid", "--format=csv,noheader,nounits"]
 # 性能メーター用 (7 列目以降): いまの SM クロック・最大 SM クロック・使用率・P ステート・電力上限・クロックを下げている理由。
 # 古いドライバなどで 1 つでも読めない項目があると nvidia-smi 全体が失敗するので、そのときは上の基本の項目だけに戻す
 GPU_SMI_QUERY_EXT = ["--query-gpu=index,name,temperature.gpu,power.draw,memory.used,memory.total,"
-                     "clocks.sm,clocks.max.sm,utilization.gpu,pstate,power.limit,clocks_throttle_reasons.active",
+                     "clocks.sm,clocks.max.sm,utilization.gpu,pstate,power.limit,clocks_throttle_reasons.active,uuid",
                      "--format=csv,noheader,nounits"]
 # clocks_throttle_reasons.active のビット → 画面に出す理由 (gpu_idle・アプリのクロック指定は「絞られている」に入れない)
 GPU_THROTTLE_BITS = [(0x4, "power", "電力の上限"), (0x8, "hw", "ハードの減速"), (0x20, "thermal", "温度"),
@@ -1186,6 +1187,18 @@ def short_gpu_label(name):
     return n[:14] or name[:14]
 
 
+def parse_gpu_labels(text):
+    """[gpu] labels の「UUID の頭 = 名前」をコンマ区切りで読み、[(UUID の頭, 名前), ...] を書いた順で返す。
+    例: 'GPU-988a561d = V100, GPU-76ab8bcd = V100-2, GPU-7b4c4762 = PG500'"""
+    out = []
+    for item in (text or "").split(","):
+        if "=" in item:
+            k, v = (s.strip() for s in item.split("=", 1))
+            if k and v:
+                out.append((k.lower(), v))
+    return out
+
+
 class GpuMonitor:
     """nvidia-smi で GPU の温度・消費電力・VRAM 使用量を読み、5 秒間隔で gpu イベントを BUS に流す。
 
@@ -1194,8 +1207,11 @@ class GpuMonitor:
     静かに無効化する (gpu なし として UI に表示されるだけ)。
     """
 
-    def __init__(self, interval=5.0, timeout=5.0, power_max=250.0):
+    def __init__(self, interval=5.0, timeout=5.0, power_max=250.0, labels=""):
         self.interval = interval
+        # [gpu] labels: 同じ型が並ぶとき (V100 × 2 など) に、nvidia-smi の番号でなくカードごとに決まった名前を付ける。
+        # 番号は挿す場所で入れ替わるので、番号順の「V100 (2)」はファン制御などの名前とずれることがある
+        self.labels = parse_gpu_labels(labels)
         self.timeout = timeout
         self.lock = threading.Lock()
         self.data = []
@@ -1230,9 +1246,15 @@ class GpuMonitor:
                     power = float(parts[3])
                 except ValueError:
                     power = 0.0  # 消費電力センサーのないカード (N/A)
+                uuid = parts[-1] if parts[-1].upper().startswith("GPU-") else ""
                 g = {"index": int(parts[0]), "name": parts[1], "label": short_gpu_label(parts[1]),
                      "temp": int(parts[2]), "power": power,
-                     "mem_used": float(parts[4]), "mem_total": float(parts[5])}
+                     "mem_used": float(parts[4]), "mem_total": float(parts[5]), "uuid": uuid}
+                g["order"] = len(self.labels) + g["index"]
+                for i, (head, name) in enumerate(self.labels):
+                    if uuid.lower().startswith(head):
+                        g["label"], g["order"] = name, i
+                        break
                 if len(parts) >= 12:
                     g["clock"] = _smi_num(parts[6])
                     g["clock_max"] = _smi_num(parts[7])
@@ -1246,6 +1268,8 @@ class GpuMonitor:
                     g["idle"] = bool(bits & 0x1)
                     g["throttle"] = [{"kind": k, "text": t} for b, k, t in GPU_THROTTLE_BITS if bits & b]
                 out.append(g)
+        # labels に書いたカードを書いた順に先へ、残りは nvidia-smi の番号順
+        out.sort(key=lambda g: g.pop("order"))
         # 同じ型が 2 枚以上なら 2 枚目以降を「V100 (2)」のように区別する (ディスクの label_short と同じやり方)。
         # ラベルは hwmon の記録・グラフ・部品別の行のキーに使われるので、重なると 2 枚目が 1 枚目に上書きされて消える
         seen = {}
@@ -4223,7 +4247,8 @@ def main():
     UIHandler.index_html = build_index_html(ver, cfg.get("ui", "hondana_url"))
     UIHandler.translator = translator
     UIHandler.gpu_monitor = GpuMonitor(interval=cfg.getfloat("gpu", "interval"),
-                                       power_max=cfg.getfloat("gpu", "power_max"))
+                                       power_max=cfg.getfloat("gpu", "power_max"),
+                                       labels=cfg.get("gpu", "labels"))
     UIHandler.sysmon_monitor = SysMonitor(interval=cfg.getfloat("sysmon", "interval"), power={
         "cpu_source": cfg.get("power", "cpu_source").lower(),
         "other_w": cfg.getfloat("power", "other_w"), "psu_eff": cfg.getfloat("power", "psu_eff"),
