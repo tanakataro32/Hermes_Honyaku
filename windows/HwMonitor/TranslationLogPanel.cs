@@ -50,9 +50,10 @@ public sealed class TranslationLogPanel : Control
     Blk? anchor;
     bool dragging;
 
-    // DeepL (中継が翻訳を止めている英文を、見ている間だけ・ブロックごとに訳す)。固まらないよう待ち行列に上限
-    readonly List<Blk> dq = [];
-    readonly System.Windows.Forms.Timer deeplTimer = new() { Interval = 800 };
+    // DeepL (中継が翻訳を止めている英文を、見ている間だけ・ブロックごとに訳す)。固まらないよう待ち行列に上限。
+    // 大きい塊は 1500 字ずつの単位に分けて頼み、上から順に埋めていく (丸ごと 1 回だと数秒待っても進みが見えない)
+    readonly List<Work> dq = [];
+    readonly System.Windows.Forms.Timer deeplTimer = new() { Interval = 300 };   // 1 単位ずつ直列 (deeplBusy で守る)。間を詰めて進みを機敏に
     bool deeplBusy;
 
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -96,6 +97,13 @@ public sealed class TranslationLogPanel : Control
         public List<Sub>? Subs;           // 思考のかたまりを作る区切りたち
         public int H = -1, Y;             // 高さ (未測定 = -1)・上端
         public bool Pending, Deepl;       // DeepL に頼んでいる最中・DeepL で訳した
+        public int PendingUnits;          // まだ返ってきていない DeepL の単位の数 (0 になったら Pending を下ろす)
+    }
+
+    sealed class Work   // DeepL に頼む 1 単位 (ある思考のかたまりの、1500 字ぶんの区切りたち)
+    {
+        public Blk Chunk = null!;
+        public List<Sub> Subs = [];
     }
 
     sealed class Ev
@@ -259,12 +267,11 @@ public sealed class TranslationLogPanel : Control
         MaybeAuto(c);
     }
 
-    // かたまりの英文 (En) と、中継の和訳をつないだ Ja を作り直す
+    // かたまりの英文 (En = 併記・DeepL のもと) を作り直す。表示は ChunkDisp が区切りごとに (和訳 or 英文) で組む
     void RebuildChunk(Blk c)
     {
         if (c.Subs == null) return;
         c.En = string.Join(" ", c.Subs.Where(s => s.En != "").Select(s => s.En));
-        if (!c.Deepl) c.Ja = string.Concat(c.Subs.Select(s => s.Ja));   // 1 つも訳されていなければ空 (英文を出す)
         c.H = -1;
     }
 
@@ -279,6 +286,7 @@ public sealed class TranslationLogPanel : Control
                 var old = blocks[i];
                 if (old.Subs != null) foreach (var s in old.Subs) subMap.Remove((old.Turn, s.Seg));
                 if (old.Kind == BK.Answer) answerBlk.Remove(old.Turn);
+                dq.RemoveAll(w => w.Chunk == old);
                 sel.Remove(old);
                 if (anchor == old) anchor = null;
                 if (openChunk == old) openChunk = null;
@@ -289,51 +297,62 @@ public sealed class TranslationLogPanel : Control
 
     // ---- DeepL (中継が止めている英文を訳す) ----
     // 自動翻訳 (DeepL ボタンを押している間): かたまりを閉じたとき、まだ訳していない英文の塊だけ待ち行列へ
-    void MaybeAuto(Blk c)
-    {
-        if (c.Kind != BK.Think || c.En == "" || c.Ja != "" || c.Pending || c.Deepl) return;
-        if (!AutoTranslate() || DeepL == null) return;
-        if (dq.Count >= MaxDeepLQueue) { AutoStopped?.Invoke("翻訳が追いつかないので自動翻訳を止めました"); return; }
-        if (DeepL.CanSpend(c.En.Length + dq.Sum(q => q.En.Length))) { c.Pending = true; dq.Add(c); }
-        else AutoStopped?.Invoke(DeepL.HasKey ? "DeepL の今月の上限に近いので止めました" : "DeepL のキーがありません");
-    }
+    void MaybeAuto(Blk c) { if (AutoTranslate()) Enqueue(c, true); }
 
-    // 手で頼む (ダブルクリック・右クリック)。いつでも・訳し済みでも訳し直せる
+    // 手で頼む (ダブルクリック・右クリック)。いつでも訳せる
     void TranslateBlock(Blk b)
     {
-        if (b.Kind != BK.Think || b.En == "" || b.Pending) return;
-        if (DeepL == null || !DeepL.HasKey) { NeedKey?.Invoke(); return; }
-        if (!DeepL.CanSpend(b.En.Length)) { AutoStopped?.Invoke("DeepL の今月の上限に近いので訳しません"); return; }
-        b.Pending = true;
-        b.Deepl = false;
-        dq.Insert(0, b);   // 手で頼んだ分を先に
+        if (b.Kind == BK.Think && b.Subs != null && (DeepL == null || !DeepL.HasKey)) { NeedKey?.Invoke(); return; }
+        Enqueue(b, false);
+    }
+
+    // かたまりの未翻訳の区切りを 1500 字ずつの単位に分けて待ち行列へ。上から順に埋まって進みが見える
+    void Enqueue(Blk c, bool auto)
+    {
+        if (c.Kind != BK.Think || c.Subs == null || c.Pending || DeepL == null || !DeepL.HasKey) return;
+        var todo = c.Subs.Where(s => s.Ja == "" && s.En != "").ToList();
+        if (todo.Count == 0) return;
+        long queued = dq.Sum(w => w.Subs.Sum(s => (long)s.En.Length));
+        if (dq.Count >= MaxDeepLQueue) { AutoStopped?.Invoke("翻訳が追いつかないので自動翻訳を止めました"); return; }
+        if (!DeepL.CanSpend(todo.Sum(s => (long)s.En.Length) + queued))
+        { AutoStopped?.Invoke(auto ? "DeepL の今月の上限に近いので止めました" : "DeepL の今月の上限に近いので訳しません"); return; }
+        var units = new List<Work>();
+        var cur = new List<Sub>(); int chars = 0;
+        foreach (var s in todo)
+        {
+            if (cur.Count > 0 && chars + s.En.Length > 1500) { units.Add(new Work { Chunk = c, Subs = cur }); cur = []; chars = 0; }
+            cur.Add(s); chars += s.En.Length;
+        }
+        if (cur.Count > 0) units.Add(new Work { Chunk = c, Subs = cur });
+        c.PendingUnits += units.Count;
+        c.Pending = true;
+        c.Deepl = false;
+        if (auto) dq.AddRange(units); else dq.InsertRange(0, units);   // 手で頼んだ分は先に
         needRelayout = true;
     }
 
-    // 待ち行列から 25 ブロック・8000 字までまとめて頼む
+    // 待ち行列から 1 単位ずつ頼み、返ってきた区切りの和訳を埋める (塊が上から順に訳文に変わっていく)
     async Task PumpDeepL()
     {
         if (deeplBusy || dq.Count == 0 || DeepL == null) return;
         deeplBusy = true;
         try
         {
-            var batch = new List<Blk>();
-            int chars = 0;
-            foreach (var b in dq)
+            var work = dq[0];
+            dq.RemoveAt(0);
+            var res = await DeepL.Translate([.. work.Subs.Select(s => s.En)]);
+            if (res != null)
+                for (int i = 0; i < work.Subs.Count && i < res.Count; i++) work.Subs[i].Ja = res[i].Trim();
+            var c = work.Chunk;
+            c.PendingUnits = Math.Max(0, c.PendingUnits - 1);
+            if (res == null)
             {
-                if (batch.Count >= 25 || (batch.Count > 0 && chars + b.En.Length > 8000)) break;
-                batch.Add(b);
-                chars += b.En.Length;
+                dq.RemoveAll(w => w.Chunk == c);   // この塊の残りの単位は取り下げる
+                c.PendingUnits = 0;
+                AutoStopped?.Invoke("DeepL: " + DeepL.Error);
             }
-            dq.RemoveRange(0, batch.Count);
-            var res = await DeepL.Translate([.. batch.Select(b => b.En)]);
-            for (int i = 0; i < batch.Count; i++)
-            {
-                batch[i].Pending = false;
-                if (res != null && i < res.Count) { batch[i].Ja = res[i].Trim(); batch[i].Deepl = true; }
-                batch[i].H = -1;
-            }
-            if (res == null) { foreach (var b in dq) b.Pending = false; dq.Clear(); AutoStopped?.Invoke("DeepL: " + DeepL.Error); }
+            if (c.PendingUnits == 0) { c.Pending = false; if (c.Subs != null && c.Subs.Any(s => s.Ja != "")) c.Deepl = true; }
+            c.H = -1;
             needRelayout = true;
         }
         catch { /* 翻訳の一時的な失敗で固まったり落ちたりしないよう握りつぶす */ }
@@ -363,18 +382,27 @@ public sealed class TranslationLogPanel : Control
             case BK.Answer:
                 return 2 + Measure("応答", FSmall, w) + Measure(b.Ja, FJa, w) + 8;
             default: // Think
-                int h = Measure(PrimText(b), FJa, w);
-                if (showSource && b.Ja != "" && b.En != "" && b.En != b.Ja) h += 2 + Measure(b.En, FEn, w);
+                int h = Measure(ThinkText(b), FJa, w);
+                if (showSource && ChunkHasJa(b) && b.En != "") h += 2 + Measure(b.En, FEn, w);
                 return h + 8;
         }
     }
 
-    // 思考に出す文: 和訳があれば和訳、無ければ英文。DeepL に頼み中は「(DeepL…)」、DeepL で訳したら「ᴰ」を付ける
-    static string PrimText(Blk b)
+    // 思考の表示: 区切りごとに (訳してあれば和訳・まだなら英文) をつなぐ。上から順に訳文へ変わっていく
+    static string ChunkDisp(Blk c)
     {
-        string s = b.Ja != "" ? b.Ja : b.En;
+        if (c.Subs == null || c.Subs.Count == 0) return c.Ja != "" ? c.Ja : c.En;
+        return string.Join(" ", c.Subs.Select(s => s.Ja != "" ? s.Ja : s.En).Where(t => t != ""));
+    }
+
+    static bool ChunkHasJa(Blk c) => c.Subs != null && c.Subs.Any(s => s.Ja != "");
+
+    // 思考に出す文。翻訳中は「(翻訳中…)」、DeepL で訳し終えたら「ᴰ」を付ける
+    static string ThinkText(Blk b)
+    {
+        string s = ChunkDisp(b);
         if (s == "") s = "(思考を待っています…)";
-        if (b.Pending) s += "  (DeepL…)";
+        if (b.Pending) s += "  (翻訳中…)";
         else if (b.Deepl) s += "  ᴰ";
         return s;
     }
@@ -575,13 +603,13 @@ public sealed class TranslationLogPanel : Control
                     TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.TextBoxControl);
                 break;
             default: // Think
-                string prim = PrimText(b);
-                // 色: 和訳=白、頼み中=灰、英文のまま=薄い白 (ダブルクリックで訳せる)
-                var pcol = b.Pending ? Theme.Muted : b.Ja == "" ? Theme.EnInk : Theme.Ink;
+                string prim = ThinkText(b);
+                // 色: 和訳が入った=白、英文のまま=薄い白 (ダブルクリックで訳せる)、まだ何も無く翻訳待ち=灰
+                var pcol = ChunkHasJa(b) ? Theme.Ink : b.Pending ? Theme.Muted : Theme.EnInk;
                 int ph = Measure(prim, FJa, w);
                 TextRenderer.DrawText(g, prim, FJa, new Rectangle(x, y, w, Math.Max(ph, Measure("A", FJa, w))),
                     pcol, TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.TextBoxControl);
-                if (showSource && b.Ja != "" && b.En != "" && b.En != b.Ja)
+                if (showSource && ChunkHasJa(b) && b.En != "")
                     TextRenderer.DrawText(g, b.En, FEn, new Rectangle(x, y + ph + 2, w, Measure(b.En, FEn, w)), Theme.Muted,
                         TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.TextBoxControl);
                 break;
@@ -595,7 +623,7 @@ public sealed class TranslationLogPanel : Control
         BK.Code => b.Ja,
         BK.Tools => b.Ja,
         BK.Answer => "[応答] " + b.Ja,
-        _ => b.Ja != "" ? b.Ja : b.En,
+        _ => ChunkDisp(b),
     };
 
     void CopySelection() => Copy(blocks.Where(sel.Contains));
