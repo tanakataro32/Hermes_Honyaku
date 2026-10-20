@@ -444,8 +444,10 @@ public sealed class TranslationLogPanel : Control
     {
         if (b.Items == null)
         {
+            // 区切り (seg) ごとに段落を分ける (空行で区切る)。中継は文末・段落末で切るので、区切り = 完結した文のまとまり。
+            // べったりの 1 段落にまとめず、つなぎ目が見えるようにする
             string content = b.Kind == BK.Answer ? b.Ja
-                : b.Subs == null ? "" : string.Join("\n", b.Subs.Select(s => s.Ja != "" ? s.Ja : s.En));
+                : b.Subs == null ? "" : string.Join("\n\n", b.Subs.Select(s => s.Ja != "" ? s.Ja : s.En).Where(t => t != ""));
             if (content == "") content = b.Pending ? "" : "(思考を待っています…)";
             b.Items = ParseMarkdown(content);
         }
@@ -459,12 +461,15 @@ public sealed class TranslationLogPanel : Control
         return indent;
     }
 
+    // 項目の前の余白: 見出しは広め、段落は段落らしく空ける、箇条書き/番号は詰める
+    static int Gap(Item it) => it.Kind == IK.Heading ? 11 : it.Kind == IK.Para ? 8 : 3;
+
     static int MeasureItems(List<Item> items, int w)
     {
         int h = 0;
         for (int i = 0; i < items.Count; i++)
         {
-            if (i > 0) h += items[i].Kind == IK.Heading ? 9 : 4;
+            if (i > 0) h += Gap(items[i]);
             ItemFont(items[i], out var f, out int ind);
             h += Measure(items[i].Text, f, w - ind);
         }
@@ -476,7 +481,7 @@ public sealed class TranslationLogPanel : Control
         int cy = y;
         foreach (var it in items)
         {
-            if (cy > y) cy += it.Kind == IK.Heading ? 9 : 4;
+            if (cy > y) cy += Gap(it);
             ItemFont(it, out var f, out int ind);
             int ih = Measure(it.Text, f, w - ind);
             if (it.Mark != "") TextRenderer.DrawText(g, it.Mark, FJa, new Point(x + (it.Kind == IK.Bullet ? 2 : 0), cy), col, TextFormatFlags.NoPadding);
