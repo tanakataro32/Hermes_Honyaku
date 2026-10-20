@@ -48,6 +48,11 @@ public sealed class TranslationPanel : Control
     readonly List<Entry> queue = [];
     readonly System.Windows.Forms.Timer deeplTimer = new() { Interval = 800 };
     bool deeplBusy;
+    // 翻訳が集中したときに固まらないための歯止め:
+    //   待ち行列はここで頭打ち (超えたら自動翻訳を止める)、描き直しは redrawTimer がまとめて 1 回だけ行う
+    const int MaxQueue = 200;
+    readonly System.Windows.Forms.Timer redrawTimer = new() { Interval = 400 };
+    bool redrawPending, redrawing;
 
     /// <summary>1 区切り。Kind: ok = 翻訳の中継が訳した / none = 中継が翻訳を止めている (英文のまま) / bad = 中継が訳せなかった / deepl = DeepL で訳した</summary>
     sealed class Entry
@@ -106,6 +111,9 @@ public sealed class TranslationPanel : Control
         thinkTimer.Tick += (_, _) => DrawThink();
         deeplTimer.Tick += async (_, _) => await PumpDeepL();
         deeplTimer.Start();
+        // 描き直しは 400ms に 1 回だけ。届くそばから全描き直しをすると、翻訳が集中したとき固まる
+        redrawTimer.Tick += (_, _) => { if (redrawPending && !redrawing) { redrawPending = false; Redraw(true); } };
+        redrawTimer.Start();
         box.MouseUp += OnBoxClick;
         new ToolTip { InitialDelay = 600 }.SetToolTip(box, "英文の行をクリックすると、その区切りだけ DeepL で訳します (上の帯の「設定…」でキーを入れたとき)");
     }
@@ -232,10 +240,11 @@ public sealed class TranslationPanel : Control
             // 自動の翻訳: 押している間に新しく届いた、訳されていない区切りだけ
             if (e.Untranslated && AutoTranslate() && DeepL != null && !string.IsNullOrEmpty(e.Orig))
             {
-                if (DeepL.CanSpend(e.Orig.Length + queue.Sum(q => q.Orig!.Length))) { e.Pending = true; queue.Add(e); }
+                if (queue.Count >= MaxQueue) AutoStopped?.Invoke("翻訳が追いつかないので自動翻訳を止めました");
+                else if (DeepL.CanSpend(e.Orig.Length + queue.Sum(q => q.Orig!.Length))) { e.Pending = true; queue.Add(e); }
                 else AutoStopped?.Invoke(DeepL.HasKey ? "DeepL の今月の上限に近いので止めました" : "DeepL のキーがありません");
             }
-            if (entries.Count > MaxEntries) { entries.RemoveRange(0, entries.Count - MaxEntries); Redraw(true); return; }
+            if (entries.Count > MaxEntries) { entries.RemoveRange(0, entries.Count - MaxEntries); RequestRedraw(); return; }
             bool atEnd = AtEnd();
             Write(e);
             if (atEnd) ScrollToEnd();
@@ -277,7 +286,10 @@ public sealed class TranslationPanel : Control
     /// <summary>全部描き直す。keepView = 上を読んでいるときはその位置 (いちばん上に見えていた区切り) を保つ</summary>
     void Redraw(bool keepView = false)
     {
-        if (!IsHandleCreated) return;
+        if (!IsHandleCreated || redrawing) return;
+        redrawing = true;
+        try
+        {
         bool atEnd = AtEnd();
         Entry? top = null;
         if (keepView && !atEnd)
@@ -304,6 +316,8 @@ public sealed class TranslationPanel : Control
             SendMessage(box.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
             box.Invalidate();
         }
+        }
+        finally { redrawing = false; }
     }
 
     // 行のクリック: 訳されていない区切りなら、それだけ DeepL に頼む (文字を選んでいるとき = コピーしたいときは何もしない)
@@ -317,7 +331,7 @@ public sealed class TranslationPanel : Control
         if (!DeepL.CanSpend(e.Orig.Length)) { AutoStopped?.Invoke("DeepL の今月の上限に近いので訳しません"); return; }
         e.Pending = true;
         queue.Insert(0, e);   // クリックした分を先に
-        Redraw(true);
+        RequestRedraw();
     }
 
     // 待ち行列から 25 区切り・8000 字までまとめて頼む
@@ -348,10 +362,15 @@ public sealed class TranslationPanel : Control
                 queue.Clear();
                 AutoStopped?.Invoke("DeepL: " + DeepL.Error);
             }
-            Redraw(true);
+            RequestRedraw();
         }
+        catch { /* 翻訳の一時的な失敗で固まったり落ちたりしないよう握りつぶす (理由は DeepL.Error に残る) */ }
         finally { deeplBusy = false; }
     }
+
+    // 描き直しを予約する (すぐにはやらず、redrawTimer が 400ms に 1 回だけまとめて行う)。
+    // 届くそばから全描き直しをすると、翻訳が集中したときに UI が飽和して固まる
+    void RequestRedraw() => redrawPending = true;
 
     void DrawThink()
     {
@@ -375,7 +394,7 @@ public sealed class TranslationPanel : Control
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { thinkTimer.Dispose(); deeplTimer.Dispose(); }
+        if (disposing) { thinkTimer.Dispose(); deeplTimer.Dispose(); redrawTimer.Dispose(); }
         base.Dispose(disposing);
     }
 }
