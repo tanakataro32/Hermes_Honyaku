@@ -16,14 +16,21 @@ public sealed class MainForm : Form
     readonly HistoryChart chart = new() { Dock = DockStyle.Fill };
     readonly EnergyPanel energy = new() { Dock = DockStyle.Fill, Visible = false };
     readonly SpeedPanel speed = new() { Dock = DockStyle.Fill, Visible = false };
-    readonly TranslationPanel translation;
-    readonly SplitContainer split;
+    readonly TranslationLogPanel transLog;
+    readonly TranslationLogPanel graphLog;     // グラフタブの下に出す翻訳ログ (タブのものとは別インスタンス)
+    readonly OriginalPanel graphOrig;          // グラフタブの下に出す原文 (リアルタイムの生の英文)
+    SplitContainer graphSplit = null!;         // 上: グラフ / 下: 翻訳エリア
+    SplitContainer transSplit = null!;         // 下の中で 左: 原文 / 右: 翻訳ログ
+    bool graphSplitInit;                       // グラフタブの分割位置を初めて出したときに 1 度だけ決める
+    readonly Panel content = new() { Dock = DockStyle.Fill, BackColor = Theme.Back };
     readonly ToolStrip bar = new() { GripStyle = ToolStripGripStyle.Hidden, Renderer = new DarkRenderer(), BackColor = Theme.Panel, ForeColor = Theme.Ink, Padding = new Padding(4, 2, 4, 2) };
     readonly ToolStripButton tabGraph = new("グラフ") { CheckOnClick = false };
     readonly ToolStripButton tabEnergy = new("電気代") { CheckOnClick = false };
     readonly ToolStripButton tabCost = new("コスト比較") { CheckOnClick = false, ToolTipText = "電気代と、同じだけ推論したときのレンタル (GPU の時間貸し・API の従量) を比べる" };
     readonly ToolStripButton tabSpeed = new("速度と文脈") { CheckOnClick = false,
         ToolTipText = "要求ごとの生成・読み込みの速さを、文脈の量に対して点で描く (llama-server のログから)。\n設定 (モデル・枠の数) を変えたときの比べや、文脈が長くなるとどれだけ遅くなるかを見る" };
+    readonly ToolStripButton tabLog = new("翻訳ログ") { CheckOnClick = false,
+        ToolTipText = "Hermes / OpenCode の思考を OpenCode 風にブロックで出す (仮)。\nターンごとに 思考 (英文＋和訳)・コード・実行したコマンド・応答 を並べる。右クリックで原文の併記・コピー" };
     readonly ToolStripButton deviceView = new("部品別") { CheckOnClick = true,
         ToolTipText = "上のメーターを部品別 (CPU・GPU ごとに 1 行、スレッドごとの使用率) にする。\n押していないときは項目別 (温度・電力・使用率・メモリの 4 列)" };
     // 更新の間隔 (btop の − 2000ms ＋ と同じ)。hwmon.py が 2 秒ごとに読んでいるので 2 秒より短くはしない
@@ -32,9 +39,6 @@ public sealed class MainForm : Form
     readonly ToolStripLabel intervalLabel = new() { ToolTipText = "上のメーター・枠と、グラフ (120 秒・10 分) を取りに行く間隔" };
     readonly ToolStripButton faster = new("＋") { ToolTipText = "更新の間隔を短くする (2 秒まで)" };
     readonly ToolStripButton topMost = new("最前面") { CheckOnClick = true };
-    readonly ToolStripButton showJa = new("和訳") { CheckOnClick = true };
-    readonly ToolStripButton showSrc = new("原文を併記") { CheckOnClick = true, ToolTipText = "和訳の 1 区切りごとに、翻訳した英文を下に小さく出す" };
-    readonly ToolStripButton showThink = new("原文の欄") { CheckOnClick = true, ToolTipText = "和訳の上に、いま考えている英文を届いたそばから流す (和訳より早い)" };
     readonly ToolStripButton autoDeepL = new("DeepL") { CheckOnClick = true,
         ToolTipText = "押している間、新しく届いた英文 (訳されていない区切り) を DeepL で訳す。\n押していなくても、英文の行をクリックすればその区切りだけ訳す。\nキーは「設定…」で入れる" };
     readonly ToolStripLabel deeplUsage = new() { Alignment = ToolStripItemAlignment.Right };
@@ -51,13 +55,23 @@ public sealed class MainForm : Form
         this.settings = settings;
         api = new HwmonClient(() => settings.HwmonBase);
         feed = new HonyakuFeed(() => settings.HonyakuBase);
-        translation = new TranslationPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill };
         deepl = new DeepLService(settings);
-        translation.DeepL = deepl;
-        translation.AutoTranslate = () => settings.AutoTranslate;
-        translation.AutoStopped += why => { autoDeepL.Checked = false; deeplUsage.Text = why + "  "; deeplUsage.ForeColor = Theme.Warn; };
-        translation.NeedKey += () => OpenSettings("DeepL で訳すには、DeepL API のキーを入れてください");
         deepl.Changed += ShowUsage;
+        // 翻訳ログは 2 か所に出す: 独立した「翻訳ログ」タブと、グラフタブの下。別インスタンスで、見えている側だけが自動翻訳する
+        transLog = new TranslationLogPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill, Visible = false };
+        graphLog = new TranslationLogPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill };
+        graphOrig = new OriginalPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill };
+        foreach (var p in new[] { transLog, graphLog })
+        {
+            p.DeepL = deepl;
+            p.AutoTranslate = () => settings.AutoTranslate;
+            p.AutoStopped += why => { autoDeepL.Checked = false; deeplUsage.Text = why + "  "; deeplUsage.ForeColor = Theme.Warn; };
+            p.NeedKey += () => OpenSettings("DeepL で訳すには、DeepL API のキーを入れてください");
+            p.ShowSource = settings.ShowSource;
+        }
+        // 原文を併記の切り替えは両方そろえる
+        transLog.ShowSourceChanged += () => { settings.ShowSource = transLog.ShowSource; graphLog.ShowSource = transLog.ShowSource; settings.Save(); };
+        graphLog.ShowSourceChanged += () => { settings.ShowSource = graphLog.ShowSource; transLog.ShowSource = graphLog.ShowSource; settings.Save(); };
         slots = new SlotPanel(feed.Turns) { Dock = DockStyle.Top, Height = 0 };
 
         Text = "llmsv ハードウェアモニタ  " + VersionText();
@@ -80,6 +94,7 @@ public sealed class MainForm : Form
         tabEnergy.Click += (_, _) => SetTab("energy");
         tabCost.Click += (_, _) => SetTab("cost");
         tabSpeed.Click += (_, _) => SetTab("speed");
+        tabLog.Click += (_, _) => SetTab("log");
         deviceView.Checked = meters.DeviceView = settings.DeviceView;
         deviceView.CheckedChanged += (_, _) =>
         {
@@ -92,12 +107,6 @@ public sealed class MainForm : Form
         ApplyInterval();
         topMost.Checked = settings.TopMost;
         topMost.CheckedChanged += (_, _) => { TopMost = settings.TopMost = topMost.Checked; settings.Save(); };
-        showJa.Checked = settings.ShowTranslation;
-        showJa.CheckedChanged += (_, _) => { settings.ShowTranslation = showJa.Checked; ApplyTranslation(); settings.Save(); };
-        showSrc.Checked = settings.ShowSource;
-        showSrc.CheckedChanged += (_, _) => { settings.ShowSource = translation.ShowSource = showSrc.Checked; settings.Save(); };
-        showThink.Checked = settings.ShowThink;
-        showThink.CheckedChanged += (_, _) => { settings.ShowThink = translation.ShowThink = showThink.Checked; settings.Save(); };
         autoDeepL.Checked = settings.AutoTranslate;
         autoDeepL.CheckedChanged += (_, _) =>
         {
@@ -113,20 +122,37 @@ public sealed class MainForm : Form
         };
         var setup = new ToolStripButton("設定…");
         setup.Click += (_, _) => OpenSettings();
-        bar.Items.AddRange([tabGraph, tabEnergy, tabCost, tabSpeed, new ToolStripSeparator(), deviceView, slower, intervalLabel, faster,
-                            new ToolStripSeparator(), topMost, showJa, showSrc, showThink, autoDeepL,
+        bar.Items.AddRange([tabGraph, tabEnergy, tabCost, tabSpeed, tabLog, new ToolStripSeparator(), deviceView, slower, intervalLabel, faster,
+                            new ToolStripSeparator(), topMost, autoDeepL,
                             new ToolStripSeparator(), setup, status, deeplUsage]);
 
-        // 真ん中 (グラフ / 電気代) と下 (和訳) は境目をドラッグで動かせる
-        split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, BackColor = Theme.Grid, SplitterWidth = 4 };
-        split.Panel1.BackColor = split.Panel2.BackColor = Theme.Back;
-        split.Panel1.Controls.Add(chart);
-        split.Panel1.Controls.Add(energy);
-        split.Panel1.Controls.Add(cost);
-        split.Panel1.Controls.Add(speed);
-        split.Panel2.Controls.Add(translation);
+        // グラフタブ: 上にグラフ、下に [左=原文 (リアルタイム) ・右=翻訳ログ]。境目はドラッグで動かせる
+        transSplit = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, BackColor = Theme.Grid, SplitterWidth = 4 };
+        transSplit.Panel1.BackColor = transSplit.Panel2.BackColor = Theme.Back;
+        transSplit.Panel1.Controls.Add(graphOrig);
+        transSplit.Panel2.Controls.Add(graphLog);
+        graphSplit = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, BackColor = Theme.Grid, SplitterWidth = 4, Visible = false };
+        graphSplit.Panel1.BackColor = graphSplit.Panel2.BackColor = Theme.Back;
+        graphSplit.Panel1.Controls.Add(chart);
+        graphSplit.Panel2.Controls.Add(transSplit);
+        graphSplit.VisibleChanged += (_, _) =>
+        {
+            if (graphSplit.Visible && !graphSplitInit && graphSplit.Height > 60)
+            {
+                SetSplit(graphSplit, graphSplit.Height * 52 / 100);
+                SetSplit(transSplit, transSplit.Width / 2);
+                graphSplitInit = true;
+            }
+        };
 
-        Controls.Add(split);
+        // 真ん中: タブで切り替える (グラフ[＋原文・翻訳ログ] / 電気代 / コスト比較 / 速度と文脈 / 翻訳ログ)。見えているものだけ表示する
+        content.Controls.Add(graphSplit);
+        content.Controls.Add(energy);
+        content.Controls.Add(cost);
+        content.Controls.Add(speed);
+        content.Controls.Add(transLog);
+
+        Controls.Add(content);
         Controls.Add(slots);
         Controls.Add(meters);
         Controls.Add(bar);
@@ -172,9 +198,17 @@ public sealed class MainForm : Form
         Load += async (_, _) =>
         {
             TopMost = settings.TopMost;
-            split.SplitterDistance = Math.Max(120, split.Height - 230);   // 和訳 (+原文の欄) に下の 230px
             SetTab(settings.Tab);
-            ApplyTranslation();
+            // レイアウトが整ってから、グラフタブの境目を初期化する (最初から graph タブのとき用)
+            BeginInvoke(() =>
+            {
+                if (graphSplit.Visible && !graphSplitInit && graphSplit.Height > 60)
+                {
+                    SetSplit(graphSplit, graphSplit.Height * 52 / 100);
+                    SetSplit(transSplit, transSplit.Width / 2);
+                    graphSplitInit = true;
+                }
+            });
             feed.Start();
             nowTimer.Start();
             slowTimer.Start();
@@ -196,21 +230,26 @@ public sealed class MainForm : Form
 
     void SetTab(string tab)
     {
-        settings.Tab = tab is "energy" or "cost" or "speed" ? tab : "graph";
+        settings.Tab = tab is "energy" or "cost" or "speed" or "log" ? tab : "graph";
         settings.Save();
-        chart.Visible = tabGraph.Checked = settings.Tab == "graph";
+        graphSplit.Visible = tabGraph.Checked = settings.Tab == "graph";
         energy.Visible = tabEnergy.Checked = settings.Tab == "energy";
         cost.Visible = tabCost.Checked = settings.Tab == "cost";
         speed.Visible = tabSpeed.Checked = settings.Tab == "speed";
+        transLog.Visible = tabLog.Checked = settings.Tab == "log";
         _ = RefreshSlow(force: true);
     }
 
-    void ApplyTranslation()
+    // SplitContainer の境目を、範囲からはみ出さないように決める
+    static void SetSplit(SplitContainer sc, int dist)
     {
-        split.Panel2Collapsed = !settings.ShowTranslation;
-        showSrc.Enabled = showThink.Enabled = settings.ShowTranslation;   // 和訳を隠しているときは原文の 2 つも押せない
-        translation.ShowSource = settings.ShowSource;
-        translation.ShowThink = settings.ShowThink;
+        try
+        {
+            int total = sc.Orientation == Orientation.Horizontal ? sc.Height : sc.Width;
+            int max = Math.Max(sc.Panel1MinSize, total - sc.Panel2MinSize - sc.SplitterWidth);
+            sc.SplitterDistance = Math.Clamp(dist, sc.Panel1MinSize, max);
+        }
+        catch { }
     }
 
     // タイトルバーの版: csproj の <Version> と、ビルドしたときのコミット (SDK が InformationalVersion の + の後ろに入れる) の頭 7 桁。
@@ -381,7 +420,6 @@ public sealed class MainForm : Form
         speed.Invalidate();
         _ = deepl.RefreshUsage();
         settings.Save();
-        ApplyTranslation();
         feed.Start();   // 接続先が変わったかもしれないのでつなぎ直す
         _ = RefreshNow();
         _ = RefreshSlow(force: true);

@@ -10,9 +10,7 @@ public sealed class Settings
     public int HonyakuPort { get; set; } = 8765;   // hermes_honyaku.py の画面 (和訳の SSE)
     public bool TopMost { get; set; }
     public bool HideTasks { get; set; } = true;    // 背景タスク (タイトル生成など) の和訳を出さない
-    public bool ShowTranslation { get; set; } = true;
-    public bool ShowSource { get; set; }               // 和訳の下に原文 (英文の区切り) を併記
-    public bool ShowThink { get; set; } = true;        // 和訳の上に、いま考えている英文の欄
+    public bool ShowSource { get; set; } = true;       // 翻訳ログで思考の下に原文 (英文) を併記する
     // DeepL (翻訳の中継が翻訳を止めているときなどに、見ている間だけ英文を訳す)。キーはこのファイルにだけ置く (リポジトリには入れない)
     public string DeepLKey { get; set; } = "";
     public bool AutoTranslate { get; set; }              // 押している間、新しく届いた英文を訳す
