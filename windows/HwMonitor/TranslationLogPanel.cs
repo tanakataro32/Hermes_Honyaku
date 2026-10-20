@@ -5,12 +5,14 @@ using System.Text.Json;
 
 namespace HwMonitor;
 
-/// <summary>翻訳ログの閲覧ページ (OpenCode 風にブロック単位で出す・仮実装)。
+/// <summary>翻訳ログの閲覧ページ (OpenCode 風にブロック単位で出す)。
 /// 翻訳の画面 (hermes_honyaku.py の 8765) の /events (SSE) を HonyakuFeed から受け取り、
 /// ターンごとに 思考 (英文＋和訳)・コード (Shell などの区切り)・ツール (実行したコマンド)・応答 のブロックに並べて描く。
-///   ・ログの閲覧なので文はいつも開いたまま (OpenCode のようにクリックで畳まない)
-///   ・固まらないように RichTextBox は使わず自前で描く。届いたイベントはいったん貯め、300ms ごとにまとめて並べ直して描く
-///   ・画面に見えているブロックだけ描く (仮想化)
+///   ・思考は「連続した思考のかたまり」を 1 ブロックにまとめる (コード・ツール・応答・ターンの変わり目で区切る)
+///   ・後からでもブロックごとに個別に翻訳できる (ダブルクリック / 右クリック→選択を翻訳。英文のまま流れている分を DeepL で訳す)
+///   ・ブロックをクリック/ドラッグで選び、Ctrl+C か右クリックでコピーできる
+///   ・ログの閲覧なので文はいつも開いたまま。固まらないよう RichTextBox は使わず自前で描く
+///     (届いたイベントは貯めて 300ms ごとにまとめて並べ直し、画面に見えているブロックだけ描く)
 /// 制約: Shell の「結果」は翻訳の中継のフィードには流れていない (結果は次の要求に入るため)。
 ///       いまは実行したコマンド (tools) と、ターンのきっかけ (source、前のツール結果の断片) までを出す。</summary>
 [DesignerCategory("Code")]
@@ -19,6 +21,7 @@ public sealed class TranslationLogPanel : Control
     const int MaxBlocks = 3000;
     const int HeaderH = 22, TopPad = 6, BottomPad = 12, MarginL = 10, MarginR = 10, SbW = 14;
     const int BoxInset = 10, BoxPad = 6;
+    const int MaxDeepLQueue = 200;
 
     readonly Func<bool> hideTasks;
     readonly VScrollBar sb = new() { SmallChange = 40 };
@@ -29,9 +32,10 @@ public sealed class TranslationLogPanel : Control
 
     // 画面側 (UI スレッド) だけが触る
     readonly List<Blk> blocks = [];
-    readonly Dictionary<(int turn, int seg), Blk> segBlk = [];   // seg → 対応する思考ブロック (ja で和訳を埋める)
+    readonly Dictionary<(int turn, int seg), Sub> subMap = [];   // seg → 思考ブロックの中の 1 区切り (ja で和訳を埋める)
     readonly Dictionary<int, Blk> answerBlk = [];               // ターン → 応答ブロック (届くそばから足す)
     readonly Dictionary<int, bool> turnHidden = [];            // 背景タスクなどで出さないターン
+    Blk? openChunk;      // いま伸びている思考のかたまり (null = 直前がコード/ツール/応答/ターンの変わり目)
     long boot;
     bool engineNone;
     string connNote = "";
@@ -41,11 +45,15 @@ public sealed class TranslationLogPanel : Control
     bool showSource = true;  // 思考の下に英文を併記する
     ToolStripMenuItem mSrc = null!;
 
-    // DeepL (中継が翻訳を止めている英文を、見ている間だけ・クリックで訳す)。固まらないよう待ち行列に上限
+    // 選択 (ブロック単位。クリック/ドラッグ/Shift で範囲、Ctrl+C でコピー)
+    readonly HashSet<Blk> sel = [];
+    Blk? anchor;
+    bool dragging;
+
+    // DeepL (中継が翻訳を止めている英文を、見ている間だけ・ブロックごとに訳す)。固まらないよう待ち行列に上限
     readonly List<Blk> dq = [];
     readonly System.Windows.Forms.Timer deeplTimer = new() { Interval = 800 };
     bool deeplBusy;
-    const int MaxDeepLQueue = 200;
 
     [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public DeepLService? DeepL { get; set; }
@@ -53,7 +61,7 @@ public sealed class TranslationLogPanel : Control
     public Func<bool> AutoTranslate { get; set; } = () => false;
     /// <summary>自動の翻訳を止めた (上限・失敗)。理由を渡す</summary>
     public event Action<string>? AutoStopped;
-    /// <summary>英文のブロックをクリックしたが DeepL のキーが無い</summary>
+    /// <summary>翻訳しようとしたが DeepL のキーが無い</summary>
     public event Action? NeedKey;
     /// <summary>原文の併記を切り替えた (右クリックの menu から)。設定に覚えるため</summary>
     public event Action? ShowSourceChanged;
@@ -68,26 +76,33 @@ public sealed class TranslationLogPanel : Control
     static readonly Font FMono = new("Consolas", 9f);
     static readonly Font FSmall = new("Yu Gothic UI", 8f);
     static readonly Color TurnInk = Color.FromArgb(0x5a, 0xd0, 0xc0);   // ターンの見出し (明るい teal)
+    static readonly Color SelBack = Color.FromArgb(0x1e, 0x3a, 0x42);   // 選んだブロックの下じき
 
     enum BK { Turn, Think, Code, Answer, Tools }
+
+    sealed class Sub   // 思考のかたまりの中の 1 区切り (英文＝En、中継の和訳＝Ja)
+    {
+        public int Seg;
+        public string En = "", Ja = "";
+        public Blk Owner = null!;
+    }
 
     sealed class Blk
     {
         public BK Kind;
-        public int Turn, Seg;
-        public string Ja = "", En = "";
-        public string State = "ok";   // 思考: wait = 和訳待ち / ok / none = 中継が止めている (英文) / bad = 訳せなかった
+        public int Turn;
+        public string Ja = "", En = "";   // 思考: Ja=和訳 (無ければ空) / En=英文。コード・ツール・応答は Ja に本文
         public string Who = "", Source = "", Model = "", Time = "";
-        public int H = -1, Y;         // 高さ (未測定 = -1)・上端
-        public (int t, int s) Key;
-        public bool Pending, Deepl;   // DeepL に頼んでいる最中・DeepL で訳した
+        public List<Sub>? Subs;           // 思考のかたまりを作る区切りたち
+        public int H = -1, Y;             // 高さ (未測定 = -1)・上端
+        public bool Pending, Deepl;       // DeepL に頼んでいる最中・DeepL で訳した
     }
 
     sealed class Ev
     {
         public string Type = "", Text = "", Src = "", How = "", Kind = "", Source = "", Who = "", Model = "", Engine = "";
         public int Turn, Seg;
-        public bool Task, HasBoot;
+        public bool Task, Ok, HasBoot;
         public long Boot;
     }
 
@@ -103,20 +118,25 @@ public sealed class TranslationLogPanel : Control
         Controls.Add(sb);
 
         var menu = new ContextMenuStrip { Renderer = new DarkRenderer(), BackColor = Theme.Panel, ForeColor = Theme.Ink };
+        var mTrans = new ToolStripMenuItem("選択を翻訳");
+        mTrans.Click += (_, _) => { foreach (var b in blocks.Where(sel.Contains).ToList()) TranslateBlock(b); };
+        var mCopySel = new ToolStripMenuItem("選択をコピー");
+        mCopySel.Click += (_, _) => CopySelection();
         mSrc = new ToolStripMenuItem("原文 (英文) を併記") { Checked = showSource, CheckOnClick = true };
         mSrc.CheckedChanged += (_, _) => { showSource = mSrc.Checked; foreach (var b in blocks) b.H = -1; needRelayout = true; ShowSourceChanged?.Invoke(); };
-        var mCopy = new ToolStripMenuItem("表示をコピー");
-        mCopy.Click += (_, _) => CopyAll();
+        var mCopyAll = new ToolStripMenuItem("表示を全部コピー");
+        mCopyAll.Click += (_, _) => CopyAll();
         var mClear = new ToolStripMenuItem("消す");
-        mClear.Click += (_, _) => { blocks.Clear(); segBlk.Clear(); answerBlk.Clear(); dq.Clear(); needRelayout = true; };
-        menu.Items.AddRange([mSrc, mCopy, mClear]);
+        mClear.Click += (_, _) => { blocks.Clear(); subMap.Clear(); answerBlk.Clear(); dq.Clear(); sel.Clear(); anchor = null; openChunk = null; needRelayout = true; };
+        menu.Items.AddRange([mTrans, mCopySel, new ToolStripSeparator(), mSrc, mCopyAll, mClear]);
         ContextMenuStrip = menu;
 
         pump.Tick += (_, _) => Pump();
         pump.Start();
         deeplTimer.Tick += async (_, _) => await PumpDeepL();
         deeplTimer.Start();
-        new ToolTip { InitialDelay = 600 }.SetToolTip(this, "英文のブロックをクリックすると、その区切りだけ DeepL で訳します (上の帯の「DeepL」や「設定…」でキーを入れたとき)");
+        new ToolTip { InitialDelay = 600 }.SetToolTip(this,
+            "ブロックをクリック/ドラッグで選択 (Shift＋クリックで範囲)、Ctrl+C でコピー。\nダブルクリック (または右クリック→選択を翻訳) で、英文の思考を DeepL で訳します");
     }
 
     static string Str(JsonElement ev, string name) =>
@@ -137,7 +157,10 @@ public sealed class TranslationLogPanel : Control
                 e.Task = ev.TryGetProperty("task", out var tk) && tk.ValueKind == JsonValueKind.True;
                 break;
             case "seg": e.Src = Str(ev, "src").Trim(); e.Kind = Str(ev, "kind"); break;
-            case "ja": e.Text = Str(ev, "text").Trim(); e.How = Str(ev, "how"); break;
+            case "ja":
+                e.Text = Str(ev, "text").Trim(); e.How = Str(ev, "how");
+                e.Ok = ev.TryGetProperty("ok", out var o) && o.ValueKind == JsonValueKind.True;
+                break;
             case "answer": e.Text = Str(ev, "text"); break;
             case "tools":
                 var sbt = new StringBuilder();
@@ -171,7 +194,7 @@ public sealed class TranslationLogPanel : Control
     {
         if (e.HasBoot && e.Boot != boot)
         {
-            if (boot != 0) { blocks.Clear(); segBlk.Clear(); answerBlk.Clear(); turnHidden.Clear(); }
+            if (boot != 0) { blocks.Clear(); subMap.Clear(); answerBlk.Clear(); turnHidden.Clear(); sel.Clear(); anchor = null; openChunk = null; }
             boot = e.Boot;
         }
         switch (e.Type)
@@ -181,6 +204,7 @@ public sealed class TranslationLogPanel : Control
                 engineNone = e.Engine == "none";
                 return ch;   // 状態が変わったときだけ見出しを描き直す
             case "turn_start":
+                CloseChunk();
                 bool hide = e.Task && hideTasks();
                 turnHidden[e.Turn] = hide;
                 if (hide) return false;
@@ -191,33 +215,33 @@ public sealed class TranslationLogPanel : Control
                 if (Hidden(e.Turn)) return false;
                 if (e.Kind == "code")
                 {
-                    if (e.Src != "") Add(new Blk { Kind = BK.Code, Turn = e.Turn, Seg = e.Seg, Ja = e.Src });
+                    CloseChunk();
+                    if (e.Src != "") Add(new Blk { Kind = BK.Code, Turn = e.Turn, Ja = e.Src });
                     return e.Src != "";
                 }
-                var tb = new Blk { Kind = BK.Think, Turn = e.Turn, Seg = e.Seg, En = e.Src, State = "wait", Key = (e.Turn, e.Seg) };
-                segBlk[(e.Turn, e.Seg)] = tb;
-                Add(tb);
+                if (openChunk == null || openChunk.Turn != e.Turn) { CloseChunk(); openChunk = new Blk { Kind = BK.Think, Turn = e.Turn, Subs = [] }; Add(openChunk); }
+                var sub = new Sub { Seg = e.Seg, En = e.Src, Owner = openChunk };
+                openChunk.Subs!.Add(sub);
+                subMap[(e.Turn, e.Seg)] = sub;
+                openChunk.Deepl = false;   // 内容が増えたので DeepL 結果は作り直す
+                RebuildChunk(openChunk);
                 return true;
             case "ja":
                 if (Hidden(e.Turn) || e.How == "code") return false;
-                string state = e.How == "none" ? "none" : e.How is "en" or "interrupted" or "suspect" ? "bad"
-                             : e.Text.StartsWith("[翻訳失敗") ? "bad" : "ok";
-                if (segBlk.TryGetValue((e.Turn, e.Seg), out var blk)) { blk.Ja = e.Text; blk.State = state; blk.H = -1; MaybeAuto(blk); }
-                else
-                {
-                    var nb = new Blk { Kind = BK.Think, Turn = e.Turn, Seg = e.Seg, Ja = e.Text, En = e.Text, State = state, Key = (e.Turn, e.Seg) };
-                    segBlk[(e.Turn, e.Seg)] = nb;
-                    Add(nb);
-                    MaybeAuto(nb);
-                }
+                if (!subMap.TryGetValue((e.Turn, e.Seg), out var sj)) return false;
+                bool ok = e.Ok && e.How != "none";   // 中継が訳した分だけ Ja に入れる (none・失敗は英文のまま → DeepL 対象)
+                sj.Ja = ok ? e.Text : "";
+                RebuildChunk(sj.Owner);
                 return true;
             case "answer":
                 if (Hidden(e.Turn) || e.Text.Trim() == "") return false;
+                CloseChunk();
                 if (answerBlk.TryGetValue(e.Turn, out var ab)) { ab.Ja += e.Text; ab.H = -1; }
                 else { var nb = new Blk { Kind = BK.Answer, Turn = e.Turn, Ja = e.Text }; answerBlk[e.Turn] = nb; Add(nb); }
                 return true;
             case "tools":
                 if (Hidden(e.Turn) || e.Text == "") return false;
+                CloseChunk();
                 Add(new Blk { Kind = BK.Tools, Turn = e.Turn, Ja = e.Text });
                 return true;
         }
@@ -225,6 +249,24 @@ public sealed class TranslationLogPanel : Control
     }
 
     bool Hidden(int turn) => turnHidden.TryGetValue(turn, out var h) && h;
+
+    // いま伸びている思考のかたまりを閉じる。自動翻訳が入っていれば、まだ訳していない英文の塊を待ち行列へ
+    void CloseChunk()
+    {
+        if (openChunk == null) return;
+        var c = openChunk;
+        openChunk = null;
+        MaybeAuto(c);
+    }
+
+    // かたまりの英文 (En) と、中継の和訳をつないだ Ja を作り直す
+    void RebuildChunk(Blk c)
+    {
+        if (c.Subs == null) return;
+        c.En = string.Join(" ", c.Subs.Where(s => s.En != "").Select(s => s.En));
+        if (!c.Deepl) c.Ja = string.Concat(c.Subs.Select(s => s.Ja));   // 1 つも訳されていなければ空 (英文を出す)
+        c.H = -1;
+    }
 
     void Add(Blk b)
     {
@@ -235,27 +277,40 @@ public sealed class TranslationLogPanel : Control
             for (int i = 0; i < drop; i++)
             {
                 var old = blocks[i];
-                if (old.Kind == BK.Think) segBlk.Remove(old.Key);
+                if (old.Subs != null) foreach (var s in old.Subs) subMap.Remove((old.Turn, s.Seg));
                 if (old.Kind == BK.Answer) answerBlk.Remove(old.Turn);
+                sel.Remove(old);
+                if (anchor == old) anchor = null;
+                if (openChunk == old) openChunk = null;
             }
             blocks.RemoveRange(0, drop);
         }
     }
 
     // ---- DeepL (中継が止めている英文を訳す) ----
-    // 訳せる相手 = 中継が訳していない英文の思考 (none) か、訳せなかった思考 (bad)。頼み中・訳し済みは除く
-    static bool Eligible(Blk b) => b.Kind == BK.Think && (b.State == "none" || b.State == "bad") && b.En != "" && !b.Pending && !b.Deepl;
-
-    // 自動翻訳 (DeepL ボタンを押している間): 新しく届いた英文の思考だけ待ち行列に入れる
-    void MaybeAuto(Blk b)
+    // 自動翻訳 (DeepL ボタンを押している間): かたまりを閉じたとき、まだ訳していない英文の塊だけ待ち行列へ
+    void MaybeAuto(Blk c)
     {
-        if (!Eligible(b) || !AutoTranslate() || DeepL == null) return;
+        if (c.Kind != BK.Think || c.En == "" || c.Ja != "" || c.Pending || c.Deepl) return;
+        if (!AutoTranslate() || DeepL == null) return;
         if (dq.Count >= MaxDeepLQueue) { AutoStopped?.Invoke("翻訳が追いつかないので自動翻訳を止めました"); return; }
-        if (DeepL.CanSpend(b.En.Length + dq.Sum(q => q.En.Length))) { b.Pending = true; dq.Add(b); }
+        if (DeepL.CanSpend(c.En.Length + dq.Sum(q => q.En.Length))) { c.Pending = true; dq.Add(c); }
         else AutoStopped?.Invoke(DeepL.HasKey ? "DeepL の今月の上限に近いので止めました" : "DeepL のキーがありません");
     }
 
-    // 待ち行列から 25 区切り・8000 字までまとめて頼む
+    // 手で頼む (ダブルクリック・右クリック)。いつでも・訳し済みでも訳し直せる
+    void TranslateBlock(Blk b)
+    {
+        if (b.Kind != BK.Think || b.En == "" || b.Pending) return;
+        if (DeepL == null || !DeepL.HasKey) { NeedKey?.Invoke(); return; }
+        if (!DeepL.CanSpend(b.En.Length)) { AutoStopped?.Invoke("DeepL の今月の上限に近いので訳しません"); return; }
+        b.Pending = true;
+        b.Deepl = false;
+        dq.Insert(0, b);   // 手で頼んだ分を先に
+        needRelayout = true;
+    }
+
+    // 待ち行列から 25 ブロック・8000 字までまとめて頼む
     async Task PumpDeepL()
     {
         if (deeplBusy || dq.Count == 0 || DeepL == null) return;
@@ -275,7 +330,7 @@ public sealed class TranslationLogPanel : Control
             for (int i = 0; i < batch.Count; i++)
             {
                 batch[i].Pending = false;
-                if (res != null && i < res.Count) { batch[i].Ja = res[i].Trim(); batch[i].State = "ok"; batch[i].Deepl = true; }
+                if (res != null && i < res.Count) { batch[i].Ja = res[i].Trim(); batch[i].Deepl = true; }
                 batch[i].H = -1;
             }
             if (res == null) { foreach (var b in dq) b.Pending = false; dq.Clear(); AutoStopped?.Invoke("DeepL: " + DeepL.Error); }
@@ -310,7 +365,7 @@ public sealed class TranslationLogPanel : Control
             default: // Think
                 int h = Measure(PrimText(b), FJa, w);
                 if (showSource && b.Ja != "" && b.En != "" && b.En != b.Ja) h += 2 + Measure(b.En, FEn, w);
-                return h + 6;
+                return h + 8;
         }
     }
 
@@ -318,7 +373,7 @@ public sealed class TranslationLogPanel : Control
     static string PrimText(Blk b)
     {
         string s = b.Ja != "" ? b.Ja : b.En;
-        if (s == "") s = "(訳しています…)";
+        if (s == "") s = "(思考を待っています…)";
         if (b.Pending) s += "  (DeepL…)";
         else if (b.Deepl) s += "  ᴰ";
         return s;
@@ -365,21 +420,60 @@ public sealed class TranslationLogPanel : Control
         if (Visible) { foreach (var b in blocks) b.H = -1; if (IsHandleCreated && ClientSize.Width > 0) { Relayout(); Invalidate(); } }
     }
 
-    protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); Focus(); }
-
-    // 英文のブロックをクリックしたら、それだけ DeepL に頼む
-    protected override void OnMouseUp(MouseEventArgs e)
+    // ---- 入力 (選択・スクロール・翻訳) ----
+    Blk? HitTest(int mx, int my)
     {
-        base.OnMouseUp(e);
-        if (e.Button != MouseButtons.Left || e.Y < HeaderH || e.X >= ClientSize.Width - SbW) return;
-        int cy = e.Y - HeaderH + scrollOffset;
-        var b = blocks.FirstOrDefault(x => cy >= x.Y && cy < x.Y + x.H);
-        if (b == null || !Eligible(b)) return;
-        if (DeepL == null || !DeepL.HasKey) { NeedKey?.Invoke(); return; }
-        if (!DeepL.CanSpend(b.En.Length)) { AutoStopped?.Invoke("DeepL の今月の上限に近いので訳しません"); return; }
-        b.Pending = true;
-        dq.Insert(0, b);   // クリックした分を先に
-        needRelayout = true;
+        if (my < HeaderH || mx >= ClientSize.Width - SbW) return null;
+        int cy = my - HeaderH + scrollOffset;
+        return blocks.FirstOrDefault(b => cy >= b.Y && cy < b.Y + b.H);
+    }
+
+    void SelectRange(Blk a, Blk b)
+    {
+        int ia = blocks.IndexOf(a), ib = blocks.IndexOf(b);
+        if (ia < 0 || ib < 0) return;
+        if (ia > ib) (ia, ib) = (ib, ia);
+        sel.Clear();
+        for (int i = ia; i <= ib; i++) sel.Add(blocks[i]);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        Focus();
+        if (e.X >= ClientSize.Width - SbW) return;
+        var b = HitTest(e.X, e.Y);
+        if (e.Button == MouseButtons.Left)
+        {
+            if (b == null) { sel.Clear(); anchor = null; dragging = false; Invalidate(); return; }
+            if ((ModifierKeys & Keys.Shift) != 0 && anchor != null) SelectRange(anchor, b);
+            else { sel.Clear(); sel.Add(b); anchor = b; }
+            dragging = true;
+            Invalidate();
+        }
+        else if (e.Button == MouseButtons.Right && b != null && !sel.Contains(b))
+        {
+            sel.Clear(); sel.Add(b); anchor = b; Invalidate();
+        }
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (!dragging || (e.Button & MouseButtons.Left) == 0 || anchor == null) return;
+        var b = HitTest(e.X, Math.Clamp(e.Y, HeaderH, ClientSize.Height - 1));
+        if (b != null) { SelectRange(anchor, b); Invalidate(); }
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); dragging = false; }
+
+    // ダブルクリックしたブロックを DeepL で訳す (英文の思考なら)
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        base.OnMouseDoubleClick(e);
+        if (e.Button != MouseButtons.Left) return;
+        var b = HitTest(e.X, e.Y);
+        if (b != null) TranslateBlock(b);
     }
 
     // マウスを乗せたらホイールでスクロールできるように (この窓にはテキスト入力がないので、焦点を取っても害はない)
@@ -395,6 +489,13 @@ public sealed class TranslationLogPanel : Control
             Invalidate();
         }
         base.OnMouseWheel(e);
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == (Keys.Control | Keys.C)) { CopySelection(); return true; }
+        if (keyData == (Keys.Control | Keys.A)) { sel.Clear(); foreach (var b in blocks) sel.Add(b); Invalidate(); return true; }
+        return base.ProcessCmdKey(ref msg, keyData);
     }
 
     // ---- 描画 ----
@@ -416,7 +517,9 @@ public sealed class TranslationLogPanel : Control
         {
             if (b.Y + b.H < top) continue;
             if (b.Y > bottom) break;
-            DrawBlock(g, b, MarginL, b.Y - scrollOffset + HeaderH, w);
+            int y = b.Y - scrollOffset + HeaderH;
+            if (sel.Contains(b)) using (var hb = new SolidBrush(SelBack)) g.FillRectangle(hb, 0, y, ClientSize.Width - SbW, b.H);
+            DrawBlock(g, b, MarginL, y, w);
         }
         g.ResetClip();
     }
@@ -429,7 +532,7 @@ public sealed class TranslationLogPanel : Control
         g.DrawLine(line, 0, HeaderH - 1, ClientSize.Width, HeaderH - 1);
         string state = connNote != "" ? "● " + connNote : engineNone ? "● 翻訳は止めています (英文のまま)" : "● つながっています";
         var col = connNote != "" ? Theme.Warn : engineNone ? Theme.Muted : Theme.Good;
-        TextRenderer.DrawText(g, "翻訳ログ (OpenCode 風・仮)", FHead, new Point(MarginL, 3), Theme.Head);
+        TextRenderer.DrawText(g, "翻訳ログ", FHead, new Point(MarginL, 3), Theme.Head);
         TextRenderer.DrawText(g, state, FSmall, new Rectangle(0, 0, ClientSize.Width - MarginR, HeaderH), col,
             TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
     }
@@ -473,8 +576,8 @@ public sealed class TranslationLogPanel : Control
                 break;
             default: // Think
                 string prim = PrimText(b);
-                // 色: 訳文=白、頼み中/訳待ち=灰、英文のまま=薄い白 (クリックで訳せる)、訳せなかった=黄
-                var pcol = b.Pending || b.Ja == "" ? Theme.Muted : b.State == "none" ? Theme.EnInk : b.State == "bad" ? Theme.Warn : Theme.Ink;
+                // 色: 和訳=白、頼み中=灰、英文のまま=薄い白 (ダブルクリックで訳せる)
+                var pcol = b.Pending ? Theme.Muted : b.Ja == "" ? Theme.EnInk : Theme.Ink;
                 int ph = Measure(prim, FJa, w);
                 TextRenderer.DrawText(g, prim, FJa, new Rectangle(x, y, w, Math.Max(ph, Measure("A", FJa, w))),
                     pcol, TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.TextBoxControl);
@@ -485,19 +588,24 @@ public sealed class TranslationLogPanel : Control
         }
     }
 
-    void CopyAll()
+    // ---- コピー ----
+    static string BlockText(Blk b) => b.Kind switch
+    {
+        BK.Turn => $"# {b.Turn} {b.Who} {b.Time}" + (b.Source != "" ? $"\n前: {b.Source}" : ""),
+        BK.Code => b.Ja,
+        BK.Tools => b.Ja,
+        BK.Answer => "[応答] " + b.Ja,
+        _ => b.Ja != "" ? b.Ja : b.En,
+    };
+
+    void CopySelection() => Copy(blocks.Where(sel.Contains));
+    void CopyAll() => Copy(blocks);
+
+    static void Copy(IEnumerable<Blk> list)
     {
         var sbuf = new StringBuilder();
-        foreach (var b in blocks)
-            sbuf.AppendLine(b.Kind switch
-            {
-                BK.Turn => $"\n#{b.Turn} {b.Who} {b.Time}" + (b.Source != "" ? $"\n前: {b.Source}" : ""),
-                BK.Code => b.Ja,
-                BK.Tools => b.Ja,
-                BK.Answer => "[応答] " + b.Ja,
-                _ => b.Ja != "" ? b.Ja : b.En,
-            });
-        try { if (sbuf.Length > 0) Clipboard.SetText(sbuf.ToString()); } catch { }
+        foreach (var b in list) sbuf.Append(BlockText(b)).Append("\n\n");
+        try { if (sbuf.Length > 0) Clipboard.SetText(sbuf.ToString().TrimEnd()); } catch { }
     }
 
     protected override void Dispose(bool disposing)
