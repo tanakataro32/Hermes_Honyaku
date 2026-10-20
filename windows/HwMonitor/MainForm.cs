@@ -17,6 +17,11 @@ public sealed class MainForm : Form
     readonly EnergyPanel energy = new() { Dock = DockStyle.Fill, Visible = false };
     readonly SpeedPanel speed = new() { Dock = DockStyle.Fill, Visible = false };
     readonly TranslationLogPanel transLog;
+    readonly TranslationLogPanel graphLog;     // グラフタブの下に出す翻訳ログ (タブのものとは別インスタンス)
+    readonly OriginalPanel graphOrig;          // グラフタブの下に出す原文 (リアルタイムの生の英文)
+    SplitContainer graphSplit = null!;         // 上: グラフ / 下: 翻訳エリア
+    SplitContainer transSplit = null!;         // 下の中で 左: 原文 / 右: 翻訳ログ
+    bool graphSplitInit;                       // グラフタブの分割位置を初めて出したときに 1 度だけ決める
     readonly Panel content = new() { Dock = DockStyle.Fill, BackColor = Theme.Back };
     readonly ToolStrip bar = new() { GripStyle = ToolStripGripStyle.Hidden, Renderer = new DarkRenderer(), BackColor = Theme.Panel, ForeColor = Theme.Ink, Padding = new Padding(4, 2, 4, 2) };
     readonly ToolStripButton tabGraph = new("グラフ") { CheckOnClick = false };
@@ -50,15 +55,23 @@ public sealed class MainForm : Form
         this.settings = settings;
         api = new HwmonClient(() => settings.HwmonBase);
         feed = new HonyakuFeed(() => settings.HonyakuBase);
-        transLog = new TranslationLogPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill, Visible = false };
         deepl = new DeepLService(settings);
-        transLog.DeepL = deepl;
-        transLog.AutoTranslate = () => settings.AutoTranslate;
-        transLog.AutoStopped += why => { autoDeepL.Checked = false; deeplUsage.Text = why + "  "; deeplUsage.ForeColor = Theme.Warn; };
-        transLog.NeedKey += () => OpenSettings("DeepL で訳すには、DeepL API のキーを入れてください");
-        transLog.ShowSource = settings.ShowSource;
-        transLog.ShowSourceChanged += () => { settings.ShowSource = transLog.ShowSource; settings.Save(); };
         deepl.Changed += ShowUsage;
+        // 翻訳ログは 2 か所に出す: 独立した「翻訳ログ」タブと、グラフタブの下。別インスタンスで、見えている側だけが自動翻訳する
+        transLog = new TranslationLogPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill, Visible = false };
+        graphLog = new TranslationLogPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill };
+        graphOrig = new OriginalPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill };
+        foreach (var p in new[] { transLog, graphLog })
+        {
+            p.DeepL = deepl;
+            p.AutoTranslate = () => settings.AutoTranslate;
+            p.AutoStopped += why => { autoDeepL.Checked = false; deeplUsage.Text = why + "  "; deeplUsage.ForeColor = Theme.Warn; };
+            p.NeedKey += () => OpenSettings("DeepL で訳すには、DeepL API のキーを入れてください");
+            p.ShowSource = settings.ShowSource;
+        }
+        // 原文を併記の切り替えは両方そろえる
+        transLog.ShowSourceChanged += () => { settings.ShowSource = transLog.ShowSource; graphLog.ShowSource = transLog.ShowSource; settings.Save(); };
+        graphLog.ShowSourceChanged += () => { settings.ShowSource = graphLog.ShowSource; transLog.ShowSource = graphLog.ShowSource; settings.Save(); };
         slots = new SlotPanel(feed.Turns) { Dock = DockStyle.Top, Height = 0 };
 
         Text = "llmsv ハードウェアモニタ  " + VersionText();
@@ -113,8 +126,27 @@ public sealed class MainForm : Form
                             new ToolStripSeparator(), topMost, autoDeepL,
                             new ToolStripSeparator(), setup, status, deeplUsage]);
 
-        // 真ん中: タブで切り替える 1 枚 (グラフ / 電気代 / コスト比較 / 速度と文脈 / 翻訳ログ)。見えているものだけ表示する
-        content.Controls.Add(chart);
+        // グラフタブ: 上にグラフ、下に [左=原文 (リアルタイム) ・右=翻訳ログ]。境目はドラッグで動かせる
+        transSplit = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, BackColor = Theme.Grid, SplitterWidth = 4 };
+        transSplit.Panel1.BackColor = transSplit.Panel2.BackColor = Theme.Back;
+        transSplit.Panel1.Controls.Add(graphOrig);
+        transSplit.Panel2.Controls.Add(graphLog);
+        graphSplit = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, BackColor = Theme.Grid, SplitterWidth = 4, Visible = false };
+        graphSplit.Panel1.BackColor = graphSplit.Panel2.BackColor = Theme.Back;
+        graphSplit.Panel1.Controls.Add(chart);
+        graphSplit.Panel2.Controls.Add(transSplit);
+        graphSplit.VisibleChanged += (_, _) =>
+        {
+            if (graphSplit.Visible && !graphSplitInit && graphSplit.Height > 60)
+            {
+                SetSplit(graphSplit, graphSplit.Height * 52 / 100);
+                SetSplit(transSplit, transSplit.Width / 2);
+                graphSplitInit = true;
+            }
+        };
+
+        // 真ん中: タブで切り替える (グラフ[＋原文・翻訳ログ] / 電気代 / コスト比較 / 速度と文脈 / 翻訳ログ)。見えているものだけ表示する
+        content.Controls.Add(graphSplit);
         content.Controls.Add(energy);
         content.Controls.Add(cost);
         content.Controls.Add(speed);
@@ -167,6 +199,16 @@ public sealed class MainForm : Form
         {
             TopMost = settings.TopMost;
             SetTab(settings.Tab);
+            // レイアウトが整ってから、グラフタブの境目を初期化する (最初から graph タブのとき用)
+            BeginInvoke(() =>
+            {
+                if (graphSplit.Visible && !graphSplitInit && graphSplit.Height > 60)
+                {
+                    SetSplit(graphSplit, graphSplit.Height * 52 / 100);
+                    SetSplit(transSplit, transSplit.Width / 2);
+                    graphSplitInit = true;
+                }
+            });
             feed.Start();
             nowTimer.Start();
             slowTimer.Start();
@@ -190,12 +232,24 @@ public sealed class MainForm : Form
     {
         settings.Tab = tab is "energy" or "cost" or "speed" or "log" ? tab : "graph";
         settings.Save();
-        chart.Visible = tabGraph.Checked = settings.Tab == "graph";
+        graphSplit.Visible = tabGraph.Checked = settings.Tab == "graph";
         energy.Visible = tabEnergy.Checked = settings.Tab == "energy";
         cost.Visible = tabCost.Checked = settings.Tab == "cost";
         speed.Visible = tabSpeed.Checked = settings.Tab == "speed";
         transLog.Visible = tabLog.Checked = settings.Tab == "log";
         _ = RefreshSlow(force: true);
+    }
+
+    // SplitContainer の境目を、範囲からはみ出さないように決める
+    static void SetSplit(SplitContainer sc, int dist)
+    {
+        try
+        {
+            int total = sc.Orientation == Orientation.Horizontal ? sc.Height : sc.Width;
+            int max = Math.Max(sc.Panel1MinSize, total - sc.Panel2MinSize - sc.SplitterWidth);
+            sc.SplitterDistance = Math.Clamp(dist, sc.Panel1MinSize, max);
+        }
+        catch { }
     }
 
     // タイトルバーの版: csproj の <Version> と、ビルドしたときのコミット (SDK が InformationalVersion の + の後ろに入れる) の頭 7 桁。

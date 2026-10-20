@@ -320,6 +320,7 @@ public sealed class TranslationLogPanel : Control
     // かたまりの未翻訳の区切りを 1500 字ずつの単位に分けて待ち行列へ。上から順に埋まって進みが見える
     void Enqueue(Blk c, bool auto)
     {
+        if (auto && !Visible) return;   // 隠れている側は自動翻訳しない (翻訳ログを 2 か所に置くので DeepL の二重消費を防ぐ)
         if (c.Kind != BK.Think || c.Subs == null || c.Pending || DeepL == null || !DeepL.HasKey) return;
         var todo = c.Subs.Where(s => s.Ja == "" && s.En != "").ToList();
         if (todo.Count == 0) return;
