@@ -16,6 +16,7 @@ public sealed class MainForm : Form
     readonly HistoryChart chart = new() { Dock = DockStyle.Fill };
     readonly EnergyPanel energy = new() { Dock = DockStyle.Fill, Visible = false };
     readonly SpeedPanel speed = new() { Dock = DockStyle.Fill, Visible = false };
+    readonly TranslationLogPanel transLog;
     readonly TranslationPanel translation;
     readonly SplitContainer split;
     readonly ToolStrip bar = new() { GripStyle = ToolStripGripStyle.Hidden, Renderer = new DarkRenderer(), BackColor = Theme.Panel, ForeColor = Theme.Ink, Padding = new Padding(4, 2, 4, 2) };
@@ -24,6 +25,8 @@ public sealed class MainForm : Form
     readonly ToolStripButton tabCost = new("コスト比較") { CheckOnClick = false, ToolTipText = "電気代と、同じだけ推論したときのレンタル (GPU の時間貸し・API の従量) を比べる" };
     readonly ToolStripButton tabSpeed = new("速度と文脈") { CheckOnClick = false,
         ToolTipText = "要求ごとの生成・読み込みの速さを、文脈の量に対して点で描く (llama-server のログから)。\n設定 (モデル・枠の数) を変えたときの比べや、文脈が長くなるとどれだけ遅くなるかを見る" };
+    readonly ToolStripButton tabLog = new("翻訳ログ") { CheckOnClick = false,
+        ToolTipText = "Hermes / OpenCode の思考を OpenCode 風にブロックで出す (仮)。\nターンごとに 思考 (英文＋和訳)・コード・実行したコマンド・応答 を並べる。右クリックで原文の併記・コピー" };
     readonly ToolStripButton deviceView = new("部品別") { CheckOnClick = true,
         ToolTipText = "上のメーターを部品別 (CPU・GPU ごとに 1 行、スレッドごとの使用率) にする。\n押していないときは項目別 (温度・電力・使用率・メモリの 4 列)" };
     // 更新の間隔 (btop の − 2000ms ＋ と同じ)。hwmon.py が 2 秒ごとに読んでいるので 2 秒より短くはしない
@@ -51,6 +54,7 @@ public sealed class MainForm : Form
         this.settings = settings;
         api = new HwmonClient(() => settings.HwmonBase);
         feed = new HonyakuFeed(() => settings.HonyakuBase);
+        transLog = new TranslationLogPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill, Visible = false };
         translation = new TranslationPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill };
         deepl = new DeepLService(settings);
         translation.DeepL = deepl;
@@ -80,6 +84,7 @@ public sealed class MainForm : Form
         tabEnergy.Click += (_, _) => SetTab("energy");
         tabCost.Click += (_, _) => SetTab("cost");
         tabSpeed.Click += (_, _) => SetTab("speed");
+        tabLog.Click += (_, _) => SetTab("log");
         deviceView.Checked = meters.DeviceView = settings.DeviceView;
         deviceView.CheckedChanged += (_, _) =>
         {
@@ -113,7 +118,7 @@ public sealed class MainForm : Form
         };
         var setup = new ToolStripButton("設定…");
         setup.Click += (_, _) => OpenSettings();
-        bar.Items.AddRange([tabGraph, tabEnergy, tabCost, tabSpeed, new ToolStripSeparator(), deviceView, slower, intervalLabel, faster,
+        bar.Items.AddRange([tabGraph, tabEnergy, tabCost, tabSpeed, tabLog, new ToolStripSeparator(), deviceView, slower, intervalLabel, faster,
                             new ToolStripSeparator(), topMost, showJa, showSrc, showThink, autoDeepL,
                             new ToolStripSeparator(), setup, status, deeplUsage]);
 
@@ -124,6 +129,7 @@ public sealed class MainForm : Form
         split.Panel1.Controls.Add(energy);
         split.Panel1.Controls.Add(cost);
         split.Panel1.Controls.Add(speed);
+        split.Panel1.Controls.Add(transLog);
         split.Panel2.Controls.Add(translation);
 
         Controls.Add(split);
@@ -196,12 +202,13 @@ public sealed class MainForm : Form
 
     void SetTab(string tab)
     {
-        settings.Tab = tab is "energy" or "cost" or "speed" ? tab : "graph";
+        settings.Tab = tab is "energy" or "cost" or "speed" or "log" ? tab : "graph";
         settings.Save();
         chart.Visible = tabGraph.Checked = settings.Tab == "graph";
         energy.Visible = tabEnergy.Checked = settings.Tab == "energy";
         cost.Visible = tabCost.Checked = settings.Tab == "cost";
         speed.Visible = tabSpeed.Checked = settings.Tab == "speed";
+        transLog.Visible = tabLog.Checked = settings.Tab == "log";
         _ = RefreshSlow(force: true);
     }
 
