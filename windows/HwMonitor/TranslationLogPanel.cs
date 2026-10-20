@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace HwMonitor;
 
@@ -73,9 +74,12 @@ public sealed class TranslationLogPanel : Control
     // フォント (暗い背景向け)
     static readonly Font FHead = new("Yu Gothic UI", 9.5f, FontStyle.Bold);
     static readonly Font FJa = new("Yu Gothic UI", 10f);
+    static readonly Font FJaB = new("Yu Gothic UI", 10f, FontStyle.Bold);   // 見出し・強調の行
     static readonly Font FEn = new("Consolas", 8.5f);
     static readonly Font FMono = new("Consolas", 9f);
     static readonly Font FSmall = new("Yu Gothic UI", 8f);
+    const TextFormatFlags TextFlags = TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.TextBoxControl;
+    const int BulletIndent = 16, NumIndent = 26;
     static readonly Color TurnInk = Color.FromArgb(0x5a, 0xd0, 0xc0);   // ターンの見出し (明るい teal)
     static readonly Color SelBack = Color.FromArgb(0x1e, 0x3a, 0x42);   // 選んだブロックの下じき
 
@@ -98,7 +102,11 @@ public sealed class TranslationLogPanel : Control
         public int H = -1, Y;             // 高さ (未測定 = -1)・上端
         public bool Pending, Deepl;       // DeepL に頼んでいる最中・DeepL で訳した
         public int PendingUnits;          // まだ返ってきていない DeepL の単位の数 (0 になったら Pending を下ろす)
+        public List<Item>? Items;         // 思考・応答を段落/箇条書き/見出しに組んだもの (中身が変わったら作り直す)
     }
+
+    enum IK { Para, Bullet, Numbered, Heading }
+    sealed class Item { public IK Kind; public string Text = "", Mark = ""; }
 
     sealed class Work   // DeepL に頼む 1 単位 (ある思考のかたまりの、1500 字ぶんの区切りたち)
     {
@@ -244,7 +252,7 @@ public sealed class TranslationLogPanel : Control
             case "answer":
                 if (Hidden(e.Turn) || e.Text.Trim() == "") return false;
                 CloseChunk();
-                if (answerBlk.TryGetValue(e.Turn, out var ab)) { ab.Ja += e.Text; ab.H = -1; }
+                if (answerBlk.TryGetValue(e.Turn, out var ab)) { ab.Ja += e.Text; Dirty(ab); }
                 else { var nb = new Blk { Kind = BK.Answer, Turn = e.Turn, Ja = e.Text }; answerBlk[e.Turn] = nb; Add(nb); }
                 return true;
             case "tools":
@@ -267,13 +275,16 @@ public sealed class TranslationLogPanel : Control
         MaybeAuto(c);
     }
 
-    // かたまりの英文 (En = 併記・DeepL のもと) を作り直す。表示は ChunkDisp が区切りごとに (和訳 or 英文) で組む
+    // かたまりの英文 (En = 併記・DeepL のもと) を作り直す。表示は Items が段落/箇条書きに組む
     void RebuildChunk(Blk c)
     {
         if (c.Subs == null) return;
         c.En = string.Join(" ", c.Subs.Where(s => s.En != "").Select(s => s.En));
-        c.H = -1;
+        Dirty(c);
     }
+
+    // 中身が変わった: 高さと、段落に組んだ Items を作り直させる (幅だけ変わったときは H だけで Items は使い回す)
+    static void Dirty(Blk b) { b.H = -1; b.Items = null; }
 
     void Add(Blk b)
     {
@@ -352,7 +363,7 @@ public sealed class TranslationLogPanel : Control
                 AutoStopped?.Invoke("DeepL: " + DeepL.Error);
             }
             if (c.PendingUnits == 0) { c.Pending = false; if (c.Subs != null && c.Subs.Any(s => s.Ja != "")) c.Deepl = true; }
-            c.H = -1;
+            Dirty(c);
             needRelayout = true;
         }
         catch { /* 翻訳の一時的な失敗で固まったり落ちたりしないよう握りつぶす */ }
@@ -380,31 +391,98 @@ public sealed class TranslationLogPanel : Control
                 int ch = BoxPad * 2 + Math.Max(Measure("A", FMono, inner), Measure(b.Ja, FMono, inner));
                 return 2 + Measure(b.Kind == BK.Tools ? "実行したコマンド" : "コード", FSmall, w) + ch + 6;
             case BK.Answer:
-                return 2 + Measure("応答", FSmall, w) + Measure(b.Ja, FJa, w) + 8;
+                return 2 + Measure("応答", FSmall, w) + MeasureItems(ItemsOf(b), w) + 10;
             default: // Think
-                int h = Measure(ThinkText(b), FJa, w);
-                if (showSource && ChunkHasJa(b) && b.En != "") h += 2 + Measure(b.En, FEn, w);
-                return h + 8;
+                int h = MeasureItems(ItemsOf(b), w);
+                if (b.Pending) h += 4 + Measure("(翻訳中…)", FSmall, w);
+                if (showSource && ChunkHasJa(b) && b.En != "") h += 6 + Measure(b.En, FEn, w);
+                return h + 10;
         }
     }
 
-    // 思考の表示: 区切りごとに (訳してあれば和訳・まだなら英文) をつなぐ。上から順に訳文へ変わっていく
+    // 思考のコピー用: 区切りごとに (訳してあれば和訳・まだなら英文) をつなぐ
     static string ChunkDisp(Blk c)
     {
         if (c.Subs == null || c.Subs.Count == 0) return c.Ja != "" ? c.Ja : c.En;
-        return string.Join(" ", c.Subs.Select(s => s.Ja != "" ? s.Ja : s.En).Where(t => t != ""));
+        return string.Join("\n", c.Subs.Select(s => s.Ja != "" ? s.Ja : s.En).Where(t => t != ""));
     }
 
     static bool ChunkHasJa(Blk c) => c.Subs != null && c.Subs.Any(s => s.Ja != "");
 
-    // 思考に出す文。翻訳中は「(翻訳中…)」、DeepL で訳し終えたら「ᴰ」を付ける
-    static string ThinkText(Blk b)
+    // ---- 簡易マークダウン (段落・箇条書き・番号・見出し・太字) ----
+    // 思考・応答の中身を、読みやすい単位 (Item) に組む。連続したふつうの文は 1 段落にまとめ、
+    // 箇条書き (-・*・•・・) / 番号 (1. 1)) / 見出し (#、または全体が **…**) は行を分ける。太字の ** は外す
+    static readonly Regex HeadRe = new(@"^\s*#{1,6}\s+(.*)$", RegexOptions.Compiled);
+    static readonly Regex BulletRe = new(@"^\s*[-*•・]\s+(.*)$", RegexOptions.Compiled);
+    static readonly Regex NumRe = new(@"^\s*(\d{1,3})[.)]\s+(.*)$", RegexOptions.Compiled);
+    static readonly Regex AllBoldRe = new(@"^\*\*(.+)\*\*$", RegexOptions.Compiled);
+
+    static string CleanBold(string s) => s.Replace("**", "").Replace("__", "").Trim();
+
+    static List<Item> ParseMarkdown(string content)
     {
-        string s = ChunkDisp(b);
-        if (s == "") s = "(思考を待っています…)";
-        if (b.Pending) s += "  (翻訳中…)";
-        else if (b.Deepl) s += "  ᴰ";
-        return s;
+        var items = new List<Item>();
+        var para = new StringBuilder();
+        void Flush() { if (para.Length > 0) { items.Add(new Item { Kind = IK.Para, Text = para.ToString() }); para.Clear(); } }
+        foreach (var raw in content.Replace("\r", "").Split('\n'))
+        {
+            string line = raw.Trim();
+            if (line == "") { Flush(); continue; }
+            Match m;
+            if ((m = HeadRe.Match(line)).Success) { Flush(); items.Add(new Item { Kind = IK.Heading, Text = CleanBold(m.Groups[1].Value) }); }
+            else if (AllBoldRe.IsMatch(line)) { Flush(); items.Add(new Item { Kind = IK.Heading, Text = CleanBold(line) }); }
+            else if ((m = BulletRe.Match(line)).Success) { Flush(); items.Add(new Item { Kind = IK.Bullet, Mark = "•", Text = CleanBold(m.Groups[1].Value) }); }
+            else if ((m = NumRe.Match(line)).Success) { Flush(); items.Add(new Item { Kind = IK.Numbered, Mark = m.Groups[1].Value + ".", Text = CleanBold(m.Groups[2].Value) }); }
+            else { if (para.Length > 0) para.Append(' '); para.Append(CleanBold(line)); }
+        }
+        Flush();
+        return items;
+    }
+
+    List<Item> ItemsOf(Blk b)
+    {
+        if (b.Items == null)
+        {
+            string content = b.Kind == BK.Answer ? b.Ja
+                : b.Subs == null ? "" : string.Join("\n", b.Subs.Select(s => s.Ja != "" ? s.Ja : s.En));
+            if (content == "") content = b.Pending ? "" : "(思考を待っています…)";
+            b.Items = ParseMarkdown(content);
+        }
+        return b.Items;
+    }
+
+    static int ItemFont(Item it, out Font f, out int indent)
+    {
+        f = it.Kind == IK.Heading ? FJaB : FJa;
+        indent = it.Kind == IK.Bullet ? BulletIndent : it.Kind == IK.Numbered ? NumIndent : 0;
+        return indent;
+    }
+
+    static int MeasureItems(List<Item> items, int w)
+    {
+        int h = 0;
+        for (int i = 0; i < items.Count; i++)
+        {
+            if (i > 0) h += items[i].Kind == IK.Heading ? 9 : 4;
+            ItemFont(items[i], out var f, out int ind);
+            h += Measure(items[i].Text, f, w - ind);
+        }
+        return h;
+    }
+
+    static int DrawItems(Graphics g, List<Item> items, int x, int y, int w, Color col)
+    {
+        int cy = y;
+        foreach (var it in items)
+        {
+            if (cy > y) cy += it.Kind == IK.Heading ? 9 : 4;
+            ItemFont(it, out var f, out int ind);
+            int ih = Measure(it.Text, f, w - ind);
+            if (it.Mark != "") TextRenderer.DrawText(g, it.Mark, FJa, new Point(x + (it.Kind == IK.Bullet ? 2 : 0), cy), col, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, it.Text, f, new Rectangle(x + ind, cy, w - ind, ih), col, TextFlags);
+            cy += ih;
+        }
+        return cy - y;
     }
 
     void Relayout()
@@ -598,20 +676,16 @@ public sealed class TranslationLogPanel : Control
                 break;
             case BK.Answer:
                 TextRenderer.DrawText(g, "応答", FSmall, new Point(x, y), Theme.Muted, TextFormatFlags.NoPadding);
-                int ay = y + Measure("応答", FSmall, w) + 2;
-                TextRenderer.DrawText(g, b.Ja, FJa, new Rectangle(x, ay, w, Measure(b.Ja, FJa, w)), Theme.Ink,
-                    TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.TextBoxControl);
+                DrawItems(g, ItemsOf(b), x, y + Measure("応答", FSmall, w) + 2, w, Theme.Ink);
                 break;
             default: // Think
-                string prim = ThinkText(b);
                 // 色: 和訳が入った=白、英文のまま=薄い白 (ダブルクリックで訳せる)、まだ何も無く翻訳待ち=灰
-                var pcol = ChunkHasJa(b) ? Theme.Ink : b.Pending ? Theme.Muted : Theme.EnInk;
-                int ph = Measure(prim, FJa, w);
-                TextRenderer.DrawText(g, prim, FJa, new Rectangle(x, y, w, Math.Max(ph, Measure("A", FJa, w))),
-                    pcol, TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.TextBoxControl);
+                var tcol = ChunkHasJa(b) ? Theme.Ink : b.Pending ? Theme.Muted : Theme.EnInk;
+                int used = DrawItems(g, ItemsOf(b), x, y, w, tcol);
+                int ty = y + used;
+                if (b.Pending) { ty += 4; TextRenderer.DrawText(g, "(翻訳中…)", FSmall, new Point(x, ty), Theme.Muted, TextFormatFlags.NoPadding); ty += Measure("(翻訳中…)", FSmall, w); }
                 if (showSource && ChunkHasJa(b) && b.En != "")
-                    TextRenderer.DrawText(g, b.En, FEn, new Rectangle(x, y + ph + 2, w, Measure(b.En, FEn, w)), Theme.Muted,
-                        TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.TextBoxControl);
+                    TextRenderer.DrawText(g, b.En, FEn, new Rectangle(x, ty + 6, w, Measure(b.En, FEn, w)), Theme.Muted, TextFlags);
                 break;
         }
     }
