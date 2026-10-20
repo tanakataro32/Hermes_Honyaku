@@ -624,17 +624,27 @@ function spInfo(p) {
 }
 
 // ---------------- 思考 (翻訳の画面の /events を hwmon が中継) ----------------
+// 上の「原文」は think をそのまま流す欄 (区切り・翻訳を待たない)。下の「翻訳ログ」は Windows アプリの翻訳ログ (TranslationLogPanel) と同じ見せ方:
+// ターンごとに 見出し・思考 (連続した思考を 1 つの塊にまとめ、区切りごとに段落・簡易マークダウン)・コード・実行したコマンド・応答 のブロックで並べる。
+// 届いたイベントは貯めて 300ms ごとにまとめて反映し、変わったブロックだけ描き直す (つないだ直後に直近のターンがまとめて届いても固まらないように)。
+// 画面を離れて戻ると中継が直近のターンを送り直す (順番は 見出し→応答→区切り→コマンド)。同じ区切り・コマンドは足さず、応答の全文は差し替え、
+// 思考・コードは応答の前に入れる (ふだんもターンの終わりの区切りは応答の後に届く)。
+// DeepL は使わない (キーは Windows アプリにだけある)。中継が訳した区切りだけ和訳になり、ほかは英文のまま。
 
-const feed = { boot: 0, seen: new Set(), turnInfo: new Map(), segSrc: new Map(), engine: '', think: '', thinkTurn: -1, thinkLabel: '', thinkLive: false, lastTurn: -1, entries: [] };
+const MAX_BLOCKS = 1500;
+const feed = { turnInfo: new Map(), engine: '', conn: 'つないでいます…', think: '', thinkTurn: -1, thinkLabel: '', thinkLive: false };
+// blocks: 並び順のブロック。subs: "ターン:区切り" → 思考の塊の中の 1 区切り (ja で和訳を埋める)。codes: 足したコードの区切り。
+// heads・answer・tools: ターン → 見出し・応答・コマンドのブロック。hidden: 出さないターン (背景タスク)
+const log = { blocks: [], subs: new Map(), codes: new Set(), heads: new Map(), answer: new Map(), tools: new Map(), hidden: new Map(), inbox: [], timer: 0 };
 let es = null;
 
 function connectEvents() {
   if (es) return;
-  setThinkHead('つないでいます…');
+  feed.conn = 'つないでいます…'; setThinkHead();
   es = new EventSource('/events');
   es.onmessage = (m) => { let ev; try { ev = JSON.parse(m.data); } catch { return; } onEvent(ev); };
-  es.onerror = () => { setThinkHead('つないでいます…'); };
-  es.onopen = () => setThinkHead('');
+  es.onerror = () => { feed.conn = 'つないでいます…'; setThinkHead(); };
+  es.onopen = () => { feed.conn = ''; setThinkHead(); };
 }
 function closeEvents() { if (es) { es.close(); es = null; } }
 
@@ -642,10 +652,10 @@ function onEvent(ev) {
   const type = ev.type;
   // 翻訳の中継の起動番号が変わったら (ターンの番号が 1 からやり直し) 覚えていたものを消す
   if ((type === 'status' || type === 'turn_start') && ev.boot != null && ev.boot !== turnBoot) {
-    if (turnBoot) { turns.clear(); feed.seen.clear(); feed.turnInfo.clear(); feed.segSrc.clear(); feed.entries = []; feed.thinkTurn = -1; feed.think = ''; $('#feed').innerHTML = ''; feed.lastTurn = -1; }
+    if (turnBoot) { turns.clear(); feed.turnInfo.clear(); feed.thinkTurn = -1; feed.think = ''; logClear(); }
     turnBoot = ev.boot;
   }
-  if (type === 'status') { feed.engine = ev.engine || ''; setThinkHead(''); return; }
+  if (type === 'status') { feed.engine = ev.engine || ''; setThinkHead(); return; }
   const n = ev.turn;
   if (typeof n !== 'number') return;
   switch (type) {
@@ -653,11 +663,13 @@ function onEvent(ev) {
       turns.set(n, { n, source: ev.source || '', who: ev.who || '', task: !!ev.task, tokens: 0, ts: ev.ts ?? nowSec(), ended: false });
       while (turns.size > 60) turns.delete(Math.min(...turns.keys()));
       feed.turnInfo.set(n, { source: ev.source || '', task: !!ev.task });
+      while (feed.turnInfo.size > 60) feed.turnInfo.delete(Math.min(...feed.turnInfo.keys()));
       if (!(ev.task && st.hideTasks)) { feed.thinkTurn = n; feed.think = ''; feed.thinkLabel = `#${n} ${ev.source || ''}`; feed.thinkLive = true; drawThink(); }
+      logPush(ev);
       break;
     }
     case 'turn_ctx': { const t = turns.get(n); if (t && typeof ev.tokens === 'number') t.tokens = ev.tokens; break; }
-    case 'turn_end': { const t = turns.get(n); if (t) t.ended = true; if (n === feed.thinkTurn) { feed.thinkLive = false; drawThink(); } break; }
+    case 'turn_end': { const t = turns.get(n); if (t) t.ended = true; if (n === feed.thinkTurn) { feed.thinkLive = false; drawThink(); } logPush(ev); break; }
     case 'think': {
       if (n < feed.thinkTurn) break;
       if (n > feed.thinkTurn) {
@@ -670,28 +682,14 @@ function onEvent(ev) {
       scheduleThink();
       break;
     }
-    case 'seg': if (typeof ev.seg === 'number') feed.segSrc.set(n + ':' + ev.seg, (ev.src || '').trim()); break;
-    case 'ja': {
-      if (typeof ev.seg !== 'number' || ev.how === 'code') return;   // コマンド・プログラムの行は出さない
-      const id = turnBoot + ':' + n + ':' + ev.seg;
-      if (feed.seen.has(id)) return;
-      feed.seen.add(id);
-      const info = feed.turnInfo.get(n) || {};
-      if (info.task && st.hideTasks) return;
-      const text = (ev.text || '').trim();
-      if (!text) return;
-      const src = feed.segSrc.get(n + ':' + ev.seg);
-      feed.segSrc.delete(n + ':' + ev.seg);
-      const kind = ev.how === 'none' ? 'none' : ev.ok && ev.how !== 'en' && ev.how !== 'interrupted' ? 'ok' : 'bad';
-      addEntry({ turn: n, source: info.source || '', text, orig: kind === 'ok' ? src : null, kind, at: new Date() });
-      break;
-    }
+    case 'seg': case 'ja': case 'answer': case 'tools': logPush(ev); break;
   }
 }
 
-function setThinkHead(state) {
-  const base = feed.engine === 'none' ? '原文 (Hermes の思考・翻訳は止めています)' : '和訳 (Hermes の思考)';
-  $('#thinkHead').textContent = base + (state ? '・' + state : '');
+function setThinkHead() {
+  const el = $('#thinkHead');
+  el.textContent = '● ' + (feed.conn || (feed.engine === 'none' ? '翻訳は止めています (英文のまま)' : 'つながっています'));
+  el.className = feed.conn ? 'ng' : feed.engine === 'none' ? '' : 'ok';
 }
 
 let thinkTimer = 0;
@@ -702,7 +700,7 @@ function drawThink() {
   el.scrollTop = el.scrollHeight;
 }
 
-// 和訳の欄は、画面の残り (原文の欄の下〜下のタブの上) の高さで、欄の中だけを送る (上の帯・原文の欄は動かさない)
+// 翻訳ログの欄は、画面の残り (原文の欄の下〜下のタブの上) の高さで、欄の中だけを送る (上の帯・原文の欄は動かさない)
 function sizeFeed() {
   const box = $('#feed');
   if (st.tab !== 'think') return;
@@ -710,39 +708,208 @@ function sizeFeed() {
   box.style.height = Math.max(160, window.innerHeight - box.getBoundingClientRect().top - nav - 8) + 'px';
 }
 
-// 1 区切り = 1 つの div (ターンの見出し・文・原文)。300 を超えたら古いものから消す (欄を作り直さない。
-// つないだ直後は直近のターンがまとめて届くので、作り直すと画面が固まる)
-function addEntry(e) {
-  feed.entries.push(e);
+// ---- 翻訳ログ: モデル (ブロックの並び) ----
+function logPush(ev) {
+  log.inbox.push(ev);
+  if (!log.timer) log.timer = setTimeout(logFlush, 300);
+}
+
+function logFlush() {
+  log.timer = 0;
   const box = $('#feed');
-  const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 60;
-  box.appendChild(entryNode(e));
-  while (feed.entries.length > 300) { feed.entries.shift(); box.firstElementChild?.remove(); }
+  const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 60;   // いちばん下を見ていたら、足した分まで送る
+  for (const ev of log.inbox.splice(0)) logApply(ev);
+  logRender();
   if (atEnd) box.scrollTop = box.scrollHeight;
 }
-function entryNode(e) {
-  const div = document.createElement('div');
-  let html = '';
-  if (e.turn !== feed.lastTurn) {
-    feed.lastTurn = e.turn;
-    html += `<div class="turn">#${e.turn} ${esc(e.source)}  ${e.at.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</div>`;
+
+const logHidden = (n) => log.hidden.get(n) === true;
+
+// ターン n のブロックを足す位置 (そのターンの最後のブロックの後。後ろのターンより前)
+function endOfTurn(n) {
+  let i = log.blocks.length;
+  while (i > 0 && log.blocks[i - 1].turn > n) i--;
+  return i;
+}
+// 思考・コードを足す位置: 応答が来ていてコマンドがまだなら応答の前、ほかはターンの終わり
+function bodyPos(n) {
+  const a = log.answer.get(n);
+  if (a && !log.tools.has(n)) { const i = log.blocks.indexOf(a); if (i >= 0) return i; }
+  return endOfTurn(n);
+}
+
+function logApply(ev) {
+  const n = ev.turn;
+  switch (ev.type) {
+    case 'turn_start': {
+      const hide = !!ev.task && st.hideTasks;
+      log.hidden.set(n, hide);
+      if (hide || log.heads.has(n)) return;
+      const b = { kind: 'turn', turn: n, who: ev.who || '', source: ev.source || '', model: ev.model || '', ts: ev.ts };
+      log.heads.set(n, b);
+      logInsert(b, endOfTurn(n));
+      return;
+    }
+    case 'turn_end':
+      // 終わってから背景タスク (タイトル作りなど) と分かったターンも隠す
+      if (ev.task && st.hideTasks && !logHidden(n)) { log.hidden.set(n, true); logDrop(log.blocks.filter((b) => b.turn === n)); }
+      return;
+    case 'seg': {
+      if (logHidden(n) || typeof ev.seg !== 'number') return;
+      const key = n + ':' + ev.seg, src = (ev.src || '').trim();
+      if (ev.kind === 'code') {
+        if (!src || log.codes.has(key)) return;
+        log.codes.add(key);
+        logInsert({ kind: 'code', turn: n, key, text: src }, bodyPos(n));
+        return;
+      }
+      if (log.subs.has(key)) return;
+      // 直前のブロックが同じターンの思考なら、その塊に足す (連続した思考はひとまとめ)。コード・応答などを挟んだら新しい塊
+      const at = bodyPos(n), prev = log.blocks[at - 1];
+      let c = prev && prev.kind === 'think' && prev.turn === n ? prev : null;
+      if (!c) { c = { kind: 'think', turn: n, subs: [] }; logInsert(c, at); }
+      const sub = { seg: ev.seg, en: src, ja: '', owner: c };
+      c.subs.push(sub);
+      log.subs.set(key, sub);
+      c.dirty = true;
+      return;
+    }
+    case 'ja': {
+      if (logHidden(n) || ev.how === 'code') return;   // コードは seg の原文をそのまま出している
+      const sub = log.subs.get(n + ':' + ev.seg);
+      if (!sub) return;
+      const ja = ev.ok && ev.how !== 'none' ? (ev.text || '').trim() : '';   // 訳せた分だけ和訳に (止めている・失敗は英文のまま)
+      if (sub.ja !== ja) { sub.ja = ja; sub.owner.dirty = true; }
+      return;
+    }
+    case 'answer': {
+      const t = ev.text || '';
+      if (logHidden(n)) return;
+      let a = log.answer.get(n);
+      if (a) {
+        if (t.startsWith(a.text)) { if (t === a.text) return; a.text = t; }   // 送り直し (それまでの全文) は差し替え
+        else a.text += t;                                                    // ふだんは続きが少しずつ届く
+        a.dirty = true;
+      } else {
+        if (!t.trim()) return;
+        a = { kind: 'answer', turn: n, text: t };
+        log.answer.set(n, a);
+        logInsert(a, endOfTurn(n));
+      }
+      return;
+    }
+    case 'tools': {
+      if (logHidden(n) || log.tools.has(n)) return;
+      const text = (ev.tools || []).map((t) => '$ ' + (t.name || '') + (t.name && t.args ? '  ' : '') + (t.args || '')).join('\n').trim();
+      if (!text) return;
+      const b = { kind: 'tools', turn: n, text };
+      log.tools.set(n, b);
+      logInsert(b, endOfTurn(n));
+      return;
+    }
   }
-  html += `<p class="${e.kind === 'none' ? 'en' : e.kind === 'bad' ? 'bad' : ''}">${esc(e.text)}</p>`;
-  if (st.showSrc && e.orig) html += `<div class="src">${esc(e.orig)}</div>`;
-  div.innerHTML = html;
-  return div;
 }
-function redrawFeed() {
+
+function logInsert(b, at) {
+  b.dirty = true; b.el = null;
+  log.blocks.splice(at, 0, b);
+  if (log.blocks.length > MAX_BLOCKS) logDrop(log.blocks.slice(0, log.blocks.length - MAX_BLOCKS));   // 古いものから捨てる
+}
+
+function logDrop(list) {
+  if (!list.length) return;
+  const gone = new Set(list);
+  for (const b of list) {
+    if (b.subs) for (const s of b.subs) log.subs.delete(b.turn + ':' + s.seg);
+    if (b.key) log.codes.delete(b.key);
+    for (const m of [log.heads, log.answer, log.tools]) if (m.get(b.turn) === b) m.delete(b.turn);
+    b.el?.remove();
+  }
+  log.blocks = log.blocks.filter((b) => !gone.has(b));
+}
+
+function logClear() {
+  log.blocks = []; log.inbox = [];
+  for (const m of [log.subs, log.codes, log.heads, log.answer, log.tools, log.hidden]) m.clear();
+  $('#feed').replaceChildren();
+}
+
+// ---- 翻訳ログ: 描く (変わったブロックだけ。新しいブロックは並び順の位置に差し込む) ----
+function logRender() {
   const box = $('#feed');
-  feed.lastTurn = -1;
-  const frag = document.createDocumentFragment();
-  for (const e of feed.entries) frag.appendChild(entryNode(e));
-  box.replaceChildren(frag);
-  box.scrollTop = box.scrollHeight;
+  if (!log.blocks.length) {
+    if (!box.firstElementChild) box.innerHTML = '<div class="empty">翻訳ログを待っています…<br>(Hermes / OpenCode の思考がここに流れます)</div>';
+    return;
+  }
+  box.querySelector('.empty')?.remove();
+  let next = null;
+  for (let i = log.blocks.length - 1; i >= 0; i--) {
+    const b = log.blocks[i];
+    if (!b.el) { b.el = document.createElement('div'); box.insertBefore(b.el, next); }
+    if (b.dirty) { b.dirty = false; blockDraw(b); }
+    next = b.el;
+  }
 }
+
+const KIND_CLASS = { turn: 'turn', think: 'think-blk', code: 'code', tools: 'tools', answer: 'answer' };
+
+function blockDraw(b) {
+  const el = b.el;
+  el.className = 'blk ' + KIND_CLASS[b.kind];
+  switch (b.kind) {
+    case 'turn': {
+      const time = b.ts ? new Date(b.ts * 1000).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '';
+      el.innerHTML = `<div class="h">#${b.turn}<span>${esc(b.who || '思考')}</span><span>${time}</span>${b.model ? `<span class="m">${esc(b.model)}</span>` : ''}</div>` +
+        (b.source ? `<div class="src">前: ${esc(b.source)}</div>` : '');
+      break;
+    }
+    case 'code':
+    case 'tools':
+      el.innerHTML = `<div class="label">${b.kind === 'tools' ? '実行したコマンド' : 'コード'}</div><div class="box">${esc(b.text)}</div>`;
+      break;
+    case 'answer':
+      el.innerHTML = `<div class="label">応答</div><div class="md">${mdHtml(b.text)}</div>`;
+      break;
+    default: {   // 思考: 区切りごとに段落を分ける (訳してあれば和訳・まだなら英文)。和訳が入った塊は白、英文のままは薄い白
+      const hasJa = b.subs.some((s) => s.ja);
+      el.classList.toggle('ja', hasJa);
+      const content = b.subs.map((s) => s.ja || s.en).filter(Boolean).join('\n\n');
+      let h = `<div class="md">${content ? mdHtml(content) : '<p>(思考を待っています…)</p>'}</div>`;
+      if (st.showSrc && hasJa) {
+        const en = b.subs.map((s) => s.en).filter(Boolean).join(' ');
+        if (en) h += `<div class="orig">${esc(en)}</div>`;
+      }
+      el.innerHTML = h;
+    }
+  }
+}
+
+// 簡易マークダウン (Windows アプリと同じ決まり): 連続したふつうの文は 1 段落にまとめ、
+// 箇条書き (-・*・•・・) / 番号 (1. 1)) / 見出し (#、または行全体が **…**) は行を分ける。太字の ** は外す
+const MD_HEAD = /^\s*#{1,6}\s+(.*)$/, MD_BULLET = /^\s*[-*•・]\s+(.*)$/, MD_NUM = /^\s*(\d{1,3})[.)]\s+(.*)$/, MD_ALLBOLD = /^\*\*(.+)\*\*$/;
+const cleanBold = (s) => s.replaceAll('**', '').replaceAll('__', '').trim();
+function mdHtml(content) {
+  const out = [];
+  let para = [];
+  const flush = () => { if (para.length) { out.push(`<p>${esc(para.join(' '))}</p>`); para = []; } };
+  for (const raw of content.replace(/\r/g, '').split('\n')) {
+    const line = raw.trim();
+    let m;
+    if (!line) flush();
+    else if ((m = MD_HEAD.exec(line))) { flush(); out.push(`<div class="hd">${esc(cleanBold(m[1]))}</div>`); }
+    else if (MD_ALLBOLD.test(line)) { flush(); out.push(`<div class="hd">${esc(cleanBold(line))}</div>`); }
+    else if ((m = MD_BULLET.exec(line))) { flush(); out.push(`<div class="li"><span class="mk">•</span><span class="tx">${esc(cleanBold(m[1]))}</span></div>`); }
+    else if ((m = MD_NUM.exec(line))) { flush(); out.push(`<div class="li num"><span class="mk">${m[1]}.</span><span class="tx">${esc(cleanBold(m[2]))}</span></div>`); }
+    else para.push(cleanBold(line));
+  }
+  flush();
+  return out.join('');
+}
+
 function renderThinkOpts() {
   $('#thinkOpts').innerHTML = `<button data-o="hideTasks" class="${st.hideTasks ? 'on' : ''}">背景タスクを隠す</button>` +
-    `<button data-o="showSrc" class="${st.showSrc ? 'on' : ''}">原文を併記</button>`;
+    `<button data-o="showSrc" class="${st.showSrc ? 'on' : ''}">原文を併記</button>` +
+    `<button data-o="clear">消す</button>`;
 }
 
 // ---------------- タブ・操作 ----------------
@@ -787,8 +954,9 @@ function bind() {
   });
   $('#thinkOpts').addEventListener('click', (e) => {
     const o = e.target.closest('button')?.dataset.o; if (!o) return;
+    if (o === 'clear') { logClear(); logRender(); return; }
     st[o] = !st[o]; store.set(o, st[o]); renderThinkOpts();
-    if (o === 'showSrc') redrawFeed();
+    if (o === 'showSrc') { for (const b of log.blocks) if (b.kind === 'think') b.dirty = true; logRender(); }
   });
   // 画面が隠れている間は読みに行かない・中継も切る (電池と通信のため)。戻ったらすぐ読む
   document.addEventListener('visibilitychange', () => { if (document.hidden) closeEvents(); else { connectEvents(); st.last.now = 0; pump(); } });
@@ -799,5 +967,6 @@ bind();
 setIv(0);
 setTab(location.hash.slice(1) || st.tab);   // #graph などでタブを選んで開ける (ホーム画面のブックマーク用)
 spInfo(null);
+logRender();
 connectEvents();
 setInterval(pump, 1000);
