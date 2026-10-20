@@ -110,12 +110,38 @@ canvas { display: block; width: 100%; }
 .hint { font-size: 11px; color: var(--muted); margin: 6px 2px; }
 .info { font-size: 12px; white-space: pre-wrap; background: var(--panel); border: 1px solid var(--grid); border-radius: 8px; padding: 6px 10px; margin-top: 8px; min-height: 2.8em; }
 
-/* 思考 */
+/* 思考: 上に原文 (リアルタイムの生の英文)、下に翻訳ログ (Windows アプリの TranslationLogPanel と同じ見せ方) */
+.loghead { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--muted); margin: 2px 0 3px; }
+.loghead b { color: var(--head); font-size: 13px; }
+.loghead #thinkHead { margin-left: auto; font-size: 11px; }
+.loghead .ok { color: var(--good); } .loghead .ng { color: var(--warn); }
 .think { white-space: pre-wrap; word-break: break-word; font: 11px/1.45 ui-monospace, Menlo, monospace; color: var(--muted); background: var(--barback);
-  border-radius: 8px; padding: 8px; margin: 4px 0 10px; max-height: 9.5em; overflow: hidden; }
-.feed { font-size: 14px; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-.feed .turn { color: var(--accent); font-size: 12px; margin: 10px 0 2px; }
-.feed .en { color: var(--en); }
-.feed .bad { color: var(--warn); }
-.feed .src { color: var(--muted); font-size: 11px; margin: 0 0 4px 10px; }
-.feed p { margin: 2px 0; }
+  border-radius: 8px; padding: 8px; margin: 0 0 8px; max-height: 9.5em; overflow: hidden; }
+.feed { font-size: 14px; line-height: 1.55; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+  border-top: 1px solid var(--grid); overflow-wrap: anywhere; }
+.feed .empty { color: var(--muted); text-align: center; padding: 40px 10px; }
+.feed .blk { padding-bottom: 10px; }
+/* ターンの見出し: 区切り線・#番号 だれ 時刻 モデル (明るい teal)・前 (きっかけ = 前のツール結果の断片) */
+.feed .turn { border-top: 1px solid var(--edge); margin-top: 6px; padding: 6px 0 2px; }
+.feed .turn .h { color: #5ad0c0; font-size: 13px; font-weight: 700; }
+.feed .turn .h span { margin-left: .6em; }
+.feed .turn .h .m { font-weight: 400; color: var(--muted); }
+.feed .turn .src { color: var(--muted); font-size: 11px; margin-top: 2px; }
+/* 思考: 和訳が入った = 白、英文のまま = 薄い白 */
+.feed .think-blk { color: var(--en); }
+.feed .think-blk.ja { color: var(--ink); }
+.feed .orig { color: var(--muted); font: 11px/1.45 ui-monospace, Menlo, monospace; margin-top: 6px; }
+.feed .label { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+/* 簡易マークダウン: 段落は段落らしく空け、箇条書き・番号は詰める、見出しは広め */
+.feed .md > * { margin: 8px 0 0; }
+.feed .md .hd { font-weight: 700; margin-top: 11px; }
+.feed .md .li { display: flex; margin-top: 3px; }
+.feed .md .li .mk { flex: none; width: 16px; padding-left: 2px; }
+.feed .md .li.num .mk { width: 26px; padding-left: 0; }
+.feed .md .li .tx { min-width: 0; }
+.feed .md > :first-child { margin-top: 0; }
+/* コード (Shell などの区切り) と 実行したコマンド: 暗い枠に左の色帯、等幅 */
+.feed .box { margin-left: 10px; background: var(--barback); border-left: 3px solid var(--cache); padding: 6px; border-radius: 2px;
+  white-space: pre-wrap; word-break: break-all; font: 12px/1.45 ui-monospace, Menlo, monospace; color: var(--en); }
+.feed .tools .box { border-left-color: var(--good); }
+.feed .answer .md { color: var(--ink); }
