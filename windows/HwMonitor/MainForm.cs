@@ -17,8 +17,7 @@ public sealed class MainForm : Form
     readonly EnergyPanel energy = new() { Dock = DockStyle.Fill, Visible = false };
     readonly SpeedPanel speed = new() { Dock = DockStyle.Fill, Visible = false };
     readonly TranslationLogPanel transLog;
-    readonly TranslationPanel translation;
-    readonly SplitContainer split;
+    readonly Panel content = new() { Dock = DockStyle.Fill, BackColor = Theme.Back };
     readonly ToolStrip bar = new() { GripStyle = ToolStripGripStyle.Hidden, Renderer = new DarkRenderer(), BackColor = Theme.Panel, ForeColor = Theme.Ink, Padding = new Padding(4, 2, 4, 2) };
     readonly ToolStripButton tabGraph = new("グラフ") { CheckOnClick = false };
     readonly ToolStripButton tabEnergy = new("電気代") { CheckOnClick = false };
@@ -35,9 +34,6 @@ public sealed class MainForm : Form
     readonly ToolStripLabel intervalLabel = new() { ToolTipText = "上のメーター・枠と、グラフ (120 秒・10 分) を取りに行く間隔" };
     readonly ToolStripButton faster = new("＋") { ToolTipText = "更新の間隔を短くする (2 秒まで)" };
     readonly ToolStripButton topMost = new("最前面") { CheckOnClick = true };
-    readonly ToolStripButton showJa = new("和訳") { CheckOnClick = true };
-    readonly ToolStripButton showSrc = new("原文を併記") { CheckOnClick = true, ToolTipText = "和訳の 1 区切りごとに、翻訳した英文を下に小さく出す" };
-    readonly ToolStripButton showThink = new("原文の欄") { CheckOnClick = true, ToolTipText = "和訳の上に、いま考えている英文を届いたそばから流す (和訳より早い)" };
     readonly ToolStripButton autoDeepL = new("DeepL") { CheckOnClick = true,
         ToolTipText = "押している間、新しく届いた英文 (訳されていない区切り) を DeepL で訳す。\n押していなくても、英文の行をクリックすればその区切りだけ訳す。\nキーは「設定…」で入れる" };
     readonly ToolStripLabel deeplUsage = new() { Alignment = ToolStripItemAlignment.Right };
@@ -55,12 +51,13 @@ public sealed class MainForm : Form
         api = new HwmonClient(() => settings.HwmonBase);
         feed = new HonyakuFeed(() => settings.HonyakuBase);
         transLog = new TranslationLogPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill, Visible = false };
-        translation = new TranslationPanel(feed, () => settings.HideTasks) { Dock = DockStyle.Fill };
         deepl = new DeepLService(settings);
-        translation.DeepL = deepl;
-        translation.AutoTranslate = () => settings.AutoTranslate;
-        translation.AutoStopped += why => { autoDeepL.Checked = false; deeplUsage.Text = why + "  "; deeplUsage.ForeColor = Theme.Warn; };
-        translation.NeedKey += () => OpenSettings("DeepL で訳すには、DeepL API のキーを入れてください");
+        transLog.DeepL = deepl;
+        transLog.AutoTranslate = () => settings.AutoTranslate;
+        transLog.AutoStopped += why => { autoDeepL.Checked = false; deeplUsage.Text = why + "  "; deeplUsage.ForeColor = Theme.Warn; };
+        transLog.NeedKey += () => OpenSettings("DeepL で訳すには、DeepL API のキーを入れてください");
+        transLog.ShowSource = settings.ShowSource;
+        transLog.ShowSourceChanged += () => { settings.ShowSource = transLog.ShowSource; settings.Save(); };
         deepl.Changed += ShowUsage;
         slots = new SlotPanel(feed.Turns) { Dock = DockStyle.Top, Height = 0 };
 
@@ -97,12 +94,6 @@ public sealed class MainForm : Form
         ApplyInterval();
         topMost.Checked = settings.TopMost;
         topMost.CheckedChanged += (_, _) => { TopMost = settings.TopMost = topMost.Checked; settings.Save(); };
-        showJa.Checked = settings.ShowTranslation;
-        showJa.CheckedChanged += (_, _) => { settings.ShowTranslation = showJa.Checked; ApplyTranslation(); settings.Save(); };
-        showSrc.Checked = settings.ShowSource;
-        showSrc.CheckedChanged += (_, _) => { settings.ShowSource = translation.ShowSource = showSrc.Checked; settings.Save(); };
-        showThink.Checked = settings.ShowThink;
-        showThink.CheckedChanged += (_, _) => { settings.ShowThink = translation.ShowThink = showThink.Checked; settings.Save(); };
         autoDeepL.Checked = settings.AutoTranslate;
         autoDeepL.CheckedChanged += (_, _) =>
         {
@@ -119,20 +110,17 @@ public sealed class MainForm : Form
         var setup = new ToolStripButton("設定…");
         setup.Click += (_, _) => OpenSettings();
         bar.Items.AddRange([tabGraph, tabEnergy, tabCost, tabSpeed, tabLog, new ToolStripSeparator(), deviceView, slower, intervalLabel, faster,
-                            new ToolStripSeparator(), topMost, showJa, showSrc, showThink, autoDeepL,
+                            new ToolStripSeparator(), topMost, autoDeepL,
                             new ToolStripSeparator(), setup, status, deeplUsage]);
 
-        // 真ん中 (グラフ / 電気代) と下 (和訳) は境目をドラッグで動かせる
-        split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, BackColor = Theme.Grid, SplitterWidth = 4 };
-        split.Panel1.BackColor = split.Panel2.BackColor = Theme.Back;
-        split.Panel1.Controls.Add(chart);
-        split.Panel1.Controls.Add(energy);
-        split.Panel1.Controls.Add(cost);
-        split.Panel1.Controls.Add(speed);
-        split.Panel1.Controls.Add(transLog);
-        split.Panel2.Controls.Add(translation);
+        // 真ん中: タブで切り替える 1 枚 (グラフ / 電気代 / コスト比較 / 速度と文脈 / 翻訳ログ)。見えているものだけ表示する
+        content.Controls.Add(chart);
+        content.Controls.Add(energy);
+        content.Controls.Add(cost);
+        content.Controls.Add(speed);
+        content.Controls.Add(transLog);
 
-        Controls.Add(split);
+        Controls.Add(content);
         Controls.Add(slots);
         Controls.Add(meters);
         Controls.Add(bar);
@@ -178,9 +166,7 @@ public sealed class MainForm : Form
         Load += async (_, _) =>
         {
             TopMost = settings.TopMost;
-            split.SplitterDistance = Math.Max(120, split.Height - 230);   // 和訳 (+原文の欄) に下の 230px
             SetTab(settings.Tab);
-            ApplyTranslation();
             feed.Start();
             nowTimer.Start();
             slowTimer.Start();
@@ -210,14 +196,6 @@ public sealed class MainForm : Form
         speed.Visible = tabSpeed.Checked = settings.Tab == "speed";
         transLog.Visible = tabLog.Checked = settings.Tab == "log";
         _ = RefreshSlow(force: true);
-    }
-
-    void ApplyTranslation()
-    {
-        split.Panel2Collapsed = !settings.ShowTranslation;
-        showSrc.Enabled = showThink.Enabled = settings.ShowTranslation;   // 和訳を隠しているときは原文の 2 つも押せない
-        translation.ShowSource = settings.ShowSource;
-        translation.ShowThink = settings.ShowThink;
     }
 
     // タイトルバーの版: csproj の <Version> と、ビルドしたときのコミット (SDK が InformationalVersion の + の後ろに入れる) の頭 7 桁。
@@ -388,7 +366,6 @@ public sealed class MainForm : Form
         speed.Invalidate();
         _ = deepl.RefreshUsage();
         settings.Save();
-        ApplyTranslation();
         feed.Start();   // 接続先が変わったかもしれないのでつなぎ直す
         _ = RefreshNow();
         _ = RefreshSlow(force: true);
